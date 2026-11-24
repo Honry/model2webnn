@@ -39,3 +39,10 @@ coverage/
 # npm pack
 *.tgz
 lib/
+
+# Python compiler
+python/_out/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+_out/

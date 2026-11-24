@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Honry/model2webnn/spec/package.schema.json",
+  "title": "m2w-package (m2w.json)",
+  "description": "The entry point of a model package written by `m2w compile`: what the package is, what it needs from the browser, and the checksum of every file.",
+  "type": "object",
+  "required": ["format", "version", "compiler", "target", "model", "plan", "weights_manifest", "files"],
+  "properties": {
+    "format": { "const": "m2w-package" },
+    "version": { "const": 0, "description": "Bumped on incompatible changes; a runtime must refuse a version it does not know. New optional fields do not bump it." },
+    "compiler": { "type": "string", "description": "e.g. 'm2w 0.0.1'" },
+    "target": { "type": "string", "description": "the profile the graphs were built for, e.g. 'webnn-ov-npu'" },
+    "source": { "type": "string", "description": "the Hugging Face repo id or path the package was compiled from" },
+    "model": { "type": "string", "description": "path of model.json" },
+    "plan": { "type": "string", "description": "path of plan.json" },
+    "chat_format": { "type": ["string", "null"], "description": "path of chat_format.json, null when the model has no usable chat template" },
+    "weights_manifest": { "type": "string" },
+    "tokenizer": { "type": "array", "items": { "type": "string" } },
+    "requires": {
+      "type": "object",
+      "properties": {
+        "webnn": {
+          "type": "object",
+          "properties": {
+            "ops": { "type": "array", "items": { "type": "string" } },
+            "dataTypes": { "type": "array", "items": { "type": "string" } },
+            "inputs_may_be_int4": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "every file of the package except m2w.json itself (and verification.json, the output of `m2w verify`)",
+      "items": {
+        "type": "object",
+        "required": ["path", "bytes", "sha256"],
+        "properties": { "path": { "type": "string" }, "bytes": { "type": "integer", "minimum": 0 }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "layers": { "type": "integer" }, "max_lengths": { "type": "array", "items": { "type": "integer" } },
+        "prefill_chunks": { "type": "array", "items": { "type": "integer" } }, "weights_bytes": { "type": "integer" }
+      }
+    }
+  }
+}

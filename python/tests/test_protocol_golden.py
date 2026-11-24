@@ -1,0 +1,59 @@
+"""Golden vectors of the host-side runtime protocol (tests/golden/protocol_vectors.json), read by the TS tests (src/runtime/protocol.test.ts) too."""
+import json
+import os
+from pathlib import Path
+
+import numpy as np
+
+from m2w.frontends.hf_llm import rope as rope_lib
+from m2w.frontends.hf_llm.arch import spec_from_config
+from m2w.reference import protocol
+
+from tiny_model import CONFIG
+
+GOLDEN = Path(__file__).resolve().parents[2] / "tests" / "golden" / "protocol_vectors.json"
+P, C, R = 23, 8, 4
+
+
+def visible_columns(mask):   # [rows, cols] f16 -> per row the indices that are 0
+    return [np.flatnonzero(row == 0).tolist() for row in mask.reshape(-1, mask.shape[-1])]
+
+
+def f(arr, digits=6):
+    return np.round(arr.astype(np.float32).reshape(-1), digits).tolist()
+
+
+def build():
+    spec = spec_from_config(CONFIG)
+    out = {"spec": {"layer_types": spec.layer_types, "sliding_window": spec.sliding_window, "head_dim": spec.head_dim, "rope": spec.rope}, "P": P, "C": C, "R": R}
+    rope = protocol.rope_tables(spec, [5, 6, 7], C, 5)      # a left-padded chunk: 5 pad rows, 3 real rows at positions 5..7
+    out["rope_padded_chunk"] = {"positions": [5, 6, 7], "rows": C, "pad": 5, **{t: {"cos": f(c), "sin": f(s)} for t, (c, s) in rope.items()}}
+    out["prefill_full_chunk"] = {"start": 0, "valid": 8, "masks": {t: visible_columns(m) for t, m in protocol.prefill_masks(spec, P, C, 0, 8).items()}}
+    masks = protocol.prefill_masks(spec, P, C, 16, 5)        # start 16, 5 real rows -> 3 pad rows; sliding window 16 hides cache rows < qpos - 15
+    out["prefill_padded_chunk"] = {"start": 16, "valid": 5, "masks": {t: visible_columns(m) for t, m in masks.items()}}
+    keep, selector = protocol.prefill_selectors(P, C, 16, 5)
+    out["prefill_padded_selectors"] = {"rows_to_keep": f(keep), "row_selector_ones": np.argwhere(selector.reshape(P, C) == 1).tolist()}
+    out["decode"] = {"pos": 23, "base": 21, "filled": 2,
+                     "masks": {t: visible_columns(m) for t, m in protocol.decode_masks(spec, P, R, 23, 21, 2).items()}}
+    keep, selector = protocol.decode_selectors(R, 2)
+    out["decode_selectors"] = {"rows_to_keep": f(keep), "row_selector": f(selector)}
+    for base in (20, 22):
+        keep, selector = protocol.flush_selectors(P, R, base)
+        out[f"flush_{base}"] = {"base": base, "rows_to_keep": f(keep), "row_selector_ones": np.argwhere(selector.reshape(P, R) == 1).tolist()}
+    # RoPE: default and YaRN tables of the real Aion entries
+    aion = {"sliding_attention": {"type": "default", "theta": 32000.0},
+            "full_attention": {"type": "yarn", "theta": 32000.0, "factor": 16.0, "original_max_position_embeddings": 2048, "beta_fast": 32.0, "beta_slow": 1.0}}
+    out["rope_aion"] = {}
+    for name, entry in aion.items():
+        inv, factor = rope_lib.inv_freq_for(entry, 128)
+        cos, sin = rope_lib.cos_sin([0, 1, 100, 2047], inv, factor)
+        out["rope_aion"][name] = {"entry": entry, "head_dim": 128, "positions": [0, 1, 100, 2047], "inv_freq": f(inv, 9), "attention_factor": float(factor),
+                                  "cos": f(cos, 5), "sin": f(sin, 5)}
+    return out
+
+
+def test_protocol_vectors_are_current():
+    text = json.dumps(build(), separators=(",", ":"))
+    if os.environ.get("UPDATE_GOLDEN"):
+        GOLDEN.write_text(text + "\n", encoding="utf-8", newline="\n")
+    assert GOLDEN.read_text(encoding="utf-8").strip() == text, "stale: run `UPDATE_GOLDEN=1 pytest tests/test_protocol_golden.py`"

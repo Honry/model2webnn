@@ -1,0 +1,570 @@
+{
+ "format": "m2w-graph",
+ "version": 0,
+ "name": "tiny_all_ops",
+ "inputs": [
+  {
+   "name": "x",
+   "dataType": "float32",
+   "shape": [
+    1,
+    4,
+    8
+   ],
+   "role": "activation"
+  },
+  {
+   "name": "q",
+   "dataType": "int4",
+   "shape": [
+    2,
+    6,
+    4
+   ],
+   "role": "weight"
+  },
+  {
+   "name": "s",
+   "dataType": "float16",
+   "shape": [
+    2,
+    6,
+    1
+   ],
+   "role": "weight"
+  },
+  {
+   "name": "cache",
+   "dataType": "float16",
+   "shape": [
+    1,
+    2,
+    6,
+    4
+   ],
+   "role": "kv"
+  },
+  {
+   "name": "rows",
+   "dataType": "float16",
+   "shape": [
+    1,
+    2,
+    2,
+    4
+   ],
+   "role": "activation"
+  },
+  {
+   "name": "index",
+   "dataType": "int32",
+   "shape": [
+    1
+   ],
+   "role": "control"
+  }
+ ],
+ "constants": [
+  {
+   "name": "const0",
+   "dataType": "int4",
+   "shape": [
+    2,
+    6,
+    1
+   ],
+   "fill": 0
+  },
+  {
+   "name": "const12",
+   "dataType": "float32",
+   "shape": [
+    1,
+    1,
+    1
+   ],
+   "fill": 1
+  },
+  {
+   "name": "const13",
+   "dataType": "float32",
+   "shape": [
+    1,
+    1,
+    1
+   ],
+   "fill": 2
+  },
+  {
+   "name": "const16",
+   "dataType": "float32",
+   "shape": [
+    1,
+    1,
+    1
+   ],
+   "fill": 1e-06
+  },
+  {
+   "name": "const35",
+   "dataType": "float16",
+   "shape": [
+    1,
+    1
+   ],
+   "fill": 1e-06
+  }
+ ],
+ "nodes": [
+  {
+   "op": "dequantizeLinear",
+   "inputs": [
+    "q",
+    "s",
+    "const0"
+   ],
+   "outputs": [
+    "v1"
+   ]
+  },
+  {
+   "op": "dequantizeLinear",
+   "inputs": [
+    "q",
+    "s",
+    null
+   ],
+   "outputs": [
+    "v2"
+   ]
+  },
+  {
+   "op": "add",
+   "inputs": [
+    "v1",
+    "v2"
+   ],
+   "outputs": [
+    "v3"
+   ]
+  },
+  {
+   "op": "transpose",
+   "inputs": [
+    "v3"
+   ],
+   "outputs": [
+    "v4"
+   ],
+   "options": {
+    "permutation": [
+     1,
+     0,
+     2
+    ]
+   }
+  },
+  {
+   "op": "reshape",
+   "inputs": [
+    "v4"
+   ],
+   "outputs": [
+    "v5"
+   ],
+   "options": {
+    "newShape": [
+     6,
+     8
+    ]
+   }
+  },
+  {
+   "op": "cast",
+   "inputs": [
+    "v5"
+   ],
+   "outputs": [
+    "v6"
+   ],
+   "options": {
+    "to": "float32"
+   }
+  },
+  {
+   "op": "reshape",
+   "inputs": [
+    "x"
+   ],
+   "outputs": [
+    "v7"
+   ],
+   "options": {
+    "newShape": [
+     4,
+     8
+    ]
+   }
+  },
+  {
+   "op": "gemm",
+   "inputs": [
+    "v7",
+    "v6"
+   ],
+   "outputs": [
+    "v8"
+   ],
+   "options": {
+    "bTranspose": true
+   }
+  },
+  {
+   "op": "reshape",
+   "inputs": [
+    "v8"
+   ],
+   "outputs": [
+    "v9"
+   ],
+   "options": {
+    "newShape": [
+     1,
+     4,
+     6
+    ]
+   }
+  },
+  {
+   "op": "reshape",
+   "inputs": [
+    "v6"
+   ],
+   "outputs": [
+    "v10"
+   ],
+   "options": {
+    "newShape": [
+     1,
+     6,
+     8
+    ]
+   }
+  },
+  {
+   "op": "matmul",
+   "inputs": [
+    "v9",
+    "v10"
+   ],
+   "outputs": [
+    "v11"
+   ]
+  },
+  {
+   "op": "pow",
+   "inputs": [
+    "v11",
+    "const13"
+   ],
+   "outputs": [
+    "v14"
+   ]
+  },
+  {
+   "op": "reduceMean",
+   "inputs": [
+    "v14"
+   ],
+   "outputs": [
+    "v15"
+   ],
+   "options": {
+    "axes": [
+     2
+    ],
+    "keepDimensions": true
+   }
+  },
+  {
+   "op": "add",
+   "inputs": [
+    "v15",
+    "const16"
+   ],
+   "outputs": [
+    "v17"
+   ]
+  },
+  {
+   "op": "sqrt",
+   "inputs": [
+    "v17"
+   ],
+   "outputs": [
+    "v18"
+   ]
+  },
+  {
+   "op": "div",
+   "inputs": [
+    "const12",
+    "v18"
+   ],
+   "outputs": [
+    "v19"
+   ]
+  },
+  {
+   "op": "mul",
+   "inputs": [
+    "v11",
+    "v19"
+   ],
+   "outputs": [
+    "v20"
+   ]
+  },
+  {
+   "op": "reduceMax",
+   "inputs": [
+    "v20"
+   ],
+   "outputs": [
+    "v21"
+   ],
+   "options": {
+    "axes": [
+     2
+    ],
+    "keepDimensions": true
+   }
+  },
+  {
+   "op": "sub",
+   "inputs": [
+    "v20",
+    "v21"
+   ],
+   "outputs": [
+    "v22"
+   ]
+  },
+  {
+   "op": "softmax",
+   "inputs": [
+    "v22"
+   ],
+   "outputs": [
+    "v23"
+   ],
+   "options": {
+    "axis": 2
+   }
+  },
+  {
+   "op": "sigmoid",
+   "inputs": [
+    "v20"
+   ],
+   "outputs": [
+    "v24"
+   ]
+  },
+  {
+   "op": "mul",
+   "inputs": [
+    "v23",
+    "v24"
+   ],
+   "outputs": [
+    "v25"
+   ]
+  },
+  {
+   "op": "reduceSum",
+   "inputs": [
+    "v25"
+   ],
+   "outputs": [
+    "v26"
+   ],
+   "options": {
+    "axes": [
+     1
+    ],
+    "keepDimensions": false
+   }
+  },
+  {
+   "op": "slice",
+   "inputs": [
+    "v26"
+   ],
+   "outputs": [
+    "v27"
+   ],
+   "options": {
+    "starts": [
+     0,
+     0
+    ],
+    "sizes": [
+     1,
+     4
+    ]
+   }
+  },
+  {
+   "op": "slice",
+   "inputs": [
+    "v26"
+   ],
+   "outputs": [
+    "v28"
+   ],
+   "options": {
+    "starts": [
+     0,
+     4
+    ],
+    "sizes": [
+     1,
+     4
+    ]
+   }
+  },
+  {
+   "op": "concat",
+   "inputs": [
+    "v27",
+    "v28"
+   ],
+   "outputs": [
+    "v29"
+   ],
+   "options": {
+    "axis": 1
+   }
+  },
+  {
+   "op": "reshape",
+   "inputs": [
+    "v29"
+   ],
+   "outputs": [
+    "v30"
+   ],
+   "options": {
+    "newShape": [
+     1,
+     1,
+     1,
+     8
+    ]
+   }
+  },
+  {
+   "op": "expand",
+   "inputs": [
+    "v30"
+   ],
+   "outputs": [
+    "v31"
+   ],
+   "options": {
+    "newShape": [
+     1,
+     2,
+     3,
+     8
+    ]
+   }
+  },
+  {
+   "op": "reshape",
+   "inputs": [
+    "v31"
+   ],
+   "outputs": [
+    "v32"
+   ],
+   "options": {
+    "newShape": [
+     1,
+     6,
+     8
+    ]
+   }
+  },
+  {
+   "op": "tensorScatter",
+   "inputs": [
+    "cache",
+    "rows",
+    "index"
+   ],
+   "outputs": [
+    "v33"
+   ],
+   "options": {
+    "axis": 2
+   }
+  },
+  {
+   "op": "cast",
+   "inputs": [
+    "v29"
+   ],
+   "outputs": [
+    "v34"
+   ],
+   "options": {
+    "to": "float16"
+   }
+  },
+  {
+   "op": "mul",
+   "inputs": [
+    "v34",
+    "const35"
+   ],
+   "outputs": [
+    "v36"
+   ]
+  }
+ ],
+ "outputs": [
+  {
+   "name": "e",
+   "dataType": "float32",
+   "shape": [
+    1,
+    6,
+    8
+   ],
+   "value": "v32"
+  },
+  {
+   "name": "updated",
+   "dataType": "float16",
+   "shape": [
+    1,
+    2,
+    6,
+    4
+   ],
+   "value": "v33"
+  },
+  {
+   "name": "half_const",
+   "dataType": "float16",
+   "shape": [
+    1,
+    8
+   ],
+   "value": "v36"
+  }
+ ],
+ "meta": {}
+}

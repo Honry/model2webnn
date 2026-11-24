@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Honry/model2webnn/spec/graph.schema.json",
+  "title": "m2w-graph",
+  "description": "A statically shaped WebNN-level graph. One node = one MLGraphBuilder call. No weight data is stored: constants are literals (fill / data) or references to the weights package (external).",
+  "type": "object",
+  "required": ["format", "version", "name", "inputs", "constants", "nodes", "outputs"],
+  "properties": {
+    "format": { "const": "m2w-graph" },
+    "version": { "const": 0, "description": "Bumped on incompatible changes; readers must reject versions they do not know." },
+    "name": { "type": "string" },
+    "inputs": { "type": "array", "items": { "$ref": "#/$defs/input" } },
+    "constants": { "type": "array", "items": { "$ref": "#/$defs/constant" } },
+    "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+    "outputs": { "type": "array", "items": { "$ref": "#/$defs/output" } },
+    "meta": { "type": "object" }
+  },
+  "$defs": {
+    "dataType": { "enum": ["float32", "float16", "int32", "int64", "int8", "uint8", "int4", "uint4"] },
+    "shape": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+    "input": {
+      "type": "object",
+      "required": ["name", "dataType", "shape"],
+      "properties": {
+        "name": { "type": "string" },
+        "dataType": { "$ref": "#/$defs/dataType" },
+        "shape": { "$ref": "#/$defs/shape" },
+        "role": { "enum": ["activation", "weight", "kv", "control"], "description": "How the runtime plan binds the tensor." }
+      }
+    },
+    "constant": {
+      "type": "object",
+      "required": ["name", "dataType", "shape"],
+      "oneOf": [{ "required": ["fill"] }, { "required": ["data"] }, { "required": ["external"] }],
+      "properties": {
+        "name": { "type": "string" },
+        "dataType": { "$ref": "#/$defs/dataType" },
+        "shape": { "$ref": "#/$defs/shape" },
+        "fill": { "type": "number", "description": "every element has this value" },
+        "data": { "type": "array", "items": { "type": "number" }, "description": "row-major literal values (int4 / uint4: one value per element)" },
+        "external": { "type": "string", "description": "name of a tensor in the weights manifest" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["op", "inputs", "outputs"],
+      "properties": {
+        "op": {
+          "enum": ["add", "sub", "mul", "div", "pow", "sqrt", "sigmoid", "cast", "reshape", "transpose", "slice", "concat", "expand",
+                   "reduceMean", "reduceMax", "reduceSum", "softmax", "matmul", "gemm", "dequantizeLinear", "tensorScatter"]
+        },
+        "inputs": { "type": "array", "items": { "type": ["string", "null"] }, "description": "operand names; null = an omitted optional operand (dequantizeLinear zero point)" },
+        "outputs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 1 },
+        "options": {
+          "type": "object",
+          "description": "WebNN names: cast {to}; reshape/expand {newShape}; transpose {permutation}; slice {starts,sizes}; concat/softmax/tensorScatter {axis}; reduce* {axes,keepDimensions}; gemm {aTranspose,bTranspose}"
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["name", "dataType", "shape", "value"],
+      "properties": {
+        "name": { "type": "string" },
+        "dataType": { "$ref": "#/$defs/dataType" },
+        "shape": { "$ref": "#/$defs/shape" },
+        "value": { "type": "string", "description": "name of the operand that is this output" }
+      }
+    }
+  }
+}

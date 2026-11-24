@@ -1,0 +1,25 @@
+{
+  "name": "qwen3-like",
+  "description": "Llama-style pre-norm decoder with per-head RMSNorm on q and k (Qwen3, Aion-1.0-Instruct): GQA, SwiGLU, RMSNorm, rotate-half RoPE, no biases",
+  "architectures": ["Qwen3ForCausalLM", "AionInstructForCausalLM"],
+  "qk_norm": true,
+  "chat_template_kwargs": { "Qwen3ForCausalLM": { "enable_thinking": false } },
+  "tensors": {
+    "embed": "model.embed_tokens.weight",
+    "final_norm": "model.norm.weight",
+    "lm_head": "lm_head.weight",
+    "layer": {
+      "input_layernorm": "model.layers.{i}.input_layernorm.weight",
+      "q_proj": "model.layers.{i}.self_attn.q_proj.weight",
+      "k_proj": "model.layers.{i}.self_attn.k_proj.weight",
+      "v_proj": "model.layers.{i}.self_attn.v_proj.weight",
+      "o_proj": "model.layers.{i}.self_attn.o_proj.weight",
+      "q_norm": "model.layers.{i}.self_attn.q_norm.weight",
+      "k_norm": "model.layers.{i}.self_attn.k_norm.weight",
+      "post_attention_layernorm": "model.layers.{i}.post_attention_layernorm.weight",
+      "gate_proj": "model.layers.{i}.mlp.gate_proj.weight",
+      "up_proj": "model.layers.{i}.mlp.up_proj.weight",
+      "down_proj": "model.layers.{i}.mlp.down_proj.weight"
+    }
+  }
+}

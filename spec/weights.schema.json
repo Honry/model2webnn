@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Honry/model2webnn/spec/weights.schema.json",
+  "title": "m2w-weights (weights/manifest.json)",
+  "description": "The weight shards of a package: per-layer files of int4 (nibble-packed, low nibble first) and float16 tensors named exactly like the graph inputs, plus the embedding / lm_head table.",
+  "type": "object",
+  "required": ["format", "version", "quant", "files"],
+  "properties": {
+    "format": { "const": "m2w-weights" },
+    "version": { "const": 0 },
+    "quant": {
+      "type": "object",
+      "properties": {
+        "bits": { "const": 4 }, "group_size": { "type": "integer" }, "symmetric": { "type": "boolean" }, "signed_scale": { "type": "boolean", "description": "scale = (element of the largest magnitude) / -8" },
+        "layout": { "const": "group-major", "description": "int4 weights are [groups, outputChannels, group_size], scales [groups, outputChannels, 1]" },
+        "pack": { "const": "low-nibble-first" }, "scale_dtype": { "const": "float16" }, "gamma_dtype": { "const": "float16" }, "merge_projections": { "type": "boolean" },
+        "embedding": {
+          "type": "object",
+          "properties": { "bits": { "const": 8 }, "asymmetric": { "type": "boolean" }, "granularity": { "const": "row" }, "padded_vocab": { "type": "integer" } }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "role", "bytes", "sha256", "tensors"],
+        "properties": {
+          "file": { "type": "string" }, "role": { "enum": ["layer", "final_norm", "embedding"] }, "layer": { "type": "integer" },
+          "bytes": { "type": "integer" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "relative_error": { "type": "object", "description": "per projection: squared quantization error / squared norm of the weight (layer files)" },
+          "tensors": {
+            "type": "array",
+            "items": {
+              "type": "object", "required": ["name", "dtype", "shape", "offset", "bytes"],
+              "properties": {
+                "name": { "type": "string" }, "dtype": { "enum": ["int4", "float16", "uint8", "int8"] },
+                "shape": { "type": "array", "items": { "type": "integer" } }, "offset": { "type": "integer" }, "bytes": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

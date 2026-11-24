@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Honry/model2webnn/spec/plan.schema.json",
+  "title": "m2w-plan (plan.json)",
+  "description": "How the runtime drives the graphs: which graph for which phase / max length / chunk, which weights feed which half of a layer, and the profile the graphs were built with.",
+  "type": "object",
+  "required": ["format", "version", "target", "profile", "max_lengths", "prefill_chunks", "staging_rows", "graphs", "weights"],
+  "properties": {
+    "format": { "const": "m2w-plan" },
+    "version": { "const": 0 },
+    "target": { "type": "string" },
+    "profile": {
+      "type": "object",
+      "description": "the GraphOptions the graphs were built with",
+      "properties": {
+        "compute_type": { "enum": ["float32", "float16"] }, "zero_point": { "enum": ["const", "none"] }, "merge_projections": { "type": "boolean" },
+        "kv_style": { "enum": ["staged", "onehot", "tensorScatter"] }, "staging_rows": { "type": "integer" }, "scatter_index_type": { "enum": ["int32", "int64"] },
+        "lm_head_format": { "enum": ["int8-sym", "uint8-asym"], "description": "absent in older packages = uint8-asym" }
+      }
+    },
+    "max_lengths": { "type": "array", "items": { "type": "integer" } },
+    "prefill_chunks": { "type": "array", "items": { "type": "integer" } },
+    "staging_rows": { "type": "integer" },
+    "blocks_per_graph": { "type": "array", "items": { "type": "integer" } },
+    "weights": {
+      "type": "object",
+      "description": "tensor names of the weights manifest by the half of the layer they feed: a graph input with such a name is bound to that tensor of the layer",
+      "required": ["attention", "ffn", "final_norm", "embedding"],
+      "properties": {
+        "attention": { "type": "array", "items": { "type": "string" } }, "ffn": { "type": "array", "items": { "type": "string" } },
+        "final_norm": { "type": "array", "items": { "type": "string" } },
+        "embedding": { "type": "array", "items": { "type": "string" }, "description": "lm_head_weight, lm_head_scale (+ lm_head_zero_point for uint8-asym)" }
+      }
+    },
+    "graphs": {
+      "type": "object",
+      "required": ["lm_head", "decode", "prefill"],
+      "properties": {
+        "lm_head": { "type": "string" },
+        "decode": {
+          "type": "object",
+          "description": "max length -> graphs",
+          "additionalProperties": {
+            "type": "object", "required": ["head", "block", "tail", "flush"],
+            "properties": {
+              "head": { "type": "string" }, "block": { "type": "string" }, "tail": { "type": "string" }, "flush": { "type": "string" },
+              "block_groups": { "type": "object", "description": "number of blocks -> graph with that many blocks (single layer type models only)", "additionalProperties": { "type": "string" } }
+            }
+          }
+        },
+        "prefill": {
+          "type": "object",
+          "description": "max length -> chunk size -> graphs",
+          "additionalProperties": { "type": "object", "additionalProperties": { "type": "object", "required": ["head", "block", "tail"], "properties": { "head": { "type": "string" }, "block": { "type": "string" }, "tail": { "type": "string" } } } }
+        }
+      }
+    },
+    "chain": { "type": "object", "description": "documentation of the dispatch chain (HEAD, BLOCK i = ffn of layer i + attention of layer i+1, TAIL, lm_head)" },
+    "per_layer_type_inputs": { "type": "object" },
+    "kv": { "type": "object" },
+    "logits": { "type": "object", "properties": { "padded_vocab": { "type": "integer" }, "vocab": { "type": "integer" } } }
+  }
+}

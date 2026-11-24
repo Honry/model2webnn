@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "model2webnn"
+version = "0.0.1"
+description = "Compile Hugging Face LLMs into static-shape WebNN graphs + weights (NPUW-style split)"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["numpy>=1.26"]
+
+[project.optional-dependencies]
+hf = ["safetensors>=0.4", "huggingface_hub>=0.24", "jinja2>=3.1", "tokenizers>=0.19"]
+verify = ["torch", "transformers"]
+dev = ["pytest>=8", "jsonschema>=4"]
+
+[project.scripts]
+m2w = "m2w.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["m2w*"]
+
+[tool.setuptools.package-data]
+"m2w.frontends.hf_llm" = ["families/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]

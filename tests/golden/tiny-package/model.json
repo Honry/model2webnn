@@ -1,0 +1,64 @@
+{
+ "format": "m2w-model",
+ "version": 0,
+ "architecture": "AionInstructForCausalLM",
+ "family": "qwen3-like",
+ "hidden": 256,
+ "num_layers": 3,
+ "num_heads": 4,
+ "num_kv_heads": 2,
+ "head_dim": 64,
+ "ffn": 256,
+ "vocab": 300,
+ "vocab_padded": 384,
+ "eps": 1e-06,
+ "qk_norm": true,
+ "tie_embeddings": true,
+ "activation": "silu",
+ "max_position_embeddings": 4096,
+ "layer_types": [
+  "sliding_attention",
+  "full_attention",
+  "sliding_attention"
+ ],
+ "sliding_window": 16,
+ "rope": {
+  "full_attention": {
+   "type": "yarn",
+   "theta": 10000.0,
+   "factor": 4.0,
+   "original_max_position_embeddings": 1024,
+   "beta_fast": 32.0,
+   "beta_slow": 1.0
+  },
+  "sliding_attention": {
+   "type": "default",
+   "theta": 10000.0
+  }
+ },
+ "eos_token_ids": [
+  2
+ ],
+ "bos_token_id": 1,
+ "pad_token_id": null,
+ "group_size": 128,
+ "tensors": {
+  "embed": "model.embed_tokens.weight",
+  "final_norm": "model.norm.weight",
+  "lm_head": "lm_head.weight",
+  "layer": {
+   "input_layernorm": "model.layers.{i}.input_layernorm.weight",
+   "q_proj": "model.layers.{i}.self_attn.q_proj.weight",
+   "k_proj": "model.layers.{i}.self_attn.k_proj.weight",
+   "v_proj": "model.layers.{i}.self_attn.v_proj.weight",
+   "o_proj": "model.layers.{i}.self_attn.o_proj.weight",
+   "q_norm": "model.layers.{i}.self_attn.q_norm.weight",
+   "k_norm": "model.layers.{i}.self_attn.k_norm.weight",
+   "post_attention_layernorm": "model.layers.{i}.post_attention_layernorm.weight",
+   "gate_proj": "model.layers.{i}.mlp.gate_proj.weight",
+   "up_proj": "model.layers.{i}.mlp.up_proj.weight",
+   "down_proj": "model.layers.{i}.mlp.down_proj.weight"
+  }
+ },
+ "chat_template_kwargs": {}
+}

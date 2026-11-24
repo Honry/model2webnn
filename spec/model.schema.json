@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Honry/model2webnn/spec/model.schema.json",
+  "title": "m2w-model (model.json)",
+  "description": "The decoder described independently of any framework: dimensions, layer types, RoPE per layer type, tokens. Everything a graph cannot see (RoPE tables, sliding windows, EOS) is resolved here by the compiler.",
+  "type": "object",
+  "required": ["format", "version", "architecture", "hidden", "num_layers", "num_heads", "num_kv_heads", "head_dim", "ffn", "vocab", "vocab_padded", "eps", "layer_types", "rope", "eos_token_ids"],
+  "properties": {
+    "format": { "const": "m2w-model" },
+    "version": { "const": 0 },
+    "architecture": { "type": "string", "description": "the Hugging Face architecture string, e.g. Qwen3ForCausalLM" },
+    "family": { "type": "string", "description": "the architecture family (m2w/frontends/hf_llm/families/*.json)" },
+    "hidden": { "type": "integer" }, "num_layers": { "type": "integer", "minimum": 2 }, "num_heads": { "type": "integer" },
+    "num_kv_heads": { "type": "integer" }, "head_dim": { "type": "integer" }, "ffn": { "type": "integer" },
+    "vocab": { "type": "integer", "description": "the real vocabulary: argmax / sampling look at the first `vocab` logits only" },
+    "vocab_padded": { "type": "integer", "description": "what the lm_head graph computes (a multiple of 128; padded rows dequantize to 0)" },
+    "eps": { "type": "number" }, "qk_norm": { "type": "boolean" }, "tie_embeddings": { "type": "boolean" }, "activation": { "const": "silu" },
+    "max_position_embeddings": { "type": "integer" },
+    "layer_types": { "type": "array", "items": { "enum": ["full_attention", "sliding_attention"] }, "description": "one per layer" },
+    "sliding_window": { "type": ["integer", "null"] },
+    "rope": {
+      "type": "object",
+      "description": "layer type -> RoPE of the layers of that type",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "theta"],
+        "properties": {
+          "type": { "enum": ["default", "linear", "yarn"] }, "theta": { "type": "number" }, "factor": { "type": "number" },
+          "original_max_position_embeddings": { "type": "integer" }, "beta_fast": { "type": "number" }, "beta_slow": { "type": "number" },
+          "attention_factor": { "type": "number" }, "mscale": { "type": "number" }, "mscale_all_dim": { "type": "number" }, "truncate": { "type": "boolean" }
+        }
+      }
+    },
+    "eos_token_ids": { "type": "array", "items": { "type": "integer" } },
+    "bos_token_id": { "type": ["integer", "null"] }, "pad_token_id": { "type": ["integer", "null"] },
+    "group_size": { "type": "integer", "description": "int4 quantization block size along the input channels" },
+    "tensors": { "type": "object", "description": "role -> Hugging Face tensor name (templates with {i}); only the compiler reads this" },
+    "chat_template_kwargs": { "type": "object" }
+  }
+}

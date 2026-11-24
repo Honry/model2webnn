@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Honry/model2webnn/spec/chat-format.schema.json",
+  "title": "m2w-chat (chat_format.json)",
+  "description": "The string pieces of the model's chat template, cut out by rendering it with sentinel messages (the runtime never runs jinja). Turn 1 = first_prefix [or first_prefix_with_system with <<system>> replaced] + user text + user_suffix_generation_prompt; later turns = previous answer + assistant_suffix + next_user_prefix + user text + user_suffix_generation_prompt. A finished turn is rendered with user_suffix_assistant_prefix instead of the generation prompt. <<date:fmt>> is replaced by strftime(fmt) of the current time.",
+  "type": "object",
+  "required": ["format", "version", "first_prefix", "first_prefix_with_system", "user_suffix_generation_prompt", "assistant_suffix", "next_user_prefix", "user_suffix_assistant_prefix"],
+  "properties": {
+    "format": { "const": "m2w-chat" },
+    "version": { "const": 0 },
+    "template_kwargs": { "type": "object", "description": "e.g. {\"enable_thinking\": false} for Qwen3" },
+    "first_prefix": { "type": "string" },
+    "first_prefix_with_system": { "type": "string" },
+    "user_suffix_generation_prompt": { "type": "string" },
+    "assistant_suffix": { "type": "string" },
+    "next_user_prefix": { "type": "string" },
+    "user_suffix_assistant_prefix": { "type": "string" }
+  }
+}

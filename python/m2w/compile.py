@@ -1,0 +1,155 @@
+"""m2w compile: a Hugging Face decoder -> a model package for the static NPUW-style WebNN runtime.
+
+    <out>/m2w.json            the single entry point: format, compiler version, target, requires, file index (sizes, sha256), model + plan summary
+    <out>/model.json          ModelSpec (architecture, dims, layer types, RoPE per layer type, tokens)
+    <out>/plan.json           which graph for which phase / max length / chunk, how weights and per-layer-type inputs are bound
+    <out>/chat_format.json    prompt pieces derived from the chat template
+    <out>/graphs/*.json       m2w-graph documents (spec/graph.schema.json)
+    <out>/weights/            manifest.json + per-layer shards (hf_llm/pack.py)
+    <out>/tokenizer/          tokenizer.json, tokenizer_config.json, generation_config.json, ...
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from dataclasses import asdict
+from pathlib import Path
+from typing import Callable, Optional
+
+from . import __version__
+from .frontends.hf_llm import arch, chat_format, hub, pack
+from .frontends.hf_llm.builders import decoder as D
+from .frontends.hf_llm.safetensors_io import TensorStore
+from .ir import serialize
+
+TARGET = "webnn-ov-npu"
+PACKAGE_FORMAT = "m2w-package"
+PACKAGE_VERSION = 0
+TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json", "chat_template.jinja", "chat_template.json",
+                   "vocab.json", "merges.txt")
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, max_lengths, chunks, blocks_per_graph) -> dict:
+    """Write every graph variant and return the plan's 'graphs' table (names relative to the package root)."""
+    dims = spec.decoder_dims()
+    gdir = out / "graphs"
+    gdir.mkdir(parents=True, exist_ok=True)
+
+    def emit(graph) -> str:
+        serialize.dump(graph, gdir / f"{graph.name}.json")
+        return f"graphs/{graph.name}.json"
+
+    table: dict = {"lm_head": emit(D.build_lm_head_graph(dims, opt)), "decode": {}, "prefill": {}}
+    for L in max_lengths:
+        past = L - 1
+        decode = {"head": emit(D.build_head_graph(dims, opt, seq=1, past_len=past, name=f"decode_head_L{L}")),
+                  "block": emit(D.build_block_graph(dims, opt, seq=1, past_len=past, name=f"decode_block_L{L}")),
+                  "tail": emit(D.build_tail_graph(dims, opt, seq=1, name="decode_tail")),
+                  "flush": emit(D.build_kv_update_graph(dims, seq=opt.staging_rows, past_len=past, name=f"kv_flush_L{L}")), "block_groups": {}}
+        for k in blocks_per_graph:
+            if k > 1:
+                for count in sorted({k, (spec.num_layers - 1) % k} - {0}):
+                    decode["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, opt, block_count=count, seq=1, past_len=past, name=f"decode_block_x{count}_L{L}"))
+        table["decode"][str(L)] = decode
+        table["prefill"][str(L)] = {}
+        for C in chunks:
+            if C > past:
+                continue
+            table["prefill"][str(L)][str(C)] = {
+                "head": emit(D.build_head_graph(dims, opt, seq=C, past_len=past, name=f"prefill_head_L{L}_C{C}")),
+                "block": emit(D.build_block_graph(dims, opt, seq=C, past_len=past, name=f"prefill_block_L{L}_C{C}")),
+                "tail": emit(D.build_tail_graph(dims, opt, seq=C, name=f"prefill_tail_C{C}"))}
+    return table
+
+
+def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, graphs: dict, max_lengths, chunks, blocks_per_graph) -> dict:
+    dims = spec.decoder_dims()
+    return {
+        "format": "m2w-plan", "version": 0, "target": TARGET,
+        "weights": {
+            "description": "tensor names of the weights manifest, by the half of the layer they feed (a graph input with such a name is bound to that tensor of the layer)",
+            "attention": [n for n, _, _ in D.attention_weight_specs(dims, opt)],
+            "ffn": [n for n, _, _ in D.feed_forward_weight_specs(dims, opt)],
+            "final_norm": ["final_norm_gamma"],
+            "embedding": [n for n, _, _ in D.lm_head_weight_specs(dims, opt)],
+        },
+        "profile": asdict(opt),
+        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "staging_rows": opt.staging_rows, "blocks_per_graph": list(blocks_per_graph),
+        "graphs": graphs,
+        "chain": {
+            "description": "HEAD = attention half of layer 0; BLOCK i (i = 0 .. N-2) = feed-forward half of layer i + attention half of layer i+1; TAIL = feed-forward half of layer N-1 "
+                           "+ final norm; lm_head. Per layer the runtime binds the weights of the 'attention_weights' layer and the 'ffn_weights' layer from the weights manifest.",
+            "num_layers": spec.num_layers,
+            "head": {"attention_layer": 0}, "block": {"ffn_layer": "i", "attention_layer": "i+1"}, "tail": {"ffn_layer": "N-1"},
+        },
+        "per_layer_type_inputs": {
+            "description": "rope_cos / rope_sin / attention_mask of an attention half are bound with the tables of the layer type of ITS layer (see model.json: layer_types, rope, sliding_window)",
+            "inputs": ["rope_cos", "rope_sin", "attention_mask"],
+        },
+        "kv": {"style": opt.kv_style, "value_layout": "natural", "main_cache_rows": "max_length - 1", "staging_rows": opt.staging_rows,
+               "prefill": "chunks of the chunk size, the last chunk is left-padded; one-hot row selectors write the real rows",
+               "decode": "the new row goes into a staging buffer; attention reads concat(main cache, staging); flush graph moves the staging rows into the main cache every staging_rows steps"},
+        "logits": {"padded_vocab": spec.vocab_padded, "vocab": spec.vocab, "note": "argmax / sampling over the first `vocab` entries only"},
+    }
+
+
+def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), staging_rows: int = 64, blocks_per_graph=(1,), compute_type: str = "float32",
+                  merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4, endpoint: Optional[str] = None, cache_dir=None,
+                  progress: Callable[[str], None] = print) -> Path:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    for owned in ("graphs", "weights", "tokenizer"):   # directories the compiler owns: files of an earlier compile (another format, fewer layers ...) must not linger in the package
+        shutil.rmtree(out / owned, ignore_errors=True)
+    source = hub.resolve_model(model, cache_dir=cache_dir, endpoint=endpoint, progress=progress)
+    config = json.loads((source / "config.json").read_text(encoding="utf-8"))
+    generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
+    spec = arch.spec_from_config(config, generation_config)
+    for L in max_lengths:
+        if L % 64:
+            progress(f"warning: max length {L} is not a multiple of 64 (the NPU compiler returned NaN for some attention lengths that are not)")
+        if L > spec.max_position_embeddings:
+            raise ValueError(f"max length {L} exceeds the model's max_position_embeddings {spec.max_position_embeddings}")
+    opt = D.GraphOptions(compute_type=compute_type, merge_projections=merge_projections, kv_style="staged", staging_rows=staging_rows, lm_head_format=lm_head_format)
+    progress(f"{spec.architecture}: {spec.num_layers} layers, hidden {spec.hidden}, {spec.num_heads}/{spec.num_kv_heads} heads, vocab {spec.vocab} (padded {spec.vocab_padded}), "
+             f"layer types {sorted(set(spec.layer_types))}")
+
+    store = TensorStore.open(source)
+    manifest = pack.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress)
+    graphs = write_graphs(spec, opt, out, max_lengths, chunks, blocks_per_graph)
+    plan = build_plan(spec, opt, graphs, max_lengths, chunks, blocks_per_graph)
+    (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
+    (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
+
+    chat_file = None
+    try:
+        fmt = chat_format.derive_chat_format(chat_format.load_template(source), spec.chat_template_kwargs)
+        (out / "chat_format.json").write_text(json.dumps(fmt, indent=1, ensure_ascii=False), encoding="utf-8", newline="\n")
+        chat_file = "chat_format.json"
+    except (chat_format.ChatTemplateError, OSError, KeyError) as e:
+        progress(f"warning: no chat format derived ({e}); the runtime can only complete raw text")
+    (out / "tokenizer").mkdir(exist_ok=True)
+    tokenizer_files = [n for n in TOKENIZER_FILES if (source / n).exists() and not shutil.copy2(source / n, out / "tokenizer" / n)]
+
+    files = sorted(p for p in out.rglob("*") if p.is_file() and p.name not in ("m2w.json", "verification.json"))   # verification.json is the output of `m2w verify`, not part of the package
+    source_name = Path(model).name if Path(model).is_dir() else model   # a local folder is recorded by its name, never by its absolute path
+    index = {
+        "format": PACKAGE_FORMAT, "version": PACKAGE_VERSION, "compiler": f"m2w {__version__}", "target": TARGET, "source": source_name,
+        "model": "model.json", "plan": "plan.json", "chat_format": chat_file, "weights_manifest": "weights/manifest.json",
+        "tokenizer": [f"tokenizer/{n}" for n in tokenizer_files],
+        "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"],
+                               "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
+        "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
+        "summary": {"layers": spec.num_layers, "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "weights_bytes": sum(f["bytes"] for f in manifest["files"])},
+    }
+    (out / "m2w.json").write_text(json.dumps(index, indent=1), encoding="utf-8", newline="\n")
+    progress(f"wrote {out} ({index['summary']['weights_bytes'] / 2**20:.0f} MB of weights, {len(files)} files)")
+    return out
