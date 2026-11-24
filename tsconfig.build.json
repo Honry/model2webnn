@@ -16,5 +16,5 @@
     "moduleDetection": "force"
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/web/**"]
+  "exclude": ["src/web/**", "src/**/*.test.ts", "src/runtime/mock-ml.ts"]
 }

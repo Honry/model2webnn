@@ -1,7 +1,7 @@
 {
   "name": "model2webnn",
   "version": "0.1.0-alpha.1",
-  "description": "Convert ML models (.onnx, .tflite) into ready-to-run WebNN API JavaScript/TypeScript code",
+  "description": "Convert ML models (.onnx, .tflite) into ready-to-run WebNN API JavaScript/TypeScript code; run LLM packages compiled by the Python `m2w` tool with WebNN (model2webnn/runtime)",
   "type": "module",
   "license": "Apache-2.0",
   "bin": {
@@ -13,6 +13,10 @@
     ".": {
       "import": "./lib/index.js",
       "types": "./lib/index.d.ts"
+    },
+    "./runtime": {
+      "import": "./lib/runtime/index.js",
+      "types": "./lib/runtime/index.d.ts"
     }
   },
   "files": [
