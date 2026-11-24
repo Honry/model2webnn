@@ -75,6 +75,30 @@ result.unresolvedFreeDims; // symbolic dimension names not yet overridden
 
 ---
 
+## LLM packages: Hugging Face model → static WebNN graphs (`m2w`)
+
+Decoder-only LLMs have a second path next to the ONNX / TFLite converter. The Python tool in [`python/`](python/README.md) compiles a Hugging Face model into a **model package**: static-shape WebNN graphs split the way OpenVINO's NPUW splits them (HEAD / one shared BLOCK graph with the weights as inputs / TAIL / lm_head), int4 block-128 weights, the tokenizer and the chat format. The runtime in [`src/runtime`](src/runtime) (`model2webnn/runtime`) loads such a package in the browser and runs chunked prefill and staged-KV decode on WebNN. Python and TypeScript only meet at the package files, described by the JSON Schemas in [`spec/`](spec).
+
+```bash
+pip install -e "python[hf]"
+m2w inspect microsoft/Aion-1.0-Instruct-2.3B                    # supported? layers, RoPE, estimated size (downloads config files only)
+m2w compile microsoft/Aion-1.0-Instruct-2.3B --out aion         # add --endpoint https://hf-mirror.com where huggingface.co is not reachable
+m2w verify  aion --source microsoft/Aion-1.0-Instruct-2.3B      # run the package on the CPU and compare with the original model
+```
+
+```javascript
+import { LLM, chat, tokenizerFromTransformersJs } from 'model2webnn/runtime';
+
+const llm = await LLM.load('https://example.com/aion/', { device: 'npu' });   // a package folder: a URL, 'hf:owner/repo', or new DirectorySource(await showDirectoryPicker())
+const lib = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js');
+const tokenizer = await tokenizerFromTransformersJs(lib, llm.pkg);
+for await (const piece of chat(llm, tokenizer, [{ user: 'What is the capital of France?' }])) output.textContent += piece;
+```
+
+Models run so far: Qwen3-4B and Aion-1.0-Instruct-2.3B (a hybrid sliding / full attention model with two RoPE types). Supported architectures are described by data (`python/m2w/frontends/hf_llm/families/`); see the [Python README](python/README.md) for what is and is not supported yet.
+
+---
+
 ## Output files
 
 | File | Description |
@@ -223,15 +247,20 @@ src/
 │   ├── onnx/         Op builders, ported 1:1 from ORT WebNN provider
 │   └── tflite/       TFLite op builders
 ├── weights/packer.ts WGWT binary + manifest generation
+├── runtime/          LLM packages: package loader, IR loader, scheduler, chat (model2webnn/runtime)
 ├── codegen/
 │   ├── javascript.ts .js output — WeightsFile class + buildGraph()
 │   ├── typescript.ts .ts output — adds WebNN type declarations
 │   └── html.ts       .html output — runnable test harness
-└── web/
-    ├── app.ts        upload → convert → preview → download
-    ├── upload.ts     file / folder / URL ingestion
-    ├── preview.ts    Monaco editor preview
-    └── download.ts   per-file and ZIP download
+├── web/
+│   ├── app.ts        upload → convert → preview → download
+│   ├── upload.ts     file / folder / URL ingestion
+│   ├── preview.ts    Monaco editor preview
+│   └── download.ts   per-file and ZIP download
+python/               m2w: Hugging Face LLM → model package (separate Python package)
+spec/                 JSON Schemas of the package files
+tests/golden/         fixtures shared by the Python and TypeScript tests
+scripts/              helper scripts (the tiny test package)
 ```
 
 ---
@@ -243,8 +272,10 @@ npm install      # install dependencies
 npm run dev      # Vite dev server with HMR
 npm run build    # production build → dist/
 npm run lint     # tsc --noEmit
-npm test         # vitest
+npm test         # vitest (src/**/*.test.ts: the LLM runtime, run against a validating mock of WebNN and the golden vectors written by the Python reference)
 ```
+
+The Python compiler (`python/`) has its own tests: `pip install -e "python[hf,dev]" && python -m pytest python`. Needs Node 24+ (the runtime uses `Float16Array`) and Python 3.10+.
 
 ### Adding an ONNX operator
 
