@@ -132,7 +132,7 @@ def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_l
     return c.to_f16(projected), {"updated_key": updated_key, "updated_value": updated_value}
 
 
-def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int):
+def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, probes: dict | None = None):
     """Gated DeltaNet. -> (attention_output f16 [1,S,hidden], {new_conv_state, new_recurrent_state})"""
     b, h = c.b, spec.hidden
     d = linear_dims(spec)
@@ -184,6 +184,8 @@ def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int):
     z4 = b.reshape(z, [1, seq, hv, dv])
     gated = b.reshape(b.mul(normed, silu(c, z4)), [1, seq, vw])
     projected = quantized_linear(c, gated, w["output_projection_weight"], w["output_projection_scale"], vw, h, seq)
+    if probes is not None:   # intermediate results as extra outputs (build_head_graph(probe=True)): where does a device deviate from the interpreter? see tools/qwen35_probe.py
+        probes.update(normalized=normalized, qkvz=qkvz, ba=ba, beta=beta, g=g, conv=conv, q=heads(q), k=heads(k), v=heads(v), core=out, new_state=new_state, normed=normed, projected=projected)
     return c.to_f16(projected), {"new_conv_state": new_conv_state, "new_recurrent_state": c.to_f16(new_state)}
 
 
@@ -211,16 +213,20 @@ def _outputs(b: GraphBuilder, kv_out: dict) -> None:
         b.output(k, v)
 
 
-def build_head_graph(spec, opt: GraphOptions, *, seq: int, past_len: int, name: str = "head"):
-    """attention half of layer 0 -> residual, attention_output (+ the state outputs of that layer's kind)."""
+def build_head_graph(spec, opt: GraphOptions, *, seq: int, past_len: int, name: str = "head", probe: bool = False):
+    """attention half of layer 0 -> residual, attention_output (+ the state outputs of that layer's kind). probe: also every intermediate result of a linear attention half as p_<name>."""
     b = GraphBuilder(name)
     kind = spec.layer_kind(0)
     c = _ctx(b, spec, opt)
     x = c.to_compute(c.declare("hidden_states", "float16", [1, seq, spec.hidden]))
-    attention_output, kv_out = attention_half(c, spec, kind, x, c.weights(attention_weight_specs(spec, kind)), seq, past_len, opt)
+    probes = {} if probe and kind == "linear_attention" else None
+    weights = c.weights(attention_weight_specs(spec, kind))
+    attention_output, kv_out = attention_half_linear(c, spec, x, weights, seq, probes) if probes is not None else attention_half(c, spec, kind, x, weights, seq, past_len, opt)
     b.output("residual", c.to_f16(x))
     b.output("attention_output", attention_output)
     _outputs(b, kv_out)
+    for key, value in (probes or {}).items():
+        b.output(f"p_{key}", c.to_f16(value))
     return b.build()
 
 
