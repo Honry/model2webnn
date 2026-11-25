@@ -6,6 +6,7 @@
 // Session options (variant = KV protocol x compute type x staging rows, chunk sizes, blocks per graph, max length) can be changed with reconfigure(): the weights stay
 // on the device, the graphs are rebuilt and the state (KV cache, activations) is reallocated.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
+import { emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import { openPackage, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
   decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables,
@@ -44,15 +45,8 @@ export interface GenerateOptions {
   topK?: number;
   signal?: AbortSignal;
 }
-/** Per decode step: host = writing the step inputs, enqueue = queueing the dispatches (incl. a flush when due), wait = reading the logits (the device finishing the chain), sampling = picking the token. */
-export interface StepTiming { hostMs: number; enqueueMs: number; waitMs: number; samplingMs: number; totalMs: number }
-export interface Stats {
-  loadMs: number; buildMs: number; weightsMs: number; prefillMs: number; prefillChunks: number; promptTokens: number; decodeSteps: number; decodeMs: number; tpotMs: number;
-  stepMs: number[]; steps: StepTiming[]; flushes: number; prefillPlan: number[];
-}
-const emptyStats = (): Stats => ({ loadMs: 0, buildMs: 0, weightsMs: 0, prefillMs: 0, prefillChunks: 0, promptTokens: 0, decodeSteps: 0, decodeMs: 0, tpotMs: 0, stepMs: [], steps: [], flushes: 0, prefillPlan: [] });
+export type { StepTiming, Stats } from './llm-common.js';
 
-interface Built { name: string; graph: ML; inputs: string[]; outputs: string[] }
 interface Activations {
   hidden: ML; ropeCos: Record<string, ML>; ropeSin: Record<string, ML>; mask: Record<string, ML>;
   residuals: ML[]; attentionOutputs: ML[]; finalHidden: ML;
@@ -116,10 +110,15 @@ export class LLM {
 
   // ------------------------------------------------------------------------------------------------------------------------------- loading
   static async load(src: string | PackageSource, options: LoadOptions = {}): Promise<LLM> {
-    const t0 = performance.now();
     const progress = options.onProgress ?? (() => {});
     progress({ stage: 'package', message: 'reading the package index' });
-    const pkg = await openPackage(src, options.cache ?? true, { segments: options.downloadSegments });
+    return LLM.loadFrom(await openPackage(src, options.cache ?? true, { segments: options.downloadSegments }), options);
+  }
+
+  static async loadFrom(pkg: ModelPackage, options: LoadOptions = {}): Promise<LLM> {
+    const t0 = performance.now();
+    const progress = options.onProgress ?? (() => {});
+    if (pkg.plan.architecture_kind) throw new Error(`this package needs the ${pkg.plan.architecture_kind} runtime: use loadModel() instead of LLM.load()`);
     const llm = new LLM(pkg);
     llm.adopt(llm.resolve(options));   // fails early (before anything is downloaded) when the package lacks what is asked for
     await llm.init(options, progress);
@@ -354,7 +353,7 @@ export class LLM {
   /** One forward pass: HEAD, the BLOCKs and (last chunk / decode) TAIL + lm_head. All host inputs of the phase are already written. */
   private enqueue(size: number, lastChunk: boolean) {   // size 0 = decode, else the chunk size of the prefill set
     const decode = size === 0, set = (decode ? this.decodeSet : this.prefillSets.get(size)) as DecodeSet | PrefillSet, a = decode ? this.dec : (set as PrefillSet).act;
-    const w = this.pkg.plan.weights, types = this.pkg.model.layer_types, N = this.N, stagedDecode = decode && this.style === 'staged';
+    const w = this.pkg.plan.weights as { attention: string[]; ffn: string[] }, types = this.pkg.model.layer_types, N = this.N, stagedDecode = decode && this.style === 'staged';
     const caches = stagedDecode ? this.stg : this.kv, spare = stagedDecode ? this.stgSpare : this.kvSpare;
     const selectors: Record<string, ML> = this.style === 'tensorScatter' ? { kv_write_index: this.writeIndexTensor }
       : this.style === 'scatterND' ? { kv_indices: decode ? this.decodeIndices : (set as PrefillSet).indices }
@@ -579,22 +578,4 @@ export class LLM {
     for (const t of this.weightTensors) t.destroy?.();
     this.weightTensors = []; this.weights = [];
   }
-}
-
-/** Starts the downloads in order, at most `window` ahead of the consumer (so the whole model is never held in memory at once). */
-class Prefetcher {
-  private tasks = new Map<number, Promise<ArrayBuffer>>();
-  private started = new Set<number>();
-  constructor(private files: string[], private fetchOne: (file: string, index: number) => Promise<ArrayBuffer>, private window: number) {}
-  get(index: number): Promise<ArrayBuffer> {
-    for (let i = 0; i < Math.min(this.files.length, index + this.window); i++) {
-      if (this.started.has(i)) continue;
-      this.started.add(i);
-      const task = this.fetchOne(this.files[i], i);
-      task.catch(() => {});   // reported when consumed
-      this.tasks.set(i, task);
-    }
-    return this.tasks.get(index) as Promise<ArrayBuffer>;
-  }
-  release(index: number) { this.tasks.delete(index); }
 }

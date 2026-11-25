@@ -1,0 +1,94 @@
+{
+ "format": "m2w-model",
+ "version": 0,
+ "architecture": "Gemma4ForConditionalGeneration",
+ "family": "gemma4",
+ "hidden": 128,
+ "num_layers": 6,
+ "num_heads": 4,
+ "num_kv_heads": 2,
+ "head_dim": 32,
+ "ffn": 256,
+ "vocab": 300,
+ "vocab_padded": 384,
+ "eps": 1e-06,
+ "qk_norm": true,
+ "tie_embeddings": true,
+ "activation": "gelu_tanh",
+ "max_position_embeddings": 4096,
+ "layer_types": [
+  "sliding_attention",
+  "sliding_attention",
+  "full_attention",
+  "sliding_attention",
+  "full_attention",
+  "sliding_attention"
+ ],
+ "sliding_window": 16,
+ "rope": {
+  "full_attention": {
+   "type": "proportional",
+   "theta": 1000000.0,
+   "partial_rotary_factor": 0.25
+  },
+  "sliding_attention": {
+   "type": "default",
+   "theta": 10000.0
+  }
+ },
+ "eos_token_ids": [
+  1,
+  106
+ ],
+ "bos_token_id": 2,
+ "pad_token_id": 0,
+ "group_size": 128,
+ "tensors": {
+  "embed": "model.language_model.embed_tokens.weight",
+  "final_norm": "model.language_model.norm.weight",
+  "lm_head": "lm_head.weight",
+  "ple_embed": "model.language_model.embed_tokens_per_layer.weight",
+  "ple_projection": "model.language_model.per_layer_model_projection.weight",
+  "ple_projection_norm": "model.language_model.per_layer_projection_norm.weight",
+  "layer": {
+   "input_layernorm": "model.language_model.layers.{i}.input_layernorm.weight",
+   "q_proj": "model.language_model.layers.{i}.self_attn.q_proj.weight",
+   "k_proj": "model.language_model.layers.{i}.self_attn.k_proj.weight",
+   "v_proj": "model.language_model.layers.{i}.self_attn.v_proj.weight",
+   "o_proj": "model.language_model.layers.{i}.self_attn.o_proj.weight",
+   "q_norm": "model.language_model.layers.{i}.self_attn.q_norm.weight",
+   "k_norm": "model.language_model.layers.{i}.self_attn.k_norm.weight",
+   "post_attention_layernorm": "model.language_model.layers.{i}.post_attention_layernorm.weight",
+   "pre_feedforward_layernorm": "model.language_model.layers.{i}.pre_feedforward_layernorm.weight",
+   "post_feedforward_layernorm": "model.language_model.layers.{i}.post_feedforward_layernorm.weight",
+   "gate_proj": "model.language_model.layers.{i}.mlp.gate_proj.weight",
+   "up_proj": "model.language_model.layers.{i}.mlp.up_proj.weight",
+   "down_proj": "model.language_model.layers.{i}.mlp.down_proj.weight",
+   "per_layer_input_gate": "model.language_model.layers.{i}.per_layer_input_gate.weight",
+   "per_layer_projection": "model.language_model.layers.{i}.per_layer_projection.weight",
+   "post_per_layer_input_norm": "model.language_model.layers.{i}.post_per_layer_input_norm.weight",
+   "layer_scalar": "model.language_model.layers.{i}.layer_scalar"
+  }
+ },
+ "chat_template_kwargs": {},
+ "builder": "gemma4",
+ "layer_dims": {
+  "full_attention": {
+   "head_dim": 64,
+   "num_heads": 4,
+   "num_kv_heads": 2
+  }
+ },
+ "kv_producer": [
+  -1,
+  -1,
+  -1,
+  -1,
+  2,
+  3
+ ],
+ "ple_dim": 128,
+ "embed_scale": 11.313708498984761,
+ "attention_scale": 1.0,
+ "logit_softcap": 30.0
+}

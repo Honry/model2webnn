@@ -26,7 +26,11 @@ export interface LayoutSpec {
   sliding_window: number | null;
   head_dim: number;
   rope: Record<string, RopeEntry>;
+  layer_dims?: Record<string, { head_dim?: number }>;   // layer types whose head dim differs from head_dim (Gemma 4 full attention)
 }
+
+/** the head dim of the attention of a layer type */
+export const headDimOf = (spec: LayoutSpec, layerType: string): number => spec.layer_dims?.[layerType]?.head_dim ?? spec.head_dim;
 
 export const layerTypesOf = (spec: LayoutSpec): string[] => [...new Set(spec.layer_types)].sort();
 
@@ -43,13 +47,14 @@ const firstVisible = (spec: LayoutSpec, layerType: string, qPos: number) => (lay
 export function ropeTables(spec: LayoutSpec, positions: number[], rows: number, pad: number): Record<string, { cos: Half; sin: Half }> {
   const out: Record<string, { cos: Half; sin: Half }> = {};
   for (const type of layerTypesOf(spec)) {
-    const { invFreq, attentionFactor } = invFreqFor(spec.rope[type], spec.head_dim);
+    const dim = headDimOf(spec, type);
+    const { invFreq, attentionFactor } = invFreqFor(spec.rope[type], dim);
     const table = cosSin(positions, invFreq, attentionFactor);
-    const cos = newHalf(rows * spec.head_dim), sin = newHalf(rows * spec.head_dim);
+    const cos = newHalf(rows * dim), sin = newHalf(rows * dim);
     for (let row = 0; row < rows; row++) {
-      const source = Math.max(0, row - pad) * spec.head_dim;
-      cos.set(table.cos.subarray(source, source + spec.head_dim), row * spec.head_dim);
-      sin.set(table.sin.subarray(source, source + spec.head_dim), row * spec.head_dim);
+      const source = Math.max(0, row - pad) * dim;
+      cos.set(table.cos.subarray(source, source + dim), row * dim);
+      sin.set(table.sin.subarray(source, source + dim), row * dim);
     }
     out[type] = { cos, sin };
   }
@@ -222,5 +227,23 @@ export function scatterNDDecodeMasks(spec: LayoutSpec, P: number, pos: number): 
 export function scatterNDDecodeIndices(kvHeads: number, pos: number): Int32Array {
   const out = new Int32Array(kvHeads * 3);
   for (let h = 0; h < kvHeads; h++) { out[h * 3] = 0; out[h * 3 + 1] = h; out[h * 3 + 2] = pos; }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------- attention over another layer's updated cache
+/** layer type -> mask float16 [C * P] for a layer that reads the (already updated) cache of another layer in a prefill chunk (Gemma 4 KV sharing): columns are cache rows; a real row sees the rows up
+ *  to its position (window of its layer type), a pad row sees row 0 only (any visible column keeps the softmax finite; its output is never used) */
+export function incachePrefillMasks(spec: LayoutSpec, P: number, C: number, start: number, valid: number): Record<string, Half> {
+  const pad = C - valid, out: Record<string, Half> = {};
+  for (const type of layerTypesOf(spec)) {
+    const mask = newHalf(C * P).fill(HIDDEN);
+    for (let row = 0; row < C; row++) {
+      const base = row * P;
+      if (row < pad) { mask[base] = 0; continue; }
+      const qPos = start + (row - pad);
+      mask.fill(0, base + firstVisible(spec, type, qPos), base + qPos + 1);
+    }
+    out[type] = mask;
+  }
   return out;
 }

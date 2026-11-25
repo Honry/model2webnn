@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { cosSin, invFreqFor } from './rope.js';
 import {
   decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, planPrefill, prefillMasks, prefillSelectors, ropeTables, scatterDecodeMasks, scatterPrefillMasks,
-  scatterNDDecodeIndices, scatterNDDecodeMasks, scatterNDPrefillIndices, scatterNDPrefillMasks, scatterPrefillRope, type LayoutSpec,
+  incachePrefillMasks, scatterNDDecodeIndices, scatterNDDecodeMasks, scatterNDPrefillIndices, scatterNDPrefillMasks, scatterPrefillRope, type LayoutSpec,
 } from './protocol.js';
 
 // vectors written by python/tests/test_protocol_golden.py from the Python reference
@@ -93,6 +93,10 @@ describe('protocol', () => {
     const d = g.scatternd_decode, decode = scatterNDDecodeMasks(spec, P, d.pos);
     for (const type of Object.keys(d.masks)) expect(visibleColumns(decode[type], 1)).toEqual(d.masks[type]);
     expect(Array.from(scatterNDDecodeIndices(d.kv_heads, d.pos))).toEqual(d.indices);
+  });
+  it('masks of a layer that reads the updated cache of another layer (KV sharing)', () => {
+    const v = g.incache_prefill, masks = incachePrefillMasks(spec, P, C, v.start, v.valid);
+    for (const type of Object.keys(v.masks)) expect(visibleColumns(masks[type], C)).toEqual(v.masks[type]);
   });
   it('prefill planning picks the same chunk sequences as the reference', () => {
     for (const v of g.plans) expect(planPrefill(v.sizes, v.tokens, v.fixed)).toEqual(v.plan);

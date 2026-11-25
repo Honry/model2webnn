@@ -7,8 +7,16 @@ export interface ModelSpecJson {
   architecture: string; hidden: number; num_layers: number; num_heads: number; num_kv_heads: number; head_dim: number; ffn: number;
   vocab: number; vocab_padded: number; eps: number; qk_norm: boolean; tie_embeddings: boolean; max_position_embeddings: number;
   layer_types: string[]; sliding_window: number | null; rope: Record<string, RopeEntry>; eos_token_ids: number[]; bos_token_id: number | null; group_size: number;
+  builder?: string;                                                                   // "gemma4" for Gemma-style models
+  layer_dims?: Record<string, { head_dim: number; num_heads: number; num_kv_heads: number }>;   // layer types whose attention dims differ from the defaults above
+  kv_producer?: number[];                                                             // per layer: the layer whose K / V it attends over, -1 = its own (empty / absent: nothing shared)
+  ple_dim?: number; embed_scale?: number; attention_scale?: number | null; logit_softcap?: number;
 }
-export interface GraphTable { head: string; block: string; tail: string; flush?: string; block_groups?: Record<string, string> }
+export interface GraphTable {
+  head: string; block: string; tail: string; flush?: string; block_groups?: Record<string, string>;
+  blocks?: Record<string, string>;                // Gemma 4: one block graph per attention kind (instead of `block`)
+}
+export interface GemmaDecodeTable { head: string; blocks: Record<string, string>; tail: string; flush: Record<string, string> }
 /** One set of graphs of the package: a KV protocol x a compute type (x the staging rows of the staged protocol). Weights are shared by all variants. */
 export interface Variant { id: string; kv_style: 'staged' | 'onehot' | 'tensorScatter' | 'scatterND'; compute_type: 'float32' | 'float16'; staging_rows?: number; scatter_index_type?: 'int32' | 'int64'; value_layout?: 'natural' | 'transposed' }
 export interface VariantGraphs { lm_head: string; decode: Record<string, GraphTable>; prefill: Record<string, Record<string, GraphTable>> }
@@ -17,11 +25,12 @@ export interface Plan {
   variants: Variant[]; default_variant: string;
   block_group_controls?: 'shared' | 'per_block';   // block groups: one rope / mask for all blocks (single layer type), or b<j>_rope_cos / b<j>_attention_mask per block (hybrid models)
   graphs: Record<string, VariantGraphs>;
-  weights: { attention: string[]; ffn: string[]; final_norm: string[]; embedding: string[] };
+  weights: { attention: string[] | Record<string, string[]>; ffn: string[]; final_norm: string[]; embedding: string[]; head_extra?: string[]; ple_table?: string[] };
+  architecture_kind?: 'gemma4';
   profile: { merge_projections: boolean; lm_head_format: string };
 }
 export interface ManifestTensor { name: string; dtype: string; shape: number[]; offset: number; bytes: number }
-export interface ManifestFile { file: string; role: 'layer' | 'final_norm' | 'embedding'; layer?: number; bytes: number; tensors: ManifestTensor[] }
+export interface ManifestFile { file: string; role: 'layer' | 'final_norm' | 'embedding' | 'head_extra' | 'ple_table'; layer?: number; kind?: string; bytes: number; tensors: ManifestTensor[] }
 export interface WeightsManifest { quant: { group_size: number; merge_projections: boolean }; files: ManifestFile[] }
 export interface ChatFormat {
   template_kwargs: Record<string, unknown>; first_prefix: string; first_prefix_with_system: string; user_suffix_generation_prompt: string;
@@ -37,6 +46,8 @@ export interface PackageSource {
   text(path: string): Promise<string>;
   /** `size`: the size of the file when the caller knows it (m2w.json lists it), which saves a round trip for the segmented download of a UrlSource */
   bytes(path: string, progress?: (loaded: number, total: number) => void, size?: number): Promise<ArrayBuffer>;
+  /** bytes [start, end) of a file, without reading the rest (the per-layer embedding table of Gemma 4 is read one row per token) */
+  slice?(path: string, start: number, end: number): Promise<ArrayBuffer>;
 }
 
 export interface UrlSourceOptions {
@@ -70,6 +81,13 @@ export class UrlSource implements PackageSource {
   }
 
   /** A big file as parallel byte ranges written into one pre-sized buffer; null when the file is small or the server does not serve ranges (the caller then fetches it in one request). */
+  async slice(path: string, start: number, end: number): Promise<ArrayBuffer> {
+    const response = await fetch(this.url(path), { headers: { Range: `bytes=${start}-${end - 1}` }, cache: 'no-store' });
+    if (response.status === 206) return response.arrayBuffer();
+    if (!response.ok) throw new Error(`failed to fetch ${this.url(path)}: ${response.status}`);
+    return (await response.arrayBuffer()).slice(start, end);   // a server without ranges answers with the whole file
+  }
+
   private async segmentedBytes(path: string, progress: ((loaded: number, total: number) => void) | undefined, size?: number): Promise<ArrayBuffer | null> {
     const url = this.url(path);
     let total = size ?? 0;
@@ -137,6 +155,7 @@ export class DirectorySource implements PackageSource {
   }
   async text(path: string) { return (await this.file(path)).text(); }
   async bytes(path: string) { return (await this.file(path)).arrayBuffer(); }
+  async slice(path: string, start: number, end: number) { return (await this.file(path)).slice(start, end).arrayBuffer(); }
 }
 
 /** Wraps a source with an OPFS cache keyed by the package id AND the sha256 of every file (from m2w.json): a recompiled file with the same size is a different cache entry. */
@@ -146,6 +165,10 @@ export class CachedSource implements PackageSource {
   constructor(private inner: PackageSource, private cacheName = 'm2w-packages') { this.id = inner.id; }
   setFiles(files: { path: string; bytes: number; sha256: string }[]) { for (const f of files) this.files.set(f.path, { bytes: f.bytes, sha256: f.sha256 }); }
   text(path: string) { return this.inner.text(path); }
+  slice(path: string, start: number, end: number) {
+    if (!this.inner.slice) throw new Error('this package source cannot read byte ranges');
+    return this.inner.slice(path, start, end);
+  }
   private async directory(create: boolean) {
     const root = await navigator.storage.getDirectory();
     const cache = await root.getDirectoryHandle(this.cacheName, { create });

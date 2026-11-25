@@ -1,0 +1,469 @@
+// LLM runtime for Gemma 4 packages (plan.architecture_kind === 'gemma4'): the same NPUW-style chain as llm.ts (HEAD / BLOCK x (N-1) / TAIL / lm_head, chunked prefill, staged KV), with
+//  * one BLOCK graph per attention KIND (layer type x own / shared K / V): BLOCK i = feed-forward half of layer i + attention half of layer i + 1 of the kind of layer i + 1;
+//  * KV caches only for the layers that have K / V of their own; a layer that shares K / V reads the cache of its producer (decode: main cache + the staging buffer AFTER this step's update,
+//    prefill: the cache after the update of the chunk, mask columns = cache rows);
+//  * per-layer embeddings: a row of the int8 table per token is read on the host (a byte range of the file: the table is gigabytes), HEAD turns it into the per-layer inputs ple_0 .. ple_{N-1};
+//  * the embedding is multiplied by sqrt(hidden) on the host.
+// Python counterpart (the executable specification): python/m2w/reference/gemma4_runner.py. Only the staged KV protocol exists; there are no block groups.
+import { loadGraph, type GraphDoc } from './ir-loader.js';
+import { emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
+import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
+import { openPackage, type GemmaDecodeTable, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
+import {
+  decodeMasks, decodeSelectors, flushSelectors, incachePrefillMasks, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables, type Half,
+} from './protocol.js';
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type ML = any;
+
+interface Activations {
+  hidden: ML; pleToken: ML; ropeCos: Record<string, ML>; ropeSin: Record<string, ML>; mask: Record<string, ML>; maskShared: Record<string, ML>;
+  residuals: ML[]; attentionOutputs: ML[]; ples: ML[]; finalHidden: ML;
+}
+interface Selectors { keep: ML; select: ML }
+interface PrefillSet { head: Built; blocks: Map<string, Built>; tail: Built; act: Activations; sel: Selectors }
+type Cache = { key: ML; value: ML };
+
+export class Gemma4LLM {
+  readonly pkg: ModelPackage;
+  maxLength = 0;
+  variant!: Variant;
+  chunkSizes: number[] = [];
+  stats: Stats = emptyStats();
+
+  private ctx!: ML;
+  private P = 0; private R = 0; private N: number;
+  private fixedTokens = 200;
+  private types: string[]; private kinds: string[]; private producer: number[];
+  private weights: Record<string, ML>[] = [];
+  private headExtra: Record<string, ML> = {};
+  private finalGamma!: ML;
+  private lmHead!: Built;
+  private decodeSet!: { head: Built; blocks: Map<string, Built>; tail: Built; flush: Map<string, Built> };
+  private prefillSets = new Map<number, PrefillSet>();
+  private kv = new Map<number, Cache>(); private kvSpare = new Map<number, Cache>(); private stg = new Map<number, Cache>(); private stgSpare = new Map<number, Cache>();
+  private dec!: Activations;
+  private decodeSel!: Selectors; private flushSel!: Selectors;
+  private logitsTensor!: ML; private logits!: Half;
+  private embed!: { weight: Int8Array; scale: Half };
+  private ple!: { path: string; weightOffset: number; width: number; scale: Half };
+  private weightTensors: ML[] = []; private stateTensors: ML[] = []; private builtGraphs: ML[] = [];
+  private base = 0; private filled = 0; private position = 0;
+  private busy = false;
+  private lastStep = { hostMs: 0, enqueueMs: 0, waitMs: 0 };
+
+  get chunkSize(): number { return this.chunkSizes[0]; }
+
+  private constructor(pkg: ModelPackage) {
+    const s = pkg.model;
+    this.pkg = pkg; this.N = s.num_layers; this.types = s.layer_types;
+    this.producer = s.layer_types.map((_, i) => (s.kv_producer && s.kv_producer[i] >= 0 ? s.kv_producer[i] : i));
+    this.kinds = s.layer_types.map((t, i) => `${t}_${this.producer[i] === i ? 'own' : 'shared'}`);
+  }
+
+  // ------------------------------------------------------------------------------------------------------------------------------- loading
+  static async load(src: string | PackageSource, options: LoadOptions = {}): Promise<Gemma4LLM> {
+    const progress = options.onProgress ?? (() => {});
+    progress({ stage: 'package', message: 'reading the package index' });
+    return Gemma4LLM.loadFrom(await openPackage(src, options.cache ?? true, { segments: options.downloadSegments }), options);
+  }
+
+  static async loadFrom(pkg: ModelPackage, options: LoadOptions = {}): Promise<Gemma4LLM> {
+    const t0 = performance.now();
+    const progress = options.onProgress ?? (() => {});
+    if (pkg.plan.architecture_kind !== 'gemma4') throw new Error('not a Gemma 4 package');
+    const llm = new Gemma4LLM(pkg);
+    llm.adopt(llm.resolve(options));
+    await llm.init(options, progress);
+    llm.stats.loadMs = performance.now() - t0;
+    return llm;
+  }
+
+  private resolve(o: SessionOptions) {
+    const plan = this.pkg.plan, key = String(o.maxLength ?? Math.min(...plan.max_lengths));
+    if (o.kvStyle && o.kvStyle !== 'staged') throw new Error('Gemma 4 packages support the staged KV protocol only');
+    const base = plan.variants.find((v) => v.id === plan.default_variant) as Variant;
+    const compute = o.computeType ?? base.compute_type, rows = o.stagingRows ?? base.staging_rows;
+    const variant = o.variant ? plan.variants.find((v) => v.id === o.variant) : plan.variants.find((v) => v.compute_type === compute && v.staging_rows === rows);
+    if (!variant) throw new Error(`the package has no variant ${o.variant ?? `with compute type ${compute} and ${rows} staging rows`} (it has ${plan.variants.map((v) => v.id).join(', ')})`);
+    const table = plan.graphs[variant.id];
+    if (!table.decode[key]) throw new Error(`the package has no graphs for max length ${key} (it has ${plan.max_lengths.join(', ')})`);
+    const available = Object.keys(table.prefill[key]).map(Number).sort((a, b) => a - b);
+    const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
+    for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
+    if ((o.blocksPerGraph ?? 1) > 1 || (o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('block groups are not available for Gemma 4 packages yet');
+    return { maxLength: +key, variant, sizes, fixedTokens: o.prefillFixedTokens ?? 200 };
+  }
+
+  private adopt(c: ReturnType<Gemma4LLM['resolve']>) {
+    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.fixedTokens = c.fixedTokens;
+  }
+
+  private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
+    const tensor = await this.ctx.createTensor({ dataType, shape, writable: flags.writable ?? false, readable: flags.readable ?? false });
+    into.push(tensor);
+    return tensor;
+  }
+  private writable = (dataType: string, shape: number[]) => this.createTensor(dataType, shape, { writable: true });
+  private dims(type: string) {
+    const s = this.pkg.model, o = s.layer_dims?.[type];
+    return { heads: o?.num_heads ?? s.num_heads, kvHeads: o?.num_kv_heads ?? s.num_kv_heads, headDim: o?.head_dim ?? s.head_dim };
+  }
+
+  private async init(options: LoadOptions, progress: Progress) {
+    const { pkg } = this, source = pkg.source;
+    this.ctx = options.context ?? await (navigator as any).ml.createContext({ deviceType: options.device ?? 'npu' });
+    const role = (r: ManifestFile['role']) => pkg.manifest.files.filter((f) => f.role === r);
+    // weight files in the order they are needed; the per-layer embedding table is NOT downloaded: its rows are read as byte ranges
+    const ordered = [...role('embedding'), ...role('final_norm'), ...role('head_extra'), ...role('layer').sort((a, b) => (a.layer as number) - (b.layer as number))];
+    const total = ordered.reduce((s, f) => s + f.bytes, 0), loaded = new Map<string, number>();
+    const prefetch = new Prefetcher(ordered.map((f) => f.file), (file, i) => source.bytes(`weights/${file}`, (l) => {
+      loaded.set(file, l);
+      progress({ stage: 'download', loaded: [...loaded.values()].reduce((a, b) => a + b, 0), total, message: ordered[i].file });
+    }, ordered[i].bytes), options.parallelDownloads ?? 4);
+
+    const weightsStart = performance.now();
+    progress({ stage: 'embedding', message: 'loading the embedding table' });
+    const part = async (name: string) => {
+      const file = role('embedding').find((f) => f.tensors[0].name === name) as ManifestFile, tensor = file.tensors[0];
+      return new Uint8Array(await prefetch.get(ordered.indexOf(file)), tensor.offset, tensor.bytes);
+    };
+    const weightBytes = await part('lm_head_weight'), scaleBytes = (await part('lm_head_scale')).slice();
+    this.embed = { weight: new Int8Array(weightBytes.buffer, weightBytes.byteOffset, weightBytes.byteLength), scale: new (globalThis as any).Float16Array(scaleBytes.buffer) };
+    // the per-layer embedding table: the scales are read once, the weights row by row
+    const pleFile = role('ple_table')[0], pleWeight = pleFile.tensors.find((t) => t.name === 'ple_weight') as ManifestFile['tensors'][number], pleScale = pleFile.tensors.find((t) => t.name === 'ple_scale') as ManifestFile['tensors'][number];
+    if (!source.slice) throw new Error('this package source cannot read byte ranges, which Gemma 4 needs for its per-layer embedding table');
+    const scales = new Uint8Array(await source.slice(`weights/${pleFile.file}`, pleScale.offset, pleScale.offset + pleScale.bytes));
+    this.ple = { path: `weights/${pleFile.file}`, weightOffset: pleWeight.offset, width: pleWeight.shape[1], scale: new (globalThis as any).Float16Array(scales.buffer) };
+
+    await this.buildGraphs(progress, { weight: weightBytes, scale: new Uint8Array(scaleBytes) });
+
+    const uploadShard = async (shard: ManifestFile, buffer: ArrayBuffer) => {
+      const tensors: Record<string, ML> = {};
+      for (const entry of shard.tensors) {
+        const tensor = await this.createTensor(entry.dtype, entry.shape, { writable: true }, this.weightTensors);
+        this.ctx.writeTensor(tensor, new Uint8Array(buffer, entry.offset, entry.bytes));
+        tensors[entry.name] = tensor;
+      }
+      return tensors;
+    };
+    const finalFile = role('final_norm')[0], headFile = role('head_extra')[0];
+    this.finalGamma = Object.values(await uploadShard(finalFile, await prefetch.get(ordered.indexOf(finalFile))))[0];
+    this.headExtra = await uploadShard(headFile, await prefetch.get(ordered.indexOf(headFile)));
+    const layers = role('layer').sort((a, b) => (a.layer as number) - (b.layer as number));
+    for (const shard of layers) {
+      progress({ stage: 'weights', message: `layer ${(shard.layer as number) + 1}/${layers.length}`, loaded: shard.layer as number, total: layers.length });
+      this.weights.push(await uploadShard(shard, await prefetch.get(ordered.indexOf(shard))));
+      prefetch.release(ordered.indexOf(shard));
+    }
+    this.stats.weightsMs = performance.now() - weightsStart - this.stats.buildMs;
+    progress({ stage: 'state', message: 'allocating the KV caches and activations' });
+    await this.allocateState();
+    progress({ stage: 'ready' });
+  }
+
+  private async buildGraphs(progress: Progress, lmHead: { weight: Uint8Array; scale: Uint8Array }) {
+    const t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength), table = plan.graphs[this.variant.id];
+    const decode = table.decode[key] as unknown as GemmaDecodeTable;
+    const external = (c: { external?: string }) => {
+      if (c.external === 'lm_head_weight') return lmHead.weight;
+      if (c.external === 'lm_head_scale') return new Uint8Array(lmHead.scale);
+      throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
+    };
+    const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
+      progress({ stage: 'build', message: label });
+      const doc: GraphDoc = JSON.parse(await source.text(path));
+      const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
+      const { inputs, outputs } = loadGraph(builder, doc, provider);
+      const graph = await builder.build(outputs);
+      this.builtGraphs.push(graph);
+      return { name: doc.name, graph, inputs: Object.keys(inputs), outputs: Object.keys(outputs) };
+    };
+    const kindsNeeded = [...new Set(this.kinds.slice(1))];
+    const blocks = async (paths: Record<string, string>, label: string) => {
+      const map = new Map<string, Built>();
+      for (const kind of kindsNeeded) map.set(kind, await build(paths[kind], `${label} block ${kind}`));
+      return map;
+    };
+    this.lmHead = await build(table.lm_head, 'lm_head', external);
+    const flush = new Map<string, Built>();
+    for (const [type, path] of Object.entries(decode.flush)) flush.set(type, await build(path, `kv flush ${type}`));
+    this.decodeSet = { head: await build(decode.head, 'decode head'), blocks: await blocks(decode.blocks, 'decode'), tail: await build(decode.tail, 'decode tail'), flush };
+    this.prefillSets = new Map();
+    for (const size of this.chunkSizes) {
+      const files = table.prefill[key][String(size)] as unknown as GraphTable & { blocks: Record<string, string> }, label = `prefill c${size}`;
+      this.prefillSets.set(size, { head: await build(files.head, `${label} head`), blocks: await blocks(files.blocks, label), tail: await build(files.tail, `${label} tail`), act: null as any, sel: null as any });
+    }
+    this.stats.buildMs = performance.now() - t;
+  }
+
+  /** Change the session options of a loaded model: graphs are rebuilt and the state reallocated, the weights stay on the device. */
+  async reconfigure(options: SessionOptions) {
+    if (this.busy) throw new Error('a generation is running on this model');
+    const progress = (options as LoadOptions).onProgress ?? (() => {});
+    const config = this.resolve(options);
+    this.releaseSession();
+    this.adopt(config);
+    const scale = this.embed;
+    await this.buildGraphs(progress, { weight: new Uint8Array(scale.weight.buffer, scale.weight.byteOffset, scale.weight.byteLength), scale: new Uint8Array(scale.scale.buffer.slice(0)) });
+    await this.allocateState();
+    progress({ stage: 'ready' });
+  }
+
+  private releaseSession() {
+    for (const t of this.stateTensors) t.destroy?.();
+    for (const g of this.builtGraphs) g.destroy?.();
+    this.stateTensors = []; this.builtGraphs = [];
+    this.kv.clear(); this.kvSpare.clear(); this.stg.clear(); this.stgSpare.clear();
+    this.base = this.filled = this.position = 0;
+  }
+
+  private async allocateState() {
+    const s = this.pkg.model, { P, R, N } = this, ple = s.ple_dim as number;
+    const makeCache = async (layer: number, rows: number): Promise<Cache> => {
+      const d = this.dims(this.types[layer]), shape = [1, d.kvHeads, rows, d.headDim], zeros = newHalf(d.kvHeads * rows * d.headDim);
+      const c = { key: await this.writable('float16', shape), value: await this.writable('float16', shape) };
+      this.ctx.writeTensor(c.key, zeros); this.ctx.writeTensor(c.value, zeros);
+      return c;
+    };
+    for (let l = 0; l < N; l++) {
+      if (this.producer[l] !== l) continue;   // a layer that shares K / V has no cache
+      this.kv.set(l, await makeCache(l, P)); this.kvSpare.set(l, await makeCache(l, P));
+      this.stg.set(l, await makeCache(l, R)); this.stgSpare.set(l, await makeCache(l, R));
+    }
+    const activations = async (S: number, ownColumns: number, sharedColumns: number): Promise<Activations> => {
+      const a: Activations = { hidden: await this.writable('float16', [1, S, s.hidden]), pleToken: await this.writable('float16', [1, S, N * ple]), ropeCos: {}, ropeSin: {}, mask: {}, maskShared: {},
+        residuals: [], attentionOutputs: [], ples: [], finalHidden: null };
+      for (const type of layerTypesOf(s)) {
+        const d = this.dims(type);
+        a.ropeCos[type] = await this.writable('float16', [1, 1, S, d.headDim]);
+        a.ropeSin[type] = await this.writable('float16', [1, 1, S, d.headDim]);
+        a.mask[type] = await this.writable('float16', [1, 1, S, ownColumns]);
+        a.maskShared[type] = sharedColumns === ownColumns ? a.mask[type] : await this.writable('float16', [1, 1, S, sharedColumns]);
+      }
+      for (let l = 0; l < N; l++) {
+        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden]));
+        a.attentionOutputs.push(await this.createTensor('float16', [1, S, s.hidden]));
+        a.ples.push(await this.createTensor('float16', [1, S, ple]));
+      }
+      a.finalHidden = await this.createTensor('float16', [1, 1, s.hidden]);
+      return a;
+    };
+    const pair = async (rows: number, columns: number): Promise<Selectors> => ({ keep: await this.writable('float16', [1, 1, rows, 1]), select: await this.writable('float16', [1, 1, rows, columns]) });
+    for (const [size, set] of this.prefillSets) {
+      set.act = await activations(size, P + size, P);   // a layer with K / V of its own attends over concat(cache, chunk rows); a shared layer over the updated cache of its producer
+      set.sel = await pair(P, size);
+    }
+    this.dec = await activations(1, P + R, P + R);
+    this.decodeSel = await pair(R, 1);
+    this.flushSel = await pair(P, R);
+    this.logitsTensor = await this.createTensor('float16', [1, 1, s.vocab_padded], { readable: true });
+    this.logits = newHalf(s.vocab_padded);
+  }
+
+  // ------------------------------------------------------------------------------------------------------------------------------- dispatch
+  private bind(graph: Built, values: Record<string, ML>, outputs = false) {
+    const out: Record<string, ML> = {};
+    for (const name of outputs ? graph.outputs : graph.inputs) {
+      if (values[name] === undefined) throw new Error(`graph ${graph.name}: no tensor is bound to ${outputs ? 'output' : 'input'} '${name}'`);
+      out[name] = values[name];
+    }
+    return out;
+  }
+  private pick(names: string[], layer: number) {
+    const out: Record<string, ML> = {};
+    for (const n of names) if (this.weights[layer][n] !== undefined) out[n] = this.weights[layer][n];
+    return out;
+  }
+  private swap(list: Map<number, Cache>, spare: Map<number, Cache>, layer: number) { const a = list.get(layer) as Cache; list.set(layer, spare.get(layer) as Cache); spare.set(layer, a); }
+
+  /** One forward pass: HEAD, the BLOCKs and (last chunk / decode) TAIL + lm_head. size 0 = decode, else the chunk size of the prefill set. All host inputs of the phase are already written. */
+  private enqueue(size: number, lastChunk: boolean) {
+    const decode = size === 0, set = decode ? this.decodeSet : (this.prefillSets.get(size) as PrefillSet), a = decode ? this.dec : (set as PrefillSet).act;
+    const plan = this.pkg.plan, N = this.N, attentionNames = plan.weights.attention as Record<string, string[]>, ffnNames = plan.weights.ffn;
+    const sel = decode ? this.decodeSel : (set as PrefillSet).sel;
+    const selectors = decode ? { staging_rows_to_keep: sel.keep, staging_row_selector: sel.select } : { rows_to_keep: sel.keep, row_selector: sel.select };
+    const caches = decode ? this.stg : this.kv, spare = decode ? this.stgSpare : this.kvSpare;
+    const dispatch = (graph: Built, inputs: Record<string, ML>, outputs: Record<string, ML>) => this.ctx.dispatch(graph.graph, this.bind(graph, inputs), this.bind(graph, outputs, true));
+    // the inputs of the attention half of `layer`: rope / mask of its type, its weights, the cache it reads (its own or its producer's)
+    const attentionInputs = (layer: number) => {
+      const type = this.types[layer], p = this.producer[layer], shared = p !== layer;
+      return {
+        rope_cos: a.ropeCos[type], rope_sin: a.ropeSin[type], attention_mask: shared ? a.maskShared[type] : a.mask[type], ...selectors,
+        past_key: (this.kv.get(p) as Cache).key, past_value: (this.kv.get(p) as Cache).value,
+        ...(decode ? { staging_key: (this.stg.get(p) as Cache).key, staging_value: (this.stg.get(p) as Cache).value } : {}),
+        ...this.pick(attentionNames[this.kinds[layer]], layer),
+      };
+    };
+    const kvOutputs = (layer: number) => (this.producer[layer] === layer ? { updated_key: (spare.get(layer) as Cache).key, updated_value: (spare.get(layer) as Cache).value } : {});
+    const swapIfOwn = (layer: number) => { if (this.producer[layer] === layer) this.swap(caches, spare, layer); };
+
+    // HEAD: the per-layer inputs + the attention half of layer 0
+    const pleOutputs: Record<string, ML> = {};
+    a.ples.forEach((t, i) => { pleOutputs[`ple_${i}`] = t; });
+    dispatch(set.head, { hidden_states: a.hidden, ple_token: a.pleToken, ...this.headExtra, ...attentionInputs(0) },
+      { residual: a.residuals[0], attention_output: a.attentionOutputs[0], ...pleOutputs, ...kvOutputs(0) });
+    swapIfOwn(0);
+    // BLOCK i: feed-forward half of layer i + attention half of layer i + 1
+    for (let layer = 0; layer < N - 1; layer++) {
+      dispatch(set.blocks.get(this.kinds[layer + 1]) as Built,
+        { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], per_layer_input: a.ples[layer], ...this.pick(ffnNames, layer), ...attentionInputs(layer + 1) },
+        { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], ...kvOutputs(layer + 1) });
+      swapIfOwn(layer + 1);
+    }
+    if (!lastChunk) return;
+    dispatch(set.tail, { residual: a.residuals[N - 1], attention_output: a.attentionOutputs[N - 1], per_layer_input: a.ples[N - 1], ...this.pick(ffnNames, N - 1), final_norm_gamma: this.finalGamma },
+      { final_hidden_states: a.finalHidden });
+    dispatch(this.lmHead, { final_hidden_states: a.finalHidden }, { logits: this.logitsTensor });
+  }
+
+  // ------------------------------------------------------------------------------------------------------------------------------- host side
+  private embedRow(token: number, out: Half, offset: number) {
+    const hidden = this.pkg.model.hidden, start = token * hidden, scale = this.embed.scale[token] * (this.pkg.model.embed_scale as number);
+    for (let i = 0; i < hidden; i++) out[offset + i] = this.embed.weight[start + i] * scale;
+  }
+
+  /** the per-layer embedding rows of the tokens (int8 row * row scale) into `out` at `offsets[i]`; a few byte-range reads at a time */
+  private async pleRows(tokens: number[], out: Half, offsets: number[]) {
+    const { path, weightOffset, width, scale } = this.ple, source = this.pkg.source as PackageSource & { slice: NonNullable<PackageSource['slice']> };
+    let next = 0;
+    const worker = async () => {
+      while (next < tokens.length) {
+        const i = next++, start = weightOffset + tokens[i] * width;
+        const row = new Int8Array(await source.slice(path, start, start + width)), s = scale[tokens[i]];
+        for (let j = 0; j < width; j++) out[offsets[i] + j] = row[j] * s;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, tokens.length) }, worker));
+  }
+
+  private writeRope(tables: ReturnType<typeof ropeTables>, a: Activations) {
+    for (const type of layerTypesOf(this.pkg.model)) { this.ctx.writeTensor(a.ropeCos[type], tables[type].cos); this.ctx.writeTensor(a.ropeSin[type], tables[type].sin); }
+  }
+  private async readLogits(): Promise<Half> {
+    await this.ctx.readTensor(this.logitsTensor, this.logits);
+    return this.logits;
+  }
+
+  planFor(tokenCount: number): number[] { return planPrefill(this.chunkSizes, tokenCount, this.fixedTokens); }
+
+  private get cacheFull() { return this.position >= this.P; }
+
+  // ------------------------------------------------------------------------------------------------------------------------------- generation
+  private async prefill(tokens: number[]): Promise<Half> {
+    const s = this.pkg.model, { P } = this, n = tokens.length, pleSize = this.N * (s.ple_dim as number);
+    if (n === 0) throw new Error('empty prompt');
+    const plan = this.planFor(n);
+    if (n >= P) throw new Error(`the prompt has ${n} tokens but the KV cache holds ${P}: load the package with a larger max length`);
+    this.stats.prefillPlan = plan;
+    let start = 0;
+    for (let index = 0; index < plan.length; index++) {
+      const C = plan[index], last = index === plan.length - 1, set = this.prefillSets.get(C) as PrefillSet, a = set.act;
+      const valid = Math.min(C, n - start), pad = C - valid, hidden = newHalf(C * s.hidden), pleToken = newHalf(C * pleSize);
+      for (let i = 0; i < valid; i++) this.embedRow(tokens[start + i], hidden, (pad + i) * s.hidden);
+      await this.pleRows(tokens.slice(start, start + valid), pleToken, Array.from({ length: valid }, (_, i) => (pad + i) * pleSize));
+      this.ctx.writeTensor(a.hidden, hidden); this.ctx.writeTensor(a.pleToken, pleToken);
+      this.writeRope(ropeTables(s, Array.from({ length: valid }, (_, i) => start + i), C, pad), a);
+      const own = prefillMasks(s, P, C, start, valid), shared = incachePrefillMasks(s, P, C, start, valid);
+      for (const type of layerTypesOf(s)) { this.ctx.writeTensor(a.mask[type], own[type]); this.ctx.writeTensor(a.maskShared[type], shared[type]); }
+      const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
+      this.ctx.writeTensor(set.sel.keep, rowsToKeep); this.ctx.writeTensor(set.sel.select, rowSelector);
+      this.enqueue(C, last);
+      start += valid;
+    }
+    this.base = n; this.filled = 0; this.position = n;
+    return this.readLogits();
+  }
+
+  private flush() {
+    const { rowsToKeep, rowSelector } = flushSelectors(this.P, this.R, this.base);
+    this.ctx.writeTensor(this.flushSel.keep, rowsToKeep); this.ctx.writeTensor(this.flushSel.select, rowSelector);
+    for (const layer of this.kv.keys()) {
+      const g = this.decodeSet.flush.get(this.types[layer]) as Built, main = this.kv.get(layer) as Cache, staging = this.stg.get(layer) as Cache;
+      this.ctx.dispatch(g.graph, this.bind(g, { past_key: main.key, past_value: main.value, new_key: staging.key, new_value: staging.value, rows_to_keep: this.flushSel.keep, row_selector: this.flushSel.select }),
+        this.bind(g, { updated_key: (this.kvSpare.get(layer) as Cache).key, updated_value: (this.kvSpare.get(layer) as Cache).value }, true));
+      this.swap(this.kv, this.kvSpare, layer);
+    }
+    this.base += this.R; this.filled = 0;
+  }
+
+  private async step(token: number): Promise<Half> {
+    const s = this.pkg.model, { P, R } = this, pleSize = this.N * (s.ple_dim as number);
+    if (this.cacheFull) throw new Error('the KV cache is full');
+    let flushMs = 0;
+    if (this.filled === R) { const f = performance.now(); this.flush(); flushMs = performance.now() - f; this.stats.flushes++; }
+    const t0 = performance.now();
+    const pos = this.position, a = this.dec, hidden = newHalf(s.hidden), pleToken = newHalf(pleSize);
+    this.embedRow(token, hidden, 0);
+    await this.pleRows([token], pleToken, [0]);
+    this.ctx.writeTensor(a.hidden, hidden); this.ctx.writeTensor(a.pleToken, pleToken);
+    this.writeRope(ropeTables(s, [pos], 1, 0), a);
+    const masks = decodeMasks(s, P, R, pos, this.base, this.filled);
+    for (const type of layerTypesOf(s)) this.ctx.writeTensor(a.mask[type], masks[type]);   // maskShared is the same tensor in decode
+    const { rowsToKeep, rowSelector } = decodeSelectors(R, this.filled);
+    this.ctx.writeTensor(this.decodeSel.keep, rowsToKeep); this.ctx.writeTensor(this.decodeSel.select, rowSelector);
+    const t1 = performance.now();
+    this.enqueue(0, true);
+    const t2 = performance.now();
+    this.filled++; this.position++;
+    const logits = await this.readLogits();
+    this.lastStep = { hostMs: t1 - t0, enqueueMs: t2 - t1 + flushMs, waitMs: performance.now() - t2 };
+    return logits;
+  }
+
+  private pickToken(logits: Half, o: GenerateOptions): number {
+    const vocab = this.pkg.model.vocab;
+    if (!o.temperature) {
+      let best = 0, bestValue = -Infinity;
+      for (let i = 0; i < vocab; i++) if (logits[i] > bestValue) { bestValue = logits[i]; best = i; }
+      return best;
+    }
+    const k = Math.min(o.topK ?? 40, vocab), top: number[] = [];
+    for (let i = 0; i < vocab; i++) {
+      if (top.length < k || logits[i] > logits[top[top.length - 1]]) {
+        top.push(i);
+        top.sort((x, y) => logits[y] - logits[x]);
+        if (top.length > k) top.pop();
+      }
+    }
+    const max = logits[top[0]], weights = top.map((i) => Math.exp((logits[i] - max) / (o.temperature as number)));
+    let r = Math.random() * weights.reduce((x, y) => x + y, 0);
+    for (let j = 0; j < top.length; j++) { r -= weights[j]; if (r <= 0) return top[j]; }
+    return top[0];
+  }
+
+  async *generate(tokens: number[], options: GenerateOptions = {}): AsyncGenerator<number> {
+    if (this.busy) throw new Error('a generation is already running on this model');
+    this.busy = true;
+    try {
+      const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
+      let t = performance.now();
+      let logits = await this.prefill(tokens);
+      this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
+        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length };
+      t = performance.now();
+      for (let i = 0; i < max; i++) {
+        const sampleStart = performance.now();
+        const token = this.pickToken(logits, options);
+        const samplingMs = performance.now() - sampleStart;
+        yield token;
+        if (stop.has(token) || i === max - 1 || this.cacheFull || options.signal?.aborted) break;
+        const stepStart = performance.now();
+        logits = await this.step(token);
+        const stepMs = performance.now() - stepStart;
+        this.stats.stepMs.push(stepMs);
+        this.stats.steps.push({ ...this.lastStep, samplingMs, totalMs: stepMs + samplingMs });
+        this.stats.decodeSteps++;
+        this.stats.decodeMs = performance.now() - t;
+        this.stats.tpotMs = this.stats.decodeMs / this.stats.decodeSteps;
+      }
+    } finally { this.busy = false; }
+  }
+
+  destroy() {
+    this.releaseSession();
+    for (const t of this.weightTensors) t.destroy?.();
+    this.weightTensors = []; this.weights = [];
+  }
+}
+
