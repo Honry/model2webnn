@@ -24,8 +24,8 @@ from .gemma4 import build_lm_head_graph, lm_head_parts, lm_head_weight_specs  # 
 KINDS = ("linear_attention", "full_attention")
 CONV_TAPS = 4
 SUB_CHUNK = 16        # the Gated DeltaNet sub-chunk of a prefill chunk (chunk sizes must be multiples of it)
-L2_EPS = 1e-4   # HF: 1e-6. That is a float16 SUBNORMAL (the smallest normal is 6.1e-5): the NPU flushes it to 0 and l2_normalize of an all-zero row (the pad rows of a left-padded chunk) became 0 * inf = NaN,
-#                 which poisoned the whole recurrent state. 1e-4 changes the normalization of a real row (sum of squares ~ 1) by 1e-4 relative.
+MEAN_SQUARE_EPS = 1e-4   # HF: l2norm eps 1e-6 on the SUM of squares. That is a float16 SUBNORMAL (the smallest normal is 6.1e-5): the NPU flushes it to 0 and the normalization of an all-zero row (the pad rows
+#                         of a left-padded chunk) became 0 * inf = NaN, which poisoned the whole recurrent state. 1e-4 on the mean of the squares (= 0.0128 on the sum, ~6e-4 relative for a real row).
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -70,10 +70,14 @@ def final_norm_specs(spec) -> list:
 # ---------------------------------------------------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------------------------------------------------
-def l2_normalize(c: Ctx, x: Value, rank: int) -> Value:
-    b = c.b
-    total = b.reduce_sum(b.mul(x, x), axes=[rank - 1], keep_dimensions=True)
-    return b.mul(x, b.div(c.scalar(1, rank), b.sqrt(b.add(total, c.scalar(L2_EPS, rank)))))
+def l2_normalize(c: Ctx, x: Value, rank: int, scale: float = 1.0) -> Value:
+    """scale * x / sqrt(sum(x^2) + eps) over the last axis, written as the RMS-norm pattern that the NPU compiler recognises and fuses (x * (1 / sqrt(mean(x^2) + eps)) * (scale / sqrt(dim))).
+    The plain sum / sqrt / div form (`x * (1 / sqrt(reduceSum(x^2) + eps))`) returned garbage and non-finite values for some rows on the NPU (bench/raw/qwen35probe.html: key, but not the query, which has a
+    multiplication behind its normalization)."""
+    b, dim = c.b, x.shape[rank - 1]
+    mean_square = b.reduce_mean(b.pow(x, c.scalar(2, rank)), axes=[rank - 1], keep_dimensions=True)
+    normalized = b.mul(x, b.div(c.scalar(1, rank), b.sqrt(b.add(mean_square, c.scalar(MEAN_SQUARE_EPS, rank)))))
+    return b.mul(normalized, c.scalar(scale / math.sqrt(dim), rank))
 
 
 def silu(c: Ctx, x: Value) -> Value:
@@ -165,7 +169,7 @@ def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, prob
     q = b.reshape(b.slice(conv, [0, 0, 0], [1, seq, hk * dk]), [1, seq, hk, dk])
     k = b.reshape(b.slice(conv, [0, 0, hk * dk], [1, seq, hk * dk]), [1, seq, hk, dk])
     v = b.reshape(b.slice(conv, [0, 0, 2 * hk * dk], [1, seq, vw]), [1, seq, hv, dv])
-    q = b.mul(l2_normalize(c, q, 4), c.scalar(dk ** -0.5, 4))
+    q = l2_normalize(c, q, 4, dk ** -0.5)
     k = l2_normalize(c, k, 4)
     if hv != hk:   # repeat_interleave of the key heads: head h of the values uses key head h // (hv / hk)
         rep = hv // hk
