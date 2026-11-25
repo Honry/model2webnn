@@ -1,6 +1,7 @@
 """A tiny random hybrid-layer model compiled into a package (tests/golden/tiny-package, committed) with a verification record: the fast way to test the browser runtime
 (scheduler, bindings, masks, every KV protocol / compute type / chunk plan) on a WebNN device before loading a real model.   python scripts/make-tiny-package.py [max_length] [chunk] [staging_rows]
-Also writes tests/golden/tiny-gemma4-package, the same for a tiny Gemma 4 style model (per-layer head dims, KV sharing, per-layer embeddings)."""
+Also writes tests/golden/tiny-gemma4-package, the same for a tiny Gemma 4 style model (per-layer head dims, KV sharing, per-layer embeddings),
+and tests/golden/tiny-qwen35-package for a tiny Qwen3.5 (Gated DeltaNet layers + gated full attention; needs torch + transformers)."""
 import sys
 from pathlib import Path
 
@@ -27,4 +28,14 @@ write_tiny_gemma4(out / "tiny-gemma4-hf", dtype="BF16")
 gemma = compile_model(str(out / "tiny-gemma4-hf"), golden / "tiny-gemma4-package", max_lengths=(max_length,), chunks=(chunk, small_chunk), staging_rows=(staging,),
                       compute_types=("float32", "float16"), workers=2, progress=lambda m: None)
 status |= verify_package(gemma, str(out / "tiny-gemma4-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk])
+
+try:   # a tiny Qwen3.5 (Gated DeltaNet hybrid) needs torch + transformers >= 5.3 to create its random weights
+    from tiny_qwen35 import write_tiny_qwen35
+except ImportError:
+    print("skipping tests/golden/tiny-qwen35-package: torch / transformers are not installed")
+else:
+    write_tiny_qwen35(out / "tiny-qwen35-hf")
+    qwen = compile_model(str(out / "tiny-qwen35-hf"), golden / "tiny-qwen35-package", max_lengths=(max_length,), chunks=(chunk, 2 * chunk), staging_rows=(staging,),
+                         compute_types=("float32", "float16"), workers=2, progress=lambda m: None)
+    status |= verify_package(qwen, str(out / "tiny-qwen35-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, 2 * chunk])
 sys.exit(status)

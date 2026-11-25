@@ -1,0 +1,86 @@
+{
+ "format": "m2w-model",
+ "version": 0,
+ "architecture": "Qwen3_5ForConditionalGeneration",
+ "family": "qwen3.5",
+ "hidden": 128,
+ "num_layers": 6,
+ "num_heads": 4,
+ "num_kv_heads": 2,
+ "head_dim": 32,
+ "ffn": 256,
+ "vocab": 300,
+ "vocab_padded": 384,
+ "eps": 1e-06,
+ "qk_norm": true,
+ "tie_embeddings": true,
+ "activation": "silu",
+ "max_position_embeddings": 512,
+ "layer_types": [
+  "linear_attention",
+  "linear_attention",
+  "full_attention",
+  "linear_attention",
+  "linear_attention",
+  "full_attention"
+ ],
+ "sliding_window": null,
+ "rope": {
+  "full_attention": {
+   "type": "default",
+   "theta": 10000000.0,
+   "partial_rotary_factor": 0.25
+  }
+ },
+ "eos_token_ids": [
+  1
+ ],
+ "bos_token_id": null,
+ "pad_token_id": 0,
+ "group_size": 128,
+ "tensors": {
+  "embed": "model.language_model.embed_tokens.weight",
+  "final_norm": "model.language_model.norm.weight",
+  "lm_head": "lm_head.weight",
+  "layer": {
+   "input_layernorm": "model.language_model.layers.{i}.input_layernorm.weight",
+   "post_attention_layernorm": "model.language_model.layers.{i}.post_attention_layernorm.weight",
+   "gate_proj": "model.language_model.layers.{i}.mlp.gate_proj.weight",
+   "up_proj": "model.language_model.layers.{i}.mlp.up_proj.weight",
+   "down_proj": "model.language_model.layers.{i}.mlp.down_proj.weight",
+   "q_proj": "model.language_model.layers.{i}.self_attn.q_proj.weight",
+   "k_proj": "model.language_model.layers.{i}.self_attn.k_proj.weight",
+   "v_proj": "model.language_model.layers.{i}.self_attn.v_proj.weight",
+   "o_proj": "model.language_model.layers.{i}.self_attn.o_proj.weight",
+   "q_norm": "model.language_model.layers.{i}.self_attn.q_norm.weight",
+   "k_norm": "model.language_model.layers.{i}.self_attn.k_norm.weight",
+   "in_proj_qkv": "model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight",
+   "in_proj_z": "model.language_model.layers.{i}.linear_attn.in_proj_z.weight",
+   "in_proj_b": "model.language_model.layers.{i}.linear_attn.in_proj_b.weight",
+   "in_proj_a": "model.language_model.layers.{i}.linear_attn.in_proj_a.weight",
+   "conv1d": "model.language_model.layers.{i}.linear_attn.conv1d.weight",
+   "A_log": "model.language_model.layers.{i}.linear_attn.A_log",
+   "dt_bias": "model.language_model.layers.{i}.linear_attn.dt_bias",
+   "linear_norm": "model.language_model.layers.{i}.linear_attn.norm.weight",
+   "out_proj": "model.language_model.layers.{i}.linear_attn.out_proj.weight"
+  }
+ },
+ "chat_template_kwargs": {
+  "enable_thinking": false
+ },
+ "builder": "qwen35",
+ "layer_dims": {},
+ "kv_producer": [],
+ "ple_dim": 0,
+ "embed_scale": 1.0,
+ "attention_scale": null,
+ "logit_softcap": 0.0,
+ "linear": {
+  "num_k_heads": 2,
+  "num_v_heads": 4,
+  "k_dim": 128,
+  "v_dim": 128,
+  "conv_kernel": 4
+ },
+ "attn_output_gate": true
+}

@@ -1,0 +1,1104 @@
+{
+ "format": "m2w-weights",
+ "version": 0,
+ "container": "safetensors",
+ "quant": {
+  "bits": 4,
+  "group_size": 128,
+  "symmetric": true,
+  "signed_scale": true,
+  "layout": "group-major",
+  "pack": "low-nibble-first",
+  "scale_dtype": "float16",
+  "gamma_dtype": "float16",
+  "merge_projections": true,
+  "rmsnorm_weight": "stored as 1 + w",
+  "embedding": {
+   "bits": 8,
+   "asymmetric": false,
+   "granularity": "row",
+   "padded_vocab": 384
+  }
+ },
+ "files": [
+  {
+   "file": "layer_000.safetensors",
+   "bytes": 199360,
+   "sha256": "9fdaec7f74f43aadc995f5e19c9aadd51f40d3e35de8f6a856173dc32337892a",
+   "tensors": [
+    {
+     "name": "input_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2480,
+     "bytes": 256
+    },
+    {
+     "name": "qkvz_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      1536,
+      128
+     ],
+     "offset": 2736,
+     "bytes": 98304
+    },
+    {
+     "name": "qkvz_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1536,
+      1
+     ],
+     "offset": 101040,
+     "bytes": 3072
+    },
+    {
+     "name": "ba_weight",
+     "dtype": "float16",
+     "shape": [
+      8,
+      128
+     ],
+     "offset": 104112,
+     "bytes": 2048
+    },
+    {
+     "name": "conv_weight",
+     "dtype": "float16",
+     "shape": [
+      4,
+      1,
+      1024
+     ],
+     "offset": 106160,
+     "bytes": 8192
+    },
+    {
+     "name": "decay_rate",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114352,
+     "bytes": 8
+    },
+    {
+     "name": "dt_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114360,
+     "bytes": 8
+    },
+    {
+     "name": "norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      128
+     ],
+     "offset": 114368,
+     "bytes": 256
+    },
+    {
+     "name": "output_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      4,
+      128,
+      128
+     ],
+     "offset": 114624,
+     "bytes": 32768
+    },
+    {
+     "name": "output_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      4,
+      128,
+      1
+     ],
+     "offset": 147392,
+     "bytes": 1024
+    },
+    {
+     "name": "post_attention_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 148416,
+     "bytes": 256
+    },
+    {
+     "name": "gate_up_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      512,
+      128
+     ],
+     "offset": 148672,
+     "bytes": 32768
+    },
+    {
+     "name": "gate_up_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      512,
+      1
+     ],
+     "offset": 181440,
+     "bytes": 1024
+    },
+    {
+     "name": "down_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 182464,
+     "bytes": 16384
+    },
+    {
+     "name": "down_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 198848,
+     "bytes": 512
+    }
+   ],
+   "role": "layer",
+   "layer": 0,
+   "kind": "linear_attention",
+   "relative_error": {
+    "gate_up_projection": 0.009497,
+    "down_projection": 0.009258,
+    "qkvz_projection": 0.009407,
+    "output_projection": 0.009427
+   }
+  },
+  {
+   "file": "layer_001.safetensors",
+   "bytes": 199360,
+   "sha256": "b6c33d6d5cf710f5529cdf55ae44c193b598dbf89018ee7d0e266d7d7da54f10",
+   "tensors": [
+    {
+     "name": "input_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2480,
+     "bytes": 256
+    },
+    {
+     "name": "qkvz_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      1536,
+      128
+     ],
+     "offset": 2736,
+     "bytes": 98304
+    },
+    {
+     "name": "qkvz_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1536,
+      1
+     ],
+     "offset": 101040,
+     "bytes": 3072
+    },
+    {
+     "name": "ba_weight",
+     "dtype": "float16",
+     "shape": [
+      8,
+      128
+     ],
+     "offset": 104112,
+     "bytes": 2048
+    },
+    {
+     "name": "conv_weight",
+     "dtype": "float16",
+     "shape": [
+      4,
+      1,
+      1024
+     ],
+     "offset": 106160,
+     "bytes": 8192
+    },
+    {
+     "name": "decay_rate",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114352,
+     "bytes": 8
+    },
+    {
+     "name": "dt_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114360,
+     "bytes": 8
+    },
+    {
+     "name": "norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      128
+     ],
+     "offset": 114368,
+     "bytes": 256
+    },
+    {
+     "name": "output_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      4,
+      128,
+      128
+     ],
+     "offset": 114624,
+     "bytes": 32768
+    },
+    {
+     "name": "output_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      4,
+      128,
+      1
+     ],
+     "offset": 147392,
+     "bytes": 1024
+    },
+    {
+     "name": "post_attention_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 148416,
+     "bytes": 256
+    },
+    {
+     "name": "gate_up_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      512,
+      128
+     ],
+     "offset": 148672,
+     "bytes": 32768
+    },
+    {
+     "name": "gate_up_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      512,
+      1
+     ],
+     "offset": 181440,
+     "bytes": 1024
+    },
+    {
+     "name": "down_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 182464,
+     "bytes": 16384
+    },
+    {
+     "name": "down_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 198848,
+     "bytes": 512
+    }
+   ],
+   "role": "layer",
+   "layer": 1,
+   "kind": "linear_attention",
+   "relative_error": {
+    "gate_up_projection": 0.009384,
+    "down_projection": 0.009308,
+    "qkvz_projection": 0.009481,
+    "output_projection": 0.009437
+   }
+  },
+  {
+   "file": "layer_002.safetensors",
+   "bytes": 87216,
+   "sha256": "ddbac36adafe836f7853a1c127c1d2f6e145fba739e644660ab9108ec9796d08",
+   "tensors": [
+    {
+     "name": "input_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2096,
+     "bytes": 256
+    },
+    {
+     "name": "qkvg_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      384,
+      128
+     ],
+     "offset": 2352,
+     "bytes": 24576
+    },
+    {
+     "name": "qkvg_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      384,
+      1
+     ],
+     "offset": 26928,
+     "bytes": 768
+    },
+    {
+     "name": "query_norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      32
+     ],
+     "offset": 27696,
+     "bytes": 64
+    },
+    {
+     "name": "key_norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      32
+     ],
+     "offset": 27760,
+     "bytes": 64
+    },
+    {
+     "name": "output_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      128,
+      128
+     ],
+     "offset": 27824,
+     "bytes": 8192
+    },
+    {
+     "name": "output_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      128,
+      1
+     ],
+     "offset": 36016,
+     "bytes": 256
+    },
+    {
+     "name": "post_attention_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 36272,
+     "bytes": 256
+    },
+    {
+     "name": "gate_up_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      512,
+      128
+     ],
+     "offset": 36528,
+     "bytes": 32768
+    },
+    {
+     "name": "gate_up_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      512,
+      1
+     ],
+     "offset": 69296,
+     "bytes": 1024
+    },
+    {
+     "name": "down_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 70320,
+     "bytes": 16384
+    },
+    {
+     "name": "down_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 86704,
+     "bytes": 512
+    }
+   ],
+   "role": "layer",
+   "layer": 2,
+   "kind": "full_attention",
+   "relative_error": {
+    "gate_up_projection": 0.009505,
+    "down_projection": 0.009404,
+    "qkvg_projection": 0.009651,
+    "output_projection": 0.009268
+   }
+  },
+  {
+   "file": "layer_003.safetensors",
+   "bytes": 199360,
+   "sha256": "86e35045e2eee4064331c4f514b366500d43972ef513556f2ccf6adb41d44573",
+   "tensors": [
+    {
+     "name": "input_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2480,
+     "bytes": 256
+    },
+    {
+     "name": "qkvz_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      1536,
+      128
+     ],
+     "offset": 2736,
+     "bytes": 98304
+    },
+    {
+     "name": "qkvz_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1536,
+      1
+     ],
+     "offset": 101040,
+     "bytes": 3072
+    },
+    {
+     "name": "ba_weight",
+     "dtype": "float16",
+     "shape": [
+      8,
+      128
+     ],
+     "offset": 104112,
+     "bytes": 2048
+    },
+    {
+     "name": "conv_weight",
+     "dtype": "float16",
+     "shape": [
+      4,
+      1,
+      1024
+     ],
+     "offset": 106160,
+     "bytes": 8192
+    },
+    {
+     "name": "decay_rate",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114352,
+     "bytes": 8
+    },
+    {
+     "name": "dt_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114360,
+     "bytes": 8
+    },
+    {
+     "name": "norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      128
+     ],
+     "offset": 114368,
+     "bytes": 256
+    },
+    {
+     "name": "output_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      4,
+      128,
+      128
+     ],
+     "offset": 114624,
+     "bytes": 32768
+    },
+    {
+     "name": "output_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      4,
+      128,
+      1
+     ],
+     "offset": 147392,
+     "bytes": 1024
+    },
+    {
+     "name": "post_attention_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 148416,
+     "bytes": 256
+    },
+    {
+     "name": "gate_up_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      512,
+      128
+     ],
+     "offset": 148672,
+     "bytes": 32768
+    },
+    {
+     "name": "gate_up_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      512,
+      1
+     ],
+     "offset": 181440,
+     "bytes": 1024
+    },
+    {
+     "name": "down_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 182464,
+     "bytes": 16384
+    },
+    {
+     "name": "down_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 198848,
+     "bytes": 512
+    }
+   ],
+   "role": "layer",
+   "layer": 3,
+   "kind": "linear_attention",
+   "relative_error": {
+    "gate_up_projection": 0.009682,
+    "down_projection": 0.009507,
+    "qkvz_projection": 0.00942,
+    "output_projection": 0.009509
+   }
+  },
+  {
+   "file": "layer_004.safetensors",
+   "bytes": 199360,
+   "sha256": "301d84d237494c8d3c1b5f871bac28a09069206b4067496ca9995d43150a7d7d",
+   "tensors": [
+    {
+     "name": "input_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2480,
+     "bytes": 256
+    },
+    {
+     "name": "qkvz_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      1536,
+      128
+     ],
+     "offset": 2736,
+     "bytes": 98304
+    },
+    {
+     "name": "qkvz_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1536,
+      1
+     ],
+     "offset": 101040,
+     "bytes": 3072
+    },
+    {
+     "name": "ba_weight",
+     "dtype": "float16",
+     "shape": [
+      8,
+      128
+     ],
+     "offset": 104112,
+     "bytes": 2048
+    },
+    {
+     "name": "conv_weight",
+     "dtype": "float16",
+     "shape": [
+      4,
+      1,
+      1024
+     ],
+     "offset": 106160,
+     "bytes": 8192
+    },
+    {
+     "name": "decay_rate",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114352,
+     "bytes": 8
+    },
+    {
+     "name": "dt_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      4
+     ],
+     "offset": 114360,
+     "bytes": 8
+    },
+    {
+     "name": "norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      128
+     ],
+     "offset": 114368,
+     "bytes": 256
+    },
+    {
+     "name": "output_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      4,
+      128,
+      128
+     ],
+     "offset": 114624,
+     "bytes": 32768
+    },
+    {
+     "name": "output_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      4,
+      128,
+      1
+     ],
+     "offset": 147392,
+     "bytes": 1024
+    },
+    {
+     "name": "post_attention_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 148416,
+     "bytes": 256
+    },
+    {
+     "name": "gate_up_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      512,
+      128
+     ],
+     "offset": 148672,
+     "bytes": 32768
+    },
+    {
+     "name": "gate_up_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      512,
+      1
+     ],
+     "offset": 181440,
+     "bytes": 1024
+    },
+    {
+     "name": "down_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 182464,
+     "bytes": 16384
+    },
+    {
+     "name": "down_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 198848,
+     "bytes": 512
+    }
+   ],
+   "role": "layer",
+   "layer": 4,
+   "kind": "linear_attention",
+   "relative_error": {
+    "gate_up_projection": 0.009239,
+    "down_projection": 0.009304,
+    "qkvz_projection": 0.009521,
+    "output_projection": 0.009394
+   }
+  },
+  {
+   "file": "layer_005.safetensors",
+   "bytes": 87216,
+   "sha256": "8aa884ffb18f603d53629cd4bcc0891736fdce706d3891b11fbc300c478c4bf9",
+   "tensors": [
+    {
+     "name": "input_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2096,
+     "bytes": 256
+    },
+    {
+     "name": "qkvg_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      384,
+      128
+     ],
+     "offset": 2352,
+     "bytes": 24576
+    },
+    {
+     "name": "qkvg_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      384,
+      1
+     ],
+     "offset": 26928,
+     "bytes": 768
+    },
+    {
+     "name": "query_norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      32
+     ],
+     "offset": 27696,
+     "bytes": 64
+    },
+    {
+     "name": "key_norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      1,
+      32
+     ],
+     "offset": 27760,
+     "bytes": 64
+    },
+    {
+     "name": "output_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      128,
+      128
+     ],
+     "offset": 27824,
+     "bytes": 8192
+    },
+    {
+     "name": "output_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      128,
+      1
+     ],
+     "offset": 36016,
+     "bytes": 256
+    },
+    {
+     "name": "post_attention_layernorm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 36272,
+     "bytes": 256
+    },
+    {
+     "name": "gate_up_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      1,
+      512,
+      128
+     ],
+     "offset": 36528,
+     "bytes": 32768
+    },
+    {
+     "name": "gate_up_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      512,
+      1
+     ],
+     "offset": 69296,
+     "bytes": 1024
+    },
+    {
+     "name": "down_projection_weight",
+     "dtype": "int4",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 70320,
+     "bytes": 16384
+    },
+    {
+     "name": "down_projection_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 86704,
+     "bytes": 512
+    }
+   ],
+   "role": "layer",
+   "layer": 5,
+   "kind": "full_attention",
+   "relative_error": {
+    "gate_up_projection": 0.009494,
+    "down_projection": 0.009603,
+    "qkvg_projection": 0.009574,
+    "output_projection": 0.009152
+   }
+  },
+  {
+   "file": "final_norm.safetensors",
+   "bytes": 472,
+   "sha256": "f7a53029ccf0529b17847238b579954364f23d2112f3cd7cfed6977f381f8b29",
+   "tensors": [
+    {
+     "name": "final_norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 216,
+     "bytes": 256
+    }
+   ],
+   "role": "final_norm"
+  },
+  {
+   "file": "embed.safetensors",
+   "bytes": 49360,
+   "sha256": "d835630123e95e6eb13d0359289322d9edee0feb006d47673927004a887382cb",
+   "tensors": [
+    {
+     "name": "lm_head_weight",
+     "dtype": "int8",
+     "shape": [
+      384,
+      128
+     ],
+     "offset": 208,
+     "bytes": 49152
+    }
+   ],
+   "role": "embedding"
+  },
+  {
+   "file": "embed_scale.safetensors",
+   "bytes": 968,
+   "sha256": "97922872f7627d77a9b7e1b6d6f81621b92b450a8f8678242f6bb08fa9670f25",
+   "tensors": [
+    {
+     "name": "lm_head_scale",
+     "dtype": "float16",
+     "shape": [
+      384,
+      1
+     ],
+     "offset": 200,
+     "bytes": 768
+    }
+   ],
+   "role": "embedding"
+  }
+ ]
+}
