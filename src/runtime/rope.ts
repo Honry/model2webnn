@@ -3,7 +3,7 @@
 // is where float32 vs float64 shows up in the 4th digit).
 
 export interface RopeEntry {
-  type: 'default' | 'linear' | 'yarn';
+  type: 'default' | 'linear' | 'yarn' | 'proportional';
   theta: number;
   factor?: number;
   original_max_position_embeddings?: number;
@@ -13,6 +13,7 @@ export interface RopeEntry {
   mscale?: number;
   mscale_all_dim?: number;
   truncate?: boolean;
+  partial_rotary_factor?: number;   // proportional
 }
 
 const f32 = Math.fround;
@@ -44,6 +45,10 @@ export function invFreqFor(e: RopeEntry, headDim: number): { invFreq: number[]; 
   if (e.type === 'default') return { invFreq: posFreqs(e.theta, headDim).map((p) => 1 / p), attentionFactor: 1 };
   if (e.type === 'linear') return { invFreq: posFreqs(e.theta, headDim).map((p) => 1 / p / (e.factor as number)), attentionFactor: 1 };
   if (e.type === 'yarn') return yarnInvFreq(e, headDim);
+  if (e.type === 'proportional') {   // Gemma 4 full attention: only the first partial_rotary_factor of the frequencies rotate (the exponent divides by the FULL head dim), the rest is 0
+    const angles = Math.floor(((e.partial_rotary_factor ?? 1) * headDim) / 2);
+    return { invFreq: Array.from({ length: headDim / 2 }, (_, i) => (i < angles ? 1 / e.theta ** ((2 * i) / headDim) : 0)), attentionFactor: 1 };
+  }
   throw new Error(`rope type '${(e as RopeEntry).type}' is not supported`);
 }
 

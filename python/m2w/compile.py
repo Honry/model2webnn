@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import __version__
-from .frontends.hf_llm import arch, chat_format, hub, pack
+from .frontends.hf_llm import arch, chat_format, hub, pack, pack_gemma4
 from .frontends.hf_llm.builders import decoder as D
+from .frontends.hf_llm.builders import gemma4 as G
 from .frontends.hf_llm.safetensors_io import TensorStore
 from .ir import serialize
 
@@ -112,6 +113,93 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
     return tables
 
 
+def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks) -> dict:
+    """The graphs of a Gemma-4-style model, per variant: head, one block per attention kind of layers 1.., tail, flush per layer type (own K / V), lm_head."""
+    block_kinds = sorted({spec.layer_kind(i) for i in range(1, spec.num_layers)})
+    cache_types = sorted({spec.layer_types[i] for i in range(spec.num_layers) if not spec.kv_producer or spec.kv_producer[i] < 0})
+    tables: dict = {}
+    for variant in variants:
+        vopt = D.with_options(opt, kv_style="staged", compute_type=variant["compute_type"], staging_rows=variant["staging_rows"])
+        gdir = out / "graphs" / variant["id"]
+        gdir.mkdir(parents=True, exist_ok=True)
+
+        def emit(graph) -> str:
+            serialize.dump(graph, gdir / f"{graph.name}.json")
+            return f"graphs/{variant['id']}/{graph.name}.json"
+
+        table: dict = {"lm_head": emit(G.build_lm_head_graph(spec, vopt)), "decode": {}, "prefill": {}}
+        for L in max_lengths:
+            past = L - 1
+            table["decode"][str(L)] = {
+                "head": emit(G.build_head_graph(spec, vopt, seq=1, past_len=past, name=f"decode_head_L{L}")),
+                "blocks": {k: emit(G.build_block_graph(spec, vopt, k, seq=1, past_len=past, name=f"decode_block_{k}_L{L}")) for k in block_kinds},
+                "tail": emit(G.build_tail_graph(spec, vopt, seq=1, name="decode_tail")),
+                "flush": {t: emit(G.build_flush_graph(spec, t, staging_rows=vopt.staging_rows, past_len=past, name=f"kv_flush_{t}_L{L}")) for t in cache_types}}
+            table["prefill"][str(L)] = {}
+            for C in chunks:
+                if C > past:
+                    continue
+                table["prefill"][str(L)][str(C)] = {
+                    "head": emit(G.build_head_graph(spec, vopt, seq=C, past_len=past, name=f"prefill_head_L{L}_C{C}")),
+                    "blocks": {k: emit(G.build_block_graph(spec, vopt, k, seq=C, past_len=past, name=f"prefill_block_{k}_L{L}_C{C}")) for k in block_kinds},
+                    "tail": emit(G.build_tail_graph(spec, vopt, seq=C, name=f"prefill_tail_C{C}"))}
+        tables[variant["id"]] = table
+    return tables
+
+
+def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks) -> dict:
+    kinds = sorted({spec.layer_kind(i) for i in range(spec.num_layers)})
+    return {
+        "format": "m2w-plan", "version": 0, "target": TARGET, "architecture_kind": "gemma4",
+        "weights": {
+            "description": "tensor names of the weights manifest: attention = by attention kind (the layer type and whether the layer has K / V of its own), ffn = the feed-forward half of every layer "
+                           "(incl. the per-layer-embedding branch and the layer scalar), head_extra = the PLE projection bound to HEAD, ple_table = the per-layer embedding table (rows are read on the host)",
+            "attention": {k: [n for n, _, _ in G.attention_weight_specs(spec, k)] for k in kinds},
+            "ffn": [n for n, _, _ in G.feed_forward_weight_specs(spec)],
+            "head_extra": [n for n, _, _ in G.head_extra_weight_specs(spec)],
+            "final_norm": ["final_norm_gamma"],
+            "embedding": [n for n, _, _ in G.lm_head_weight_specs(spec)],
+            "ple_table": ["ple_weight", "ple_scale"],
+        },
+        "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type", "value_layout")},
+        "variants": variants, "default_variant": variants[0]["id"],
+        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": [1], "prefill_blocks_per_graph": [1],
+        "graphs": graphs,
+        "chain": {
+            "description": "HEAD = attention half of layer 0 + the per-layer-embedding prologue (outputs ple_0 .. ple_{N-1}); BLOCK i (i = 0 .. N-2) = feed-forward half of layer i (input per_layer_input = ple_i) + "
+                           "attention half of layer i + 1, the graph of its KIND (plan.graphs[..].blocks[kind]); TAIL = feed-forward half of layer N-1 + final norm; lm_head (with the logit softcap). The kind of "
+                           "layer i is model.json layer_types[i] + '_own' | '_shared' (kv_producer[i] >= 0 = it attends over the cache of that layer).",
+            "num_layers": spec.num_layers, "kinds": [spec.layer_kind(i) for i in range(spec.num_layers)],
+        },
+        "per_layer_type_inputs": {
+            "description": "rope_cos / rope_sin [1,1,S,head_dim of the type] / attention_mask of an attention half are bound with the tables of the layer type of ITS layer; a shared layer's mask has the columns of "
+                           "the cache it reads (prefill: P, decode: P + staging rows)",
+            "inputs": ["rope_cos", "rope_sin", "attention_mask"],
+        },
+        "kv_protocols": {
+            "description": "only the staged protocol: prefill = chunks (the last one left-padded) updating the main caches of the layers with K / V of their own; decode = the new row goes into a staging buffer, "
+                           "attention reads concat(main cache, staging), the flush graph (one per layer type) moves the staging rows into the main cache every staging_rows steps. Layers that share K / V read "
+                           "the cache of their producer: decode = its main cache + its staging buffer after this step's update; prefill = its cache after the update of the chunk.",
+        },
+        "host": {"embed_scale": spec.embed_scale, "ple": "per prompt token a row of the ple_table (int8 * row scale, float16) is bound to HEAD's ple_token input; the graph scales it by sqrt(ple_dim)",
+                 "logit_softcap": spec.logit_softcap},
+        "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
+        "logits": {"padded_vocab": spec.vocab_padded, "vocab": spec.vocab, "note": "argmax / sampling over the first `vocab` entries only"},
+    }
+
+
+def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
+    if spec.builder == "gemma4":
+        if any(v["kv_style"] != "staged" for v in variants):
+            raise ValueError("Gemma 4 packages support the staged KV protocol only")
+        if any(k > 1 for k in tuple(blocks_per_graph) + tuple(prefill_blocks_per_graph)):
+            raise ValueError("block groups are not available for Gemma 4 packages yet")
+        graphs = write_graphs_gemma4(spec, opt, out, variants, max_lengths, chunks)
+        return graphs, build_plan_gemma4(spec, opt, variants, graphs, max_lengths, chunks)
+    graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    return graphs, build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+
+
 def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph=(1,)) -> dict:
     dims = spec.decoder_dims()
     return {
@@ -161,7 +249,8 @@ def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, 
         "tokenizer": [f"tokenizer/{n}" for n in tokenizer_files],
         "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"]
                                + (["tensorScatter"] if any(v["kv_style"] == "tensorScatter" for v in plan["variants"]) else [])
-                               + (["scatterND"] if any(v["kv_style"] == "scatterND" for v in plan["variants"]) else []),
+                               + (["scatterND"] if any(v["kv_style"] == "scatterND" for v in plan["variants"]) else [])
+                               + (["tanh"] if plan.get("architecture_kind") == "gemma4" else []),
                                "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
         "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
         "summary": {"layers": spec.num_layers, "max_lengths": plan["max_lengths"], "prefill_chunks": plan["prefill_chunks"], "variants": [v["id"] for v in plan["variants"]],
@@ -192,15 +281,15 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
     spec = arch.spec_from_config(config, generation_config)
     _check_lengths(spec, max_lengths, progress)
-    opt = D.GraphOptions(merge_projections=merge_projections, lm_head_format=lm_head_format)
+    opt = D.GraphOptions(merge_projections=merge_projections or spec.builder == "gemma4", lm_head_format="int8-sym" if spec.builder == "gemma4" else lm_head_format)
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     progress(f"{spec.architecture}: {spec.num_layers} layers, hidden {spec.hidden}, {spec.num_heads}/{spec.num_kv_heads} heads, vocab {spec.vocab} (padded {spec.vocab_padded}), "
              f"layer types {sorted(set(spec.layer_types))}")
 
     store = TensorStore.open(source)
-    manifest = pack.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress)
-    graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
-    plan = build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    packer = pack_gemma4 if spec.builder == "gemma4" else pack
+    manifest = packer.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress)
+    graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
     (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
 
@@ -234,8 +323,7 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     opt = D.GraphOptions(**{k: v for k, v in old["profile"].items() if k in D.GraphOptions.__dataclass_fields__})
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     shutil.rmtree(out / "graphs", ignore_errors=True)
-    graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
-    plan = build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
     tokenizer_files = [Path(f).name for f in index_old.get("tokenizer", [])]
     index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), tokenizer_files)

@@ -568,8 +568,8 @@
   },
   {
    "path": "model.json",
-   "bytes": 1650,
-   "sha256": "4e5bde8bb4abb66743229497a0f3c24cc31023f23e9d7922924b587c3df32360"
+   "bytes": 1797,
+   "sha256": "24548431d96ca68bf1fb4d5d22127a7582cfe57bf5c091cc99f289c7fcc9ddfd"
   },
   {
    "path": "plan.json",

@@ -66,10 +66,24 @@ class ModelSpec:
     group_size: int = GROUP_SIZE
     tensors: dict = field(default_factory=dict)   # role -> HF tensor name (templates with {i})
     chat_template_kwargs: dict = field(default_factory=dict)   # e.g. {"enable_thinking": False} for Qwen3
+    # --- what Gemma-style models add (all defaults describe the plain decoders above) ---
+    builder: str = "decoder"                                    # which graph builder: "decoder" (Qwen3-like) | "gemma4"
+    layer_dims: dict = field(default_factory=dict)              # layer type -> {"head_dim", "num_heads", "num_kv_heads"} where it differs from the defaults above
+    kv_producer: list = field(default_factory=list)             # per layer: the layer whose K / V this layer attends over (KV sharing), -1 = its own; empty = nothing shared
+    ple_dim: int = 0                                            # per-layer embedding size (0 = none)
+    embed_scale: float = 1.0                                    # the embedding is multiplied by this (Gemma: sqrt(hidden))
+    attention_scale: Optional[float] = None                     # None = 1 / sqrt(head_dim)
+    logit_softcap: float = 0.0                                  # logits = cap * tanh(logits / cap) when > 0
 
-    def decoder_dims(self) -> DecoderDims:
-        return DecoderDims(hidden=self.hidden, num_heads=self.num_heads, num_kv_heads=self.num_kv_heads, head_dim=self.head_dim, ffn=self.ffn,
-                           vocab=self.vocab_padded, eps=self.eps, group_size=self.group_size, qk_norm=self.qk_norm)
+    def decoder_dims(self, layer_type: Optional[str] = None) -> DecoderDims:
+        """The dims of the attention of a layer of this type (the defaults for the types that do not override them)."""
+        o = self.layer_dims.get(layer_type, {}) if layer_type else {}
+        return DecoderDims(hidden=self.hidden, num_heads=o.get("num_heads", self.num_heads), num_kv_heads=o.get("num_kv_heads", self.num_kv_heads),
+                           head_dim=o.get("head_dim", self.head_dim), ffn=self.ffn, vocab=self.vocab_padded, eps=self.eps, group_size=self.group_size, qk_norm=self.qk_norm)
+
+    def layer_kind(self, i: int) -> str:
+        """The kind of the attention half of layer i: '<layer type>_own' | '<layer type>_shared' (shared = reads the K / V of another layer)."""
+        return f"{self.layer_types[i]}_{'shared' if self.kv_producer and self.kv_producer[i] >= 0 else 'own'}"
 
     def layer_tensor_names(self, i: int) -> dict:
         return {role: name.format(i=i) for role, name in self.tensors["layer"].items()}
@@ -99,11 +113,14 @@ def _resolve_rope(config: dict, layer_types: list) -> dict:
     for layer_type in sorted(set(layer_types)):
         p = per_type[layer_type]
         kind = p.get("rope_type", "default")
-        if kind not in ("default", "linear", "yarn"):
+        if kind not in ("default", "linear", "yarn", "proportional"):
             raise UnsupportedModel(f"rope type '{kind}' is not supported yet")
-        if p.get("partial_rotary_factor", config.get("partial_rotary_factor", 1.0)) != 1.0:
-            raise UnsupportedModel("partial rotary embeddings are not supported yet")
+        partial = p.get("partial_rotary_factor", config.get("partial_rotary_factor", 1.0))
+        if partial != 1.0 and kind != "proportional":
+            raise UnsupportedModel("partial rotary embeddings are only supported for the proportional rope type")
         entry = {"type": kind, "theta": float(p["rope_theta"])}
+        if kind == "proportional":
+            entry["partial_rotary_factor"] = float(partial)
         for key in ("factor", "original_max_position_embeddings", "beta_fast", "beta_slow", "attention_factor", "mscale", "mscale_all_dim", "truncate"):
             if p.get(key) is not None:
                 entry[key] = p[key]
@@ -115,9 +132,55 @@ def _resolve_rope(config: dict, layer_types: list) -> dict:
     return out
 
 
+def _kv_producers(layer_types: list, shared_layers: int) -> list:
+    """Gemma-style KV sharing: from layer (N - shared_layers) on, a layer reads the K / V of the last layer before that point that has the same type. -1 = its own K / V."""
+    if not shared_layers:
+        return []
+    first = len(layer_types) - shared_layers
+    producers = {t: max(i for i in range(first) if layer_types[i] == t) for t in set(layer_types[:first])}
+    if set(layer_types) - set(producers):
+        raise UnsupportedModel("a layer type that shares K / V has no layer of the same type before the shared layers")
+    return [-1 if i < first else producers[layer_types[i]] for i in range(len(layer_types))]
+
+
+def _gemma4_spec(config: dict, generation_config: Optional[dict], family: dict, architecture: str) -> ModelSpec:
+    t = config.get("text_config", config)
+    if t.get("enable_moe_block") or t.get("num_experts"):
+        raise UnsupportedModel("Gemma 4 models with a mixture-of-experts block are not supported (E2B / E4B have none)")
+    if t.get("attention_k_eq_v") or t.get("use_double_wide_mlp") or t.get("use_bidirectional_attention"):
+        raise UnsupportedModel("Gemma 4 options attention_k_eq_v / use_double_wide_mlp / use_bidirectional_attention are not supported yet")
+    activation = {"gelu_pytorch_tanh": "gelu_tanh"}.get(t.get("hidden_activation"))
+    if activation is None:
+        raise UnsupportedModel(f"activation '{t.get('hidden_activation')}' is not supported")
+    heads, layers = t["num_attention_heads"], t["num_hidden_layers"]
+    layer_types = list(t["layer_types"])
+    if len(layer_types) != layers or not set(layer_types) <= {"full_attention", "sliding_attention"}:
+        raise UnsupportedModel(f"unsupported layer_types: {sorted(set(layer_types))}")
+    generation_config = generation_config or {}
+    eos = generation_config.get("eos_token_id", config.get("eos_token_id", t.get("eos_token_id")))
+    eos = [] if eos is None else [eos] if isinstance(eos, int) else list(eos)
+    vocab = t["vocab_size"]
+    kv_heads = t["num_key_value_heads"]
+    spec = ModelSpec(
+        architecture=architecture, family=family["name"], hidden=t["hidden_size"], num_layers=layers, num_heads=heads, num_kv_heads=kv_heads, head_dim=t["head_dim"],
+        ffn=t["intermediate_size"], vocab=vocab, vocab_padded=_round_up(vocab, VOCAB_ALIGNMENT), eps=float(t["rms_norm_eps"]), qk_norm=True,
+        tie_embeddings=bool(t.get("tie_word_embeddings", config.get("tie_word_embeddings", True))), activation=activation,
+        max_position_embeddings=t["max_position_embeddings"], layer_types=layer_types, sliding_window=t.get("sliding_window") if "sliding_attention" in layer_types else None,
+        rope=_resolve_rope(t, layer_types), eos_token_ids=eos, bos_token_id=t.get("bos_token_id"), pad_token_id=t.get("pad_token_id"), tensors=family["tensors"],
+        builder=family["builder"], layer_dims={"full_attention": {"head_dim": t["global_head_dim"], "num_heads": heads, "num_kv_heads": kv_heads}} if "full_attention" in layer_types else {},
+        kv_producer=_kv_producers(layer_types, t.get("num_kv_shared_layers") or 0), ple_dim=t.get("hidden_size_per_layer_input") or 0, embed_scale=float(t["hidden_size"] ** 0.5),
+        attention_scale=1.0, logit_softcap=float(t.get("final_logit_softcapping") or 0.0),
+    )
+    for layer_type in set(layer_types):
+        spec.decoder_dims(layer_type).check()
+    return spec
+
+
 def spec_from_config(config: dict, generation_config: Optional[dict] = None) -> ModelSpec:
     architecture = (config.get("architectures") or [""])[0]
     family = family_for(architecture)
+    if family.get("builder") == "gemma4":
+        return _gemma4_spec(config, generation_config, family, architecture)
     if config.get("attention_bias") or config.get("mlp_bias"):
         raise UnsupportedModel("models with attention / MLP biases are not supported yet")
     activation = config.get("hidden_act", "silu")

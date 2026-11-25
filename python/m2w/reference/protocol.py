@@ -34,7 +34,7 @@ def rope_tables(spec: ModelSpec, positions: list, rows: int, pad: int) -> dict:
     """layer type -> (cos, sin) float16 [1,1,rows,head_dim]; the first `pad` rows reuse the first real position."""
     out = {}
     for ltype, entry in spec.rope.items():
-        inv, factor = rope_lib.inv_freq_for(entry, spec.head_dim)
+        inv, factor = rope_lib.inv_freq_for(entry, spec.decoder_dims(ltype).head_dim)   # the head dim can differ per layer type (Gemma 4)
         cos, sin = rope_lib.cos_sin(positions, inv, factor)
         index = np.maximum(0, np.arange(rows) - pad)
         out[ltype] = (cos[index][None, None].astype(np.float16), sin[index][None, None].astype(np.float16))
@@ -250,3 +250,25 @@ def scatternd_decode_indices(num_kv_heads: int, pos: int) -> np.ndarray:
     for h in range(num_kv_heads):
         out[0, h, 0] = (0, h, pos)
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# attention that reads another layer's UPDATED cache in a prefill chunk (KV-shared layers, Gemma 4)
+# ---------------------------------------------------------------------------------------------------------------------
+def incache_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int) -> dict:
+    """layer type -> mask float16 [1,1,C,P]: columns are the rows of the (already updated) cache. A real row sees the rows up to its position (window of its layer type); a pad row sees
+    row 0 only (any visible column keeps the softmax finite; its output is never used)."""
+    pad = C - valid
+    masks = {}
+    for ltype in sorted(set(spec.layer_types)):
+        mask = np.full((C, P), NEG, np.float16)
+        for row in range(C):
+            if row < pad:
+                mask[row, 0] = 0
+                continue
+            q_pos = start + (row - pad)
+            for j in range(q_pos + 1):
+                if visible(spec, ltype, q_pos, j):
+                    mask[row, j] = 0
+        masks[ltype] = mask[None, None]
+    return masks

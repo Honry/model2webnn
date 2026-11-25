@@ -16,9 +16,25 @@ import numpy as np
 
 from .frontends.hf_llm import arch, chat_format, hub
 from .frontends.hf_llm.safetensors_io import TensorStore
+from .reference.gemma4_package import Gemma4PackageReader
+from .reference.gemma4_ref import PREFIX as GEMMA4_PREFIX
+from .reference.gemma4_ref import Gemma4Reference
+from .reference.gemma4_runner import Gemma4Runner
 from .reference.graph_runner import PackageRunner
 from .reference.package_reader import PackageReader
 from .reference.transformer_ref import ReferenceModel
+
+
+class _Gemma4Model:
+    """Gemma4Reference with the interface verify_package expects of a reference model: logits(ids)[-1] over the real vocabulary, layer_max_abs of the last call."""
+
+    def __init__(self, spec, text_config, read):
+        self.spec, self.layer_max_abs = spec, []
+        self._ref = Gemma4Reference(text_config, read)
+
+    def logits(self, ids):
+        self.layer_max_abs = []
+        return self._ref.logits(ids, dump=self.layer_max_abs)[:, : self.spec.vocab]
 
 
 def _cos(a, b) -> float:
@@ -57,7 +73,10 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
     runs = []
     for number, variant in enumerate(wanted):
         t = time.perf_counter()
-        runner = PackageRunner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group, prefill_group=prefill_group)
+        if spec.builder == "gemma4":
+            runner = Gemma4Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks)
+        else:
+            runner = PackageRunner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group, prefill_group=prefill_group)
         generated, step_logits = runner.generate(token_ids, steps, eos=spec.eos_token_ids)
         print(f"[{variant}] compiled graphs on the CPU: {len(generated)} tokens in {time.perf_counter() - t:.0f} s (max length {max_length}, chunks {chunks}, "
               f"plan {runner.plan(len(token_ids))}, blocks/graph {decode_group}/{prefill_group})")
@@ -70,10 +89,17 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
                 "steps": [{"top_ids": np.argsort(l)[-5:][::-1].tolist(), "top_logits": [round(float(l[i]), 3) for i in np.argsort(l)[-5:][::-1]]} for l in step_logits],
                 "text": tokenizer.decode(generated, skip_special_tokens=False) if tokenizer else None}), encoding="utf-8", newline="\n")
 
-    sources = [("dequantized weights", ReferenceModel(spec, PackageReader(spec, weights_dir).read), True)]
-    if not skip_float_reference:
-        folder = hub.resolve_model(source, cache_dir=cache_dir, endpoint=endpoint)
-        sources.append(("original weights", ReferenceModel(spec, TensorStore.open(folder).read), False))
+    if spec.builder == "gemma4":
+        text_config = _gemma4_text_config(package, source, endpoint, cache_dir)
+        sources = [("dequantized weights", _Gemma4Model(spec, text_config, Gemma4PackageReader(spec, weights_dir).read), True)]
+        if not skip_float_reference:
+            store = TensorStore.open(hub.resolve_model(source, cache_dir=cache_dir, endpoint=endpoint))
+            sources.append(("original weights", _Gemma4Model(spec, text_config, lambda name, rows=None: store.read(GEMMA4_PREFIX + name, rows=rows)), False))
+    else:
+        sources = [("dequantized weights", ReferenceModel(spec, PackageReader(spec, weights_dir).read), True)]
+        if not skip_float_reference:
+            folder = hub.resolve_model(source, cache_dir=cache_dir, endpoint=endpoint)
+            sources.append(("original weights", ReferenceModel(spec, TensorStore.open(folder).read), False))
     ok = True
     for name, reference, strict in sources:
         for variant, generated, step_logits in runs:
@@ -95,3 +121,9 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
             print(f"  largest |residual| of any layer: {peak:.0f}" + ("   WARNING: close to the float16 limit 65504" if peak > 30000 else ""))
     print("RESULT:", "pipeline OK (graphs + protocol + weights agree with the independent reference)" if ok else "MISMATCH between the compiled graphs and the reference")
     return 0 if ok else 1
+
+
+def _gemma4_text_config(package: Path, source: str, endpoint, cache_dir) -> dict:
+    """The text_config the numpy reference reads: from the source model's config.json (a package does not carry the original config)."""
+    folder = hub.resolve_model(source, cache_dir=cache_dir, endpoint=endpoint, weights=False)
+    return json.loads((folder / "config.json").read_text(encoding="utf-8"))["text_config"]

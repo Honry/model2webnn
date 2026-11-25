@@ -42,6 +42,13 @@ def yarn_inv_freq(theta: float, dim: int, factor: float, original_max_position_e
     return inv_freq.astype(np.float32), attention_factor
 
 
+def proportional_inv_freq(theta: float, dim: int, partial_rotary_factor: float) -> np.ndarray:
+    """Gemma 4 full attention: only the first `partial_rotary_factor` of the frequencies rotate (the exponent still divides by the FULL head dim); the others are 0 (cos 1, sin 0)."""
+    angles = int(partial_rotary_factor * dim // 2)
+    rotated = 1.0 / (theta ** (np.arange(0, 2 * angles, 2, dtype=np.float32) / dim))
+    return np.concatenate([rotated, np.zeros(dim // 2 - angles, np.float32)]).astype(np.float32)
+
+
 def inv_freq_for(rope: dict, head_dim: int):
     """rope: a resolved entry of model.json ("type", "theta", ...) -> (inv_freq, attention_factor)."""
     kind, theta = rope["type"], float(rope["theta"])
@@ -49,6 +56,8 @@ def inv_freq_for(rope: dict, head_dim: int):
         return default_inv_freq(theta, head_dim), 1.0
     if kind == "linear":
         return linear_inv_freq(theta, head_dim, float(rope["factor"])), 1.0
+    if kind == "proportional":
+        return proportional_inv_freq(theta, head_dim, float(rope.get("partial_rotary_factor", 1.0))), 1.0
     if kind == "yarn":
         return yarn_inv_freq(theta, head_dim, float(rope["factor"]), int(rope["original_max_position_embeddings"]), float(rope.get("beta_fast", 32.0)),
                              float(rope.get("beta_slow", 1.0)), bool(rope.get("truncate", True)), rope.get("attention_factor"), rope.get("mscale"),

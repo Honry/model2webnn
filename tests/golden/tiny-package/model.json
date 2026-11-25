@@ -60,5 +60,12 @@
    "down_proj": "model.layers.{i}.mlp.down_proj.weight"
   }
  },
- "chat_template_kwargs": {}
+ "chat_template_kwargs": {},
+ "builder": "decoder",
+ "layer_dims": {},
+ "kv_producer": [],
+ "ple_dim": 0,
+ "embed_scale": 1.0,
+ "attention_scale": null,
+ "logit_softcap": 0.0
 }

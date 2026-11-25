@@ -1,0 +1,34 @@
+{
+  "name": "gemma4",
+  "description": "Gemma 4 text decoder (E2B / E4B): sandwich norms (RMSNorm weight used as is), per-head q / k norm and a weightless v norm, attention scale 1.0, gelu-tanh MLP, per-layer head dims (sliding vs full), KV sharing in the last layers, per-layer embeddings (PLE) and a layer scalar, proportional RoPE on the full attention layers, tied embedding with a logit softcap",
+  "architectures": ["Gemma4ForConditionalGeneration", "Gemma4ForCausalLM"],
+  "builder": "gemma4",
+  "qk_norm": true,
+  "tensors": {
+    "embed": "model.language_model.embed_tokens.weight",
+    "final_norm": "model.language_model.norm.weight",
+    "lm_head": "lm_head.weight",
+    "ple_embed": "model.language_model.embed_tokens_per_layer.weight",
+    "ple_projection": "model.language_model.per_layer_model_projection.weight",
+    "ple_projection_norm": "model.language_model.per_layer_projection_norm.weight",
+    "layer": {
+      "input_layernorm": "model.language_model.layers.{i}.input_layernorm.weight",
+      "q_proj": "model.language_model.layers.{i}.self_attn.q_proj.weight",
+      "k_proj": "model.language_model.layers.{i}.self_attn.k_proj.weight",
+      "v_proj": "model.language_model.layers.{i}.self_attn.v_proj.weight",
+      "o_proj": "model.language_model.layers.{i}.self_attn.o_proj.weight",
+      "q_norm": "model.language_model.layers.{i}.self_attn.q_norm.weight",
+      "k_norm": "model.language_model.layers.{i}.self_attn.k_norm.weight",
+      "post_attention_layernorm": "model.language_model.layers.{i}.post_attention_layernorm.weight",
+      "pre_feedforward_layernorm": "model.language_model.layers.{i}.pre_feedforward_layernorm.weight",
+      "post_feedforward_layernorm": "model.language_model.layers.{i}.post_feedforward_layernorm.weight",
+      "gate_proj": "model.language_model.layers.{i}.mlp.gate_proj.weight",
+      "up_proj": "model.language_model.layers.{i}.mlp.up_proj.weight",
+      "down_proj": "model.language_model.layers.{i}.mlp.down_proj.weight",
+      "per_layer_input_gate": "model.language_model.layers.{i}.per_layer_input_gate.weight",
+      "per_layer_projection": "model.language_model.layers.{i}.per_layer_projection.weight",
+      "post_per_layer_input_norm": "model.language_model.layers.{i}.post_per_layer_input_norm.weight",
+      "layer_scalar": "model.language_model.layers.{i}.layer_scalar"
+    }
+  }
+}
