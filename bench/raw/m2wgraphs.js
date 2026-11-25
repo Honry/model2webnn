@@ -1,11 +1,11 @@
 // Times every graph of a package ON ITS OWN (random inputs, N back-to-back dispatches of the same tensors, one readback): which graph of a model is slow?
-// URL: m2wgraphs.html?package=../packages/aion-2.3b/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
+// URL: m2wgraphs.html?package=../packages/aion-2.3b-i8/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
 import { openPackage, loadGraph } from "../../lib/runtime/index.js";
 import { buildLmHeadGraph, setLmHeadFormat } from "./qwen3_subgraphs.js?v=20261124a";   // the hand-written lm_head (Qwen3-4B dims), timed side by side with the package graph
 
 const query = new URLSearchParams(location.search);
 const param = (name, fallback) => query.get(name) ?? fallback;
-const packageUrl = new URL(param("package", "../packages/aion-2.3b/"), location.href).href, deviceType = param("device", "npu"), chain = +param("chain", 20), iterations = +param("iters", 5);
+const packageUrl = new URL(param("package", "../packages/aion-2.3b-i8/"), location.href).href, deviceType = param("device", "npu"), chain = +param("chain", 20), iterations = +param("iters", 5);
 const only = (query.get("only") || "").split(",").filter(Boolean);
 const byId = (id) => document.getElementById(id);
 const start = performance.now();
