@@ -1,0 +1,260 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qwen3-4B on WebNN: NPUW-style subgraph pipeline</title>
+<style>
+  :root { --bg: #101214; --card: #181b1f; --line: #2b3036; --text: #d6d9dd; --dim: #8b929a; --accent: #6cb6ff; --good: #7fcf8a; --host: #b8855f; --device: #5b8fc4; --helper: #5fa86a; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 "Segoe UI", system-ui, sans-serif; margin: 0; padding: 16px 20px 40px; background: var(--bg); color: var(--text); max-width: 1180px; margin-inline: auto; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+  h1 { font-size: 23px; font-weight: 700; margin: 0; }
+  h1 small { color: var(--dim); font-weight: 500; font-size: 16px; margin-left: 10px; }
+  #status { color: var(--accent); background: #16222e; border: 1px solid #25405a; border-radius: 14px; padding: 3px 14px; font-size: 14px; font-weight: 600; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+  .card > .title, details.card > summary { font-size: 14px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #aeb5bd; margin-bottom: 10px; cursor: default; }
+  details.card > summary { cursor: pointer; margin-bottom: 0; }
+  details.card[open] > summary { margin-bottom: 8px; }
+
+  /* form controls */
+  .fields { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 3px; min-width: 120px; }
+  .field > span { color: #b4bbc3; font-size: 14px; font-weight: 600; }
+  select, input, textarea, button { font: inherit; color: var(--text); background: #1f2328; border: 1px solid #3a4048; border-radius: 5px; padding: 4px 8px; }
+  select:disabled, input:disabled { opacity: .5; }
+  input[type=number] { width: 80px; }
+  textarea { width: 100%; height: 66px; resize: vertical; font-family: Consolas, monospace; }
+  button { cursor: pointer; padding: 6px 16px; font-weight: 600; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #1f4f7a; border-color: #2d6aa0; color: #fff; }
+  .actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  #loadedLabel { color: var(--good); font-size: 14px; font-weight: 600; }
+  .sep { height: 1px; background: var(--line); margin: 10px 0; }
+  details.inline > summary { cursor: pointer; color: #aeb5bd; font-size: 14px; font-weight: 600; margin-top: 12px; }
+  #fixedOptions { margin-top: 6px; color: #aeb5bd; font: 13.5px Consolas, monospace; word-break: break-word; }
+
+  /* tips: hover the (i) or any dotted label */
+  [data-tip] { position: relative; }
+  .tip { display: inline-block; width: 14px; height: 14px; line-height: 13px; text-align: center; border: 1px solid #4a525b; border-radius: 50%; color: var(--dim); font-size: 11px; font-weight: 700; margin-left: 5px; cursor: help; vertical-align: 1px; font-style: normal; }
+  [data-tip]:hover::after { content: attr(data-tip); position: absolute; left: 0; top: calc(100% + 6px); z-index: 20; width: max-content; max-width: 420px; white-space: pre-line; text-align: left; background: #0c0e10; color: var(--text); border: 1px solid #4a525b; border-radius: 6px; padding: 7px 10px; font: 14px/1.5 "Segoe UI", system-ui, sans-serif; box-shadow: 0 6px 18px rgba(0,0,0,.5); pointer-events: none; }
+  .tip:hover::after { left: -8px; }
+  .dotted { border-bottom: 1px dotted #5a626b; cursor: help; }
+
+  /* option grid: fixed columns so every select lines up */
+  .group-label { font-size: 12.5px; font-weight: 700; color: #7f8791; text-transform: uppercase; letter-spacing: .06em; margin: 12px 0 6px; border-left: 3px solid #3a4048; padding-left: 8px; }
+  .optgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 16px; }
+  .optgrid .field { min-width: 0; }
+  .optgrid select, .optgrid input { width: 100%; }
+  @media (max-width: 900px) { .optgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+  /* headline metrics */
+  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 10px 0; }
+  .metric { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: 8px; padding: 10px 14px; }
+  .metric .label { font-size: 13px; font-weight: 700; color: #aeb5bd; text-transform: uppercase; letter-spacing: .05em; }
+  .metric .value { font: 700 36px/1.15 "Segoe UI", system-ui, sans-serif; color: var(--c); }
+  .metric .value small { font-size: 16px; font-weight: 600; margin-left: 5px; opacity: .85; }
+  .metric .sub { font-size: 13px; color: #9aa1a8; min-height: 1.45em; }
+  #summaryLine { color: #9aa1a8; font-size: 13.5px; margin: 2px 0 8px; }
+
+  /* tables: vivid numbers, tips instead of text */
+  #summaryTable td:nth-child(2) { font-weight: 700; font-size: 16px; }
+  #sum-load, #sum-prefill { color: #4fd1ff; }
+  #sum-build, #sum-startup { color: #c792ea; }
+  #sum-decode { color: #ffb454; }
+  #sum-inference { color: #5af78e; }
+  #sum-dequantize { color: #8b929a; }
+  #timingTable td.num { font-weight: 700; font-size: 16px; width: 80px; }
+  #timingTable td.share { width: 42%; text-align: left; }
+  .bar { display: inline-block; vertical-align: middle; width: calc(100% - 46px); height: 10px; background: #232830; border-radius: 5px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: currentColor; border-radius: 5px; }
+  .pct { display: inline-block; width: 40px; text-align: right; font-size: 13px; color: #aeb5bd; }
+  .t-host td.num, .t-host td.share { color: #ffb454; }
+  .t-enqueue td.num, .t-enqueue td.share { color: #4fd1ff; }
+  .t-device td.num, .t-device td.share { color: #5af78e; }
+  .t-sample td.num, .t-sample td.share { color: #c792ea; }
+  .t-total td.num, .t-total td.share { color: #ffffff; }
+  .t-total td { border-top: 2px solid #3a4048; font-weight: 700; }
+  td[data-tip] .dotted, td.has-tip { border-bottom: 0; }
+  td.has-tip { cursor: help; text-decoration: underline dotted #5a626b; text-underline-offset: 4px; }
+  td.num[data-tip]:hover::after, #summaryTable td:nth-child(2)[data-tip]:hover::after { left: auto; right: 0; }
+
+  /* decode profile */
+  #profileTable td.num { font-weight: 700; font-size: 16px; width: 110px; }
+  .p-segment td.num { color: #4fd1ff; } .p-sum td.num { color: #ffb454; } .p-full td.num { color: #5af78e; } .p-diff td.num { color: #ff7a7a; } .p-idle td.num, .p-host td.num { color: #c792ea; }
+  .p-sum td, .p-full td { border-top: 1px solid #3a4048; font-weight: 700; }
+
+  /* results */
+  #summary { color: var(--good); margin: 4px 0 8px; font: 700 15px Consolas, monospace; }
+  #answer { white-space: pre-wrap; background: #14171a; border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-height: 80px; font-size: 16px; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border-bottom: 1px solid #23282d; padding: 4px 8px; text-align: right; }
+  th { color: #aeb5bd; font-weight: 700; font-size: 13.5px; }
+  td:first-child, th:first-child { text-align: left; }
+  td:first-child { font-weight: 600; }
+  #log { white-space: pre-wrap; color: #aab1b8; font: 13.5px Consolas, monospace; max-height: 260px; overflow: auto; background: #131518; padding: 8px; border: 1px solid #23282d; border-radius: 6px; }
+
+  /* pipeline diagram */
+  .row { display: flex; align-items: stretch; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+  .box { border: 1px solid #4a525b; border-radius: 5px; padding: 5px 10px; background: #15181b; min-width: 150px; font-weight: 700; }
+  .box small { display: block; color: #9aa1a8; font-size: 13px; font-weight: 400; line-height: 1.4; }
+  .box .time { color: var(--good); font-size: 13px; font-weight: 600; }
+  .arrow { align-self: center; color: #6a727b; font-size: 16px; }
+  .host { border-color: #7a5a40; }
+  .device { border-color: #3f6a99; }
+  .helper { border-color: #3f7a49; background: #141c16; }
+  .phase { border: 1px dashed #3a4048; border-radius: 6px; padding: 6px 10px 8px; margin: 8px 0; }
+  .phase > .title { color: var(--text); margin-bottom: 4px; font-weight: 700; font-size: 15px; }
+  .active { outline: 2px solid #f2c744; background: #2a2616; }
+  .legend { display: flex; gap: 18px; color: #aeb5bd; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Qwen3-4B on WebNN <small>NPUW-style subgraph pipeline</small></h1>
+  <div style="display:flex;align-items:center;gap:12px"><label class="field" style="flex-direction:row;align-items:center;gap:6px;min-width:0"><span>Model<i class="tip" data-tip="The built-in hand-written Qwen3-4B graphs offer every option below.\nA package (m2w compile) offers what it was compiled with: other models such as Aion, and Qwen3-4B through the generic runtime. Changing it reloads the page.">i</i></span><select id="modelSelect"></select></label><label class="field" style="flex-direction:row;align-items:center;gap:6px;min-width:0"><span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></span><select id="deviceSelect"></select></label><div id="status">loading…</div></div>
+</header>
+
+<!-- ============ model: what to build ============ -->
+<section class="card">
+  <div class="title">Model</div>
+  <div class="group-label">Session &amp; prefill</div>
+  <div class="optgrid">
+    <label class="field"><span>Max length<i class="tip" data-tip="KV cache capacity = prompt + generated tokens.\nPart of the session: changing it rebuilds the graphs (weights stay loaded).">i</i></span><select id="maxLengthSelect"></select></label>
+    <label class="field"><span>Prefill chunk<i class="tip" data-tip="Prompt tokens processed per prefill dispatch (one static graph).\nEvery dispatch pays the int4 dequantization again, so bigger chunks are cheaper per token but waste work on short prompts.">i</i></span><select id="chunkSizeSelect"></select></label>
+    <label class="field"><span>Chunk sizes (multi)<i class="tip" data-tip="Optional, e.g. 64,256. One prefill graph set per size; every prompt uses the chunk sequence with the lowest estimated cost. Overrides the single chunk size.">i</i></span><input id="chunkSizesInput" placeholder="e.g. 64,256"></label>
+    <label class="field"><span>Blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one prefill graph (35 blocks in total). 'same as decode' follows the decode setting.">i</i></span><select id="prefillBlocksPerGraphSelect"><option value="0">same as decode</option></select></label>
+  </div>
+  <div class="group-label">Decode</div>
+  <div class="optgrid">
+    <label class="field"><span>KV update<i class="tip" data-tip="staged (default): decode writes a small staging buffer; the main cache is updated by a flush graph every N tokens.\none-hot: the whole cache is rewritten every step.\nscatterND: in-graph scatter of the new rows.">i</i></span><select id="kvStyleSelect"></select></label>
+    <label class="field"><span>Staging rows<i class="tip" data-tip="Rows in the staging buffer = tokens between flushes. Staged only.">i</i></span><select id="stagingRowsSelect"></select></label>
+    <label class="field"><span>Blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one decode graph (35 blocks in total): fewer dispatches, bigger graphs, longer compile.">i</i></span><select id="blocksPerGraphSelect"></select></label>
+    <label class="field"><span>Compute type<i class="tip" data-tip="Type of the computation inside every graph (the boundaries stay f16).\nfloat32 (default): robust everywhere; the NPU compiler narrows it to f16 anyway.\nfloat16: no f32 anywhere; slightly faster to build and run on the NPU, but RMSNorm x² can overflow on backends that do not fuse it (e.g. GPU).">i</i></span><select id="computeTypeSelect"></select></label>
+  </div>
+  <div class="actions">
+    <button id="loadButton" class="primary">Load model</button>
+    <button id="clearCacheButton" title="delete the cached weight files (OPFS)">Clear weight cache</button>
+    <span id="loadedLabel"></span>
+  </div>
+  <details class="inline">
+    <summary>Page-load options (change them in the URL)</summary>
+    <div id="fixedOptions"></div>
+  </details>
+</section>
+
+<!-- ============ prompt ============ -->
+<section class="card">
+  <div class="title">Prompt</div>
+  <div class="fields" style="margin-bottom:8px">
+    <label class="field"><span>Preset</span><select id="promptPreset" style="min-width:260px"></select></label>
+    <span id="promptTokenCount" style="color:var(--good);font-size:14px;font-weight:600;padding-bottom:6px"></span>
+  </div>
+  <textarea id="prompt"></textarea>
+  <div class="actions">
+    <label>Max new tokens <input id="maxNewTokensInput" type="number" value="64"></label>
+    <button id="runButton" class="primary" disabled>Generate</button>
+  </div>
+  <div class="sep"></div>
+  <div id="answer"></div>
+</section>
+
+<!-- ============ headline numbers ============ -->
+<div class="metrics">
+  <div class="metric" style="--c:#4fd1ff"><div class="label">TTFT</div><div class="value" id="metric-ttft">–</div><div class="sub" id="metric-ttft-sub"></div></div>
+  <div class="metric" style="--c:#ffb454"><div class="label">TPOT</div><div class="value" id="metric-tpot">–</div><div class="sub" id="metric-tpot-sub"></div></div>
+  <div class="metric" style="--c:#5af78e"><div class="label">Speed</div><div class="value" id="metric-tps">–</div><div class="sub" id="metric-tps-sub"></div></div>
+  <div class="metric" style="--c:#c792ea"><div class="label">Startup</div><div class="value" id="metric-startup">–</div><div class="sub" id="metric-startup-sub"></div></div>
+</div>
+<div id="summaryLine"></div>
+
+<!-- ============ results ============ -->
+<div class="cols">
+  <section class="card">
+    <div class="title">Summary</div>
+    <table id="summaryTable">
+      <tr><th>phase</th><th>time</th></tr>
+      <tr><td data-tip="fetch the embedding table + 36 layers of weights and upload them to device MLTensors (network / disk bound)"><span class="dotted">Load weights</span></td><td id="sum-load">…</td></tr>
+      <tr><td data-tip="only with weightFormat=float16: one dequantization graph per projection shape, run once per layer while loading"><span class="dotted">Build-time int4 → f16</span></td><td id="sum-dequantize">…</td></tr>
+      <tr><td data-tip="builder.build of every subgraph (decode + prefill head / block / tail, flush, lm_head)"><span class="dotted">Build (compile) graphs</span></td><td id="sum-build">…</td></tr>
+      <tr><td data-tip="tokenizer + load weights + build, until the page is ready"><span class="dotted">Startup total</span></td><td id="sum-startup">…</td></tr>
+      <tr><td data-tip="prompt → first token: host prep + all prefill dispatches + logits readback"><span class="dotted">Prefill (TTFT)</span></td><td id="sum-prefill">…</td></tr>
+      <tr><td data-tip="average per generated token (and tokens/s)"><span class="dotted">Decode</span></td><td id="sum-decode">…</td></tr>
+      <tr><td data-tip="prefill + all decode steps of the last generation"><span class="dotted">Inference total</span></td><td id="sum-inference">…</td></tr>
+    </table>
+  </section>
+  <section class="card">
+    <div class="title">Where a decode step spends its time <i class="tip" data-tip="last generation, average per step">i</i></div>
+    <table id="timingTable"><tr><th>step</th><th>avg ms</th><th style="text-align:left">share of a step</th></tr></table>
+  </section>
+</div>
+
+<!-- ============ pipeline ============ -->
+<details class="card" open>
+  <summary>Pipeline <span style="text-transform:none;letter-spacing:0;font-weight:400">— the highlighted step is the one running now</span></summary>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--host)"></span>host (JavaScript)</span>
+    <span data-tip="WebNN graph on NPU/GPU; weights are bound once as MLTensors.\nHidden state, attention output and KV cache never leave the device; only the logits come back."><span class="dot" style="background:var(--device)"></span><span class="dotted">device graph</span></span>
+    <span><span class="dot" style="background:var(--helper)"></span>helper graph</span>
+  </div>
+
+  <div class="row" id="hostRow">
+    <div class="box host" id="stage-tokenizer">1. Tokenizer<small>chat template → token ids</small></div><div class="arrow">→</div>
+    <div class="box host" id="stage-embedding">2. Embedding lookup<small>u8 row → f16 hidden [1,S,2560]</small></div><div class="arrow">→</div>
+    <div class="box host" id="stage-inputs">3. Per-step inputs<small>rope cos/sin · mask · selectors</small></div>
+  </div>
+
+  <div class="phase" id="phase-prefill">
+    <div class="title">PREFILL — chunks of S=<span id="chunkSizeLabel">?</span> tokens <i class="tip" data-tip="Each chunk attends to the KV cache (rows written by earlier chunks) plus its own rows, then writes its rows into the cache.\nThe last chunk is left-padded; only it runs TAIL + LM HEAD and yields the first token.">i</i></div>
+    <div class="row">
+      <div class="box device" id="prefill-head">HEAD<small>layer 0 attention half</small><span class="time" id="time-prefill-head"></span></div><div class="arrow">→</div>
+      <div class="box device" id="prefill-block">BLOCK × <span class="layerCountMinusOne">35</span><small>FFN of layer i + attention of layer i+1<br>(one graph, weights rebound per call)</small><span class="time" id="time-prefill-block"></span></div><div class="arrow">→</div>
+      <div class="box device" id="prefill-tail">TAIL (last chunk)<small>last FFN + final RMSNorm, last row</small><span class="time" id="time-prefill-tail"></span></div><div class="arrow">→</div>
+      <div class="box device" id="prefill-lm_head">LM HEAD (last chunk)<small>hidden [1,1,2560] → logits f16</small><span class="time" id="time-lm_head"></span></div>
+    </div>
+    <div class="row">
+      <div class="box helper" id="prefill-kv_update">KV UPDATE × <span class="layerCount">36</span> per chunk<small>cache = old × rows_to_keep + row_selector @ new rows</small><span class="time" id="time-prefill-kv_update"></span></div>
+    </div>
+  </div>
+
+  <div class="phase" id="phase-decode">
+    <div class="title">DECODE — one token per step (past <span id="pastLengthLabel">?</span>) <i class="tip" data-tip="S=1, past length = max length − 1, repeated until end-of-text or the token limit.">i</i></div>
+    <div class="row">
+      <div class="box device" id="decode-head">HEAD<small>layer 0 attention half</small><span class="time" id="time-decode-head"></span></div><div class="arrow">→</div>
+      <div class="box device" id="decode-block">BLOCK × <span class="layerCountMinusOne">35</span><small>FFN of layer i + attention of layer i+1</small><span class="time" id="time-decode-block"></span></div><div class="arrow">→</div>
+      <div class="box device" id="decode-tail">TAIL<small>last FFN + final RMSNorm</small><span class="time" id="time-decode-tail"></span></div><div class="arrow">→</div>
+      <div class="box device" id="decode-lm_head">LM HEAD<small>→ logits f16 [1,1,151936]</small></div>
+    </div>
+    <div class="row">
+      <div class="box helper" id="decode-kv_update">KV UPDATE × <span class="layerCount">36</span><small>appends the new token's key/value row to each layer's cache</small><span class="time" id="time-decode-kv_update"></span></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="box host" id="stage-readback">4. Read back logits<small>151936 values per step</small></div><div class="arrow">→</div>
+    <div class="box host" id="stage-sampling">5. Greedy sampling<small>argmax → next token → step 2</small></div>
+  </div>
+</details>
+
+<section class="card">
+  <div class="title">Per-graph build time</div>
+  <table id="buildTable"><tr><th>graph</th><th>build ms</th></tr></table>
+</section>
+
+<section class="card" id="profileCard" style="display:none">
+  <div class="title">Decode segment profile <i class="tip" data-tip="profile=1: after a generation the next decode step is re-run segment by segment (each followed by a sync) and as one chain; 20 runs, ms per step.\nHover a row name for what it measures.">i</i></div>
+  <table id="profileTable"><tr><th>segment</th><th>JS enqueue</th><th>device wait</th><th>total ms</th></tr></table>
+</section>
+
+<details class="card">
+  <summary>Log</summary>
+  <div id="log"></div>
+</details>
+<script type="module" src="chat.js?v=20261124b"></script>
+</body>
+</html>

@@ -46,3 +46,14 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 _out/
+
+# NPU bench: large local data and generated files (see bench/README.md)
+/bench/weights/
+/bench/results/
+/bench/ort-dist/
+/bench/models/
+/bench/packages/
+/bench/ir/
+/bench/data/
+# measurement notes (hardware-specific numbers) stay local
+/docs/npu-local/

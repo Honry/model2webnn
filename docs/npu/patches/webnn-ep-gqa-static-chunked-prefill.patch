@@ -1,0 +1,138 @@
+diff --git a/js/build_webgpu.bat b/js/build_webgpu.bat
+index 5d017edbfa..d7b3ac8e85 100644
+--- a/js/build_webgpu.bat
++++ b/js/build_webgpu.bat
+@@ -1,6 +1,6 @@
+ @echo off
+ 
+-rem build_webgpu.bat --- build onnxruntime-web with WebGPU EP
++rem build_webgpu.bat --- build onnxruntime-web (JSPI) with the WebNN EP only (the WebGPU EP is not built)
+ rem
+ rem Usage:
+ rem   build_webgpu.bat  config  [clean]
+@@ -79,7 +79,6 @@ call %ROOT%build.bat^
+  --enable_wasm_simd^
+  --enable_wasm_threads^
+  --use_webnn^
+- --use_webgpu^
+  --enable_wasm_jspi^
+  --build_dir %BUILD_DIR%^
+  --include_ops_by_config %ROOT%onnxruntime\wasm\reduced_types.config^
+diff --git a/js/web/docs/webnn-operators.md b/js/web/docs/webnn-operators.md
+index 38bd808dc4..d9434c5b52 100644
+--- a/js/web/docs/webnn-operators.md
++++ b/js/web/docs/webnn-operators.md
+@@ -56,7 +56,7 @@ platforms. Check the [WebNN status](https://webmachinelearning.github.io/webnn-s
+ | GreaterOrEqual | ai.onnx(12-15, 16+) | greaterOrEqual | |
+ | GroupNorm | com.microsoft(1+) | add, instanceNormalization, mul, reshape, sigmoid, transpose | |
+ | GroupNormalization | ai.onnx(18-20, 21+) | add, expand, instanceNormalization, mul, reshape | |
+-| GroupQueryAttention | com.microsoft(1+) | add, cast, concat, cumulativeSum, div, equal, expand, expandDynamic, gather, lesser, matmul, mul, range, reshape, reshapeDynamic, scatterND, shape, softmax, squeeze, sub, transpose, unsqueeze, where | Static shapes only support input total_sequence_length is constant and past_sequence_length of past kv equals to present_sequence_length of present kv. |
++| GroupQueryAttention | com.microsoft(1+) | add, cast, concat, cumulativeSum, div, equal, expand, expandDynamic, gather, lesser, matmul, max, mul, range, reshape, reshapeDynamic, scatterND, shape, softmax, squeeze, sub, transpose, unsqueeze, where | Static shapes only support input total_sequence_length is constant and past_sequence_length of past kv equals to present_sequence_length of present kv. Static shapes support a prompt chunk (1 < sequence_length < total_sequence_length) that continues the fixed-size KV cache, as long as the chunk is not padded. |
+ | GRU | ai.onnx(7-13, 14-21, 22+) | gru | Only supports 'layout' == 0. 'clip' is not supported. The activation functions in 'activations' must be one of 'Relu', 'Tanh', 'Sigmoid'. Forward and backward activations must be the same if bidirectional. 'sequence_lens' if present should be constant with values equal to the first dimension length of input 'X' |
+ | HardSigmoid | ai.onnx(7+) | hardSigmoid | |
+ | HardSwish | ai.onnx(14+) | hardSwish | |
+diff --git a/onnxruntime/core/providers/webnn/builders/impl/gqa_op_builder.cc b/onnxruntime/core/providers/webnn/builders/impl/gqa_op_builder.cc
+index c2ed71e1e3..df29bf5f94 100644
+--- a/onnxruntime/core/providers/webnn/builders/impl/gqa_op_builder.cc
++++ b/onnxruntime/core/providers/webnn/builders/impl/gqa_op_builder.cc
+@@ -241,6 +241,33 @@ Status GroupQueryAttentionOpBuilder::AddStaticShapeToModelBuilder(ModelBuilder&
+   const uint32_t batch_size = SafeInt<uint32_t>(input_q_shape[0]);
+   const uint32_t qkv_sequence_length = SafeInt<uint32_t>(input_q_shape[1]);
+ 
++  // Chunked prefill: a prompt chunk (1 < S < total_sequence_length) continues a fixed-size KV cache, so the new
++  // tokens are written at the number of tokens already cached instead of at 0. IsOpSupportedImpl only accepts
++  // this when past_sequence_length == total_sequence_length. All the shapes are static, so the choice is made
++  // when the graph is built.
++  //   offset = max(seqlens_k + 1 - sequence_length, 0), same as the CPU EP.
++  // The max() keeps a right-padded first chunk (seqlens_k + 1 < sequence_length) starting at 0; a padded chunk
++  // after the first one is not supported (the CPU EP does not support it either).
++  const bool is_subsequent_chunk = has_past_key && qkv_sequence_length > 1 && qkv_sequence_length < past_sequence_length;
++  emscripten::val chunk_offset = emscripten::val::undefined();  // [batch_size] int32
++  if (is_subsequent_chunk) {
++    emscripten::val offset_options = emscripten::val::object();
++    emscripten::val one_constant =
++        model_builder.CreateOrGetConstant<int32_t>(ONNX_NAMESPACE::TensorProto_DataType_INT32, 1, {1});
++    emscripten::val zero_constant =
++        model_builder.CreateOrGetConstant<int32_t>(ONNX_NAMESPACE::TensorProto_DataType_INT32, 0, {1});
++    emscripten::val sequence_length_constant = model_builder.CreateOrGetConstant<int32_t>(
++        ONNX_NAMESPACE::TensorProto_DataType_INT32, static_cast<int32_t>(qkv_sequence_length), {1});
++    offset_options.set("label", node.Name() + "_/GQA/chunk_offset/total_seqlens");
++    emscripten::val total_seqlens =
++        model_builder.GetBuilder().call<emscripten::val>("add", seqlens_k_input, one_constant, offset_options);
++    offset_options.set("label", node.Name() + "_/GQA/chunk_offset/past_seqlens");
++    emscripten::val past_seqlens = model_builder.GetBuilder().call<emscripten::val>(
++        "sub", total_seqlens, sequence_length_constant, offset_options);
++    offset_options.set("label", node.Name() + "_/GQA/chunk_offset/clamp");
++    chunk_offset = model_builder.GetBuilder().call<emscripten::val>("max", past_seqlens, zero_constant, offset_options);
++  }
++
+   emscripten::val position_ids = emscripten::val::undefined();
+   bool use_position_ids_as_offset = false;
+   if (has_position_ids) {
+@@ -251,19 +278,23 @@ Status GroupQueryAttentionOpBuilder::AddStaticShapeToModelBuilder(ModelBuilder&
+     // with pre-allocated KV cache (freeDimensionOverrides), has_past_key is always true.
+     //
+     // - Prefill (qkv_sequence_length > 1): positions start from 0
++    // - Chunked prefill (1 < qkv_sequence_length < total_sequence_length): positions start from the number of
++    //   tokens already in the KV cache (chunk_offset)
+     // - Decode (qkv_sequence_length == 1): position = seqlens_k (the actual sequence position)
+     //
+     // Note: We cannot use past_sequence_length from the static shape because it represents the
+     // pre-allocated cache size (total_sequence_length), not the actual number of valid tokens.
+-    if (qkv_sequence_length == 1) {
+-      // During decode, use seqlens_k as the position offset for rotary embedding.
+-      // seqlens_k has shape [batch_size], but we need [batch_size, 1] to properly broadcast
++    if (qkv_sequence_length == 1 || is_subsequent_chunk) {
++      // During decode, use seqlens_k as the position offset for rotary embedding. For a prompt chunk the offset
++      // is the number of tokens already cached.
++      // The offset has shape [batch_size], but we need [batch_size, 1] to properly broadcast
+       // with position_ids_range which has shape [1, sequence_length] in ApplyRotaryEmbedding.
+       emscripten::val reshape_options = emscripten::val::object();
+       reshape_options.set("label", node.Name() + "_/GQA/seqlens_k_reshape_for_position");
+ 
+       emscripten::val reshaped_seqlens_k = model_builder.GetBuilder().call<emscripten::val>(
+-          "reshape", seqlens_k_input, emscripten::val::array(std::vector<uint32_t>({batch_size, 1})), reshape_options);
++          "reshape", is_subsequent_chunk ? chunk_offset : seqlens_k_input,
++          emscripten::val::array(std::vector<uint32_t>({batch_size, 1})), reshape_options);
+ 
+       // seqlens_k is INT32, but position_ids_range in ApplyRotaryEmbedding may be INT64
+       // if int64 is supported. We need to cast to match the expected type.
+@@ -462,9 +493,16 @@ Status GroupQueryAttentionOpBuilder::AddStaticShapeToModelBuilder(ModelBuilder&
+       model_builder.CreateOrGetConstant<int>(ONNX_NAMESPACE::TensorProto_DataType_INT32, 0, {1});
+ 
+   // Use concat and reshape to achieve scatter_indices
+-  common_options.set("label", node.Name() + "_/GQA/scatter/where");
+-  emscripten::val scatter_pos = model_builder.GetBuilder().call<emscripten::val>(
+-      "where", condition_constant, value_zero_constant, seqlens_k_input, common_options);
++  // A prompt chunk that continues the cache (chunked prefill) is scattered at the cache offset, which is also the
++  // offset of the causal mask below.
++  emscripten::val scatter_pos = emscripten::val::undefined();
++  if (is_subsequent_chunk) {
++    scatter_pos = chunk_offset;
++  } else {
++    common_options.set("label", node.Name() + "_/GQA/scatter/where");
++    scatter_pos = model_builder.GetBuilder().call<emscripten::val>(
++        "where", condition_constant, value_zero_constant, seqlens_k_input, common_options);
++  }
+ 
+   common_options.set("label", node.Name() + "_/GQA/right_constant/add");
+   right_constant = model_builder.GetBuilder().call<emscripten::val>("add", right_constant, scatter_pos, common_options);
+@@ -1505,8 +1543,16 @@ bool GroupQueryAttentionOpBuilder::IsOpSupportedImpl(const GraphViewer& graph_vi
+   if (!total_sequence_length.isUndefined()) {
+     if (known_sequence_length && sequence_length > 1) {
+       if (sequence_length != total_sequence_length.as<int32_t>()) {
+-        LOGS(logger, VERBOSE) << op_type << " sequence_length != total_sequence_length. Not first prompt.";
+-        return false;
++        // Chunked prefill: with static shapes a prompt chunk continues the fixed-size KV cache when the cache is
++        // as long as total_sequence_length (past_sequence_length == present_sequence_length). AddStaticShapeToModelBuilder
++        // scatters the chunk at seqlens_k + 1 - sequence_length. The dynamic path does not support it.
++        const bool is_chunk_of_fixed_cache = UseStaticShapePath() && has_past_key && known_past_sequence_length &&
++                                             past_sequence_length == total_sequence_length.as<int32_t>() &&
++                                             sequence_length < past_sequence_length;
++        if (!is_chunk_of_fixed_cache) {
++          LOGS(logger, VERBOSE) << op_type << " sequence_length != total_sequence_length. Not first prompt.";
++          return false;
++        }
+       }
+       // For decoding stage, it requires past_sequence_length == total_sequence_length.
+     } else if (known_sequence_length && sequence_length == 1) {
