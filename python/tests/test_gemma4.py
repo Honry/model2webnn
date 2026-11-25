@@ -113,3 +113,21 @@ def test_compile_a_gemma4_model_into_a_package_and_verify_it(tmp_path, capsys):
     ids = [int(t) for t in np.random.default_rng(0).integers(3, 300, 19)]
     assert verify_package(out, str(tmp_path / "hf"), prompt="", steps=4, token_ids=ids, variants=["staged-r4-float32"], chunks=[8, 16], skip_float_reference=True) == 0
     assert "RESULT: pipeline OK" in capsys.readouterr().out
+
+
+def test_lm_head_is_split_into_row_blocks_when_one_tensor_would_exceed_the_webnn_limit(tiny, monkeypatch):
+    """The dequantized lm_head matrix of the real vocabulary in float32 is 2.7 GB (limit 2 GiB per WebNN tensor): row blocks, bound as contiguous views of the table, same logits."""
+    from pathlib import Path
+
+    fixtures = Path(__file__).parent / "fixtures"
+    real = arch.spec_from_config(json.loads((fixtures / "gemma4_e4b_config.json").read_text()), json.loads((fixtures / "gemma4_e4b_generation_config.json").read_text()))
+    assert G.lm_head_parts(real, D.GraphOptions(compute_type="float32")) == 4 and G.lm_head_parts(real, D.GraphOptions(compute_type="float16")) == 2
+    spec, _, root, _ = tiny
+    tokens = [int(t) for t in np.random.default_rng(2).integers(3, spec.vocab, 11)]
+    whole = Gemma4Runner(spec, root / "pkg" / "weights", max_length=64, chunk_sizes=(8,), staging_rows=4)
+    assert G.lm_head_parts(spec, whole.opt) == 1
+    expected = whole.prefill(tokens)
+    monkeypatch.setattr(G, "WEBNN_TENSOR_LIMIT", 131072)   # 3 blocks of 128 rows for the tiny vocabulary of 384
+    split = Gemma4Runner(spec, root / "pkg" / "weights", max_length=64, chunk_sizes=(8,), staging_rows=4)
+    assert G.lm_head_parts(spec, split.opt) == 3 and sorted(c.external for c in split.g["lm_head"].constants.values() if c.external) == [f"lm_head_{k}_{i}" for k in ("scale", "weight") for i in range(3)]
+    np.testing.assert_allclose(split.prefill(tokens), expected, atol=1e-3)

@@ -226,15 +226,34 @@ def build_tail_graph(spec, opt: GraphOptions, *, seq: int, name: str = "tail"):
     return b.build()
 
 
+WEBNN_TENSOR_LIMIT = 1 << 31   # bytes: a WebNN tensor (the dequantized lm_head matrix of this vocabulary in float32 is 2.7 GB) may not be bigger than this
+
+
+def lm_head_parts(spec, opt: GraphOptions) -> int:
+    """How many row blocks the lm_head matrix is split into so that the dequantized (compute type) block stays well below the tensor size limit of WebNN."""
+    k = max(1, -(-(spec.vocab_padded * spec.hidden * (4 if opt.compute_type == "float32" else 2)) // (WEBNN_TENSOR_LIMIT // 2)))
+    while k < 256 and (spec.vocab_padded % k or (spec.vocab_padded // k) % 128):
+        k += 1
+    return k
+
+
 def build_lm_head_graph(spec, opt: GraphOptions, *, name: str = "lm_head"):
-    """final_hidden_states -> logits = softcap * tanh(logits / softcap); the int8 per-row table is a constant of the graph."""
+    """final_hidden_states -> logits = softcap * tanh(logits / softcap); the int8 per-row table is a constant of the graph, in `lm_head_parts` row blocks
+    (externals lm_head_weight_<i> / lm_head_scale_<i>, contiguous rows of the table) when the whole matrix would be too big for one WebNN tensor."""
     b = GraphBuilder(name)
     c = _ctx(b, spec, opt, spec.layer_types[0])
     hidden = c.to_compute(c.declare("final_hidden_states", "float16", [1, 1, spec.hidden]))
-    w = {n: b.constant(dtype, shape, external=n) for n, dtype, shape in lm_head_weight_specs(spec)}
-    zero_point = b.constant("int8", (spec.vocab_padded, 1), fill=0, cache_key=("zp", "int8", spec.vocab_padded))
-    dequantized = c.to_compute(b.dequantize_linear(w["lm_head_weight"], w["lm_head_scale"], zero_point))
-    logits = b.gemm(b.reshape(hidden, [1, spec.hidden]), dequantized, b_transpose=True)
+    parts = lm_head_parts(spec, opt)
+    rows = spec.vocab_padded // parts
+    zero_point = b.constant("int8", (rows, 1), fill=0, cache_key=("zp", "int8", rows))
+    pieces = []
+    for i in range(parts):
+        suffix = f"_{i}" if parts > 1 else ""
+        weight = b.constant("int8", (rows, spec.hidden), external=f"lm_head_weight{suffix}")
+        scale = b.constant("float16", (rows, 1), external=f"lm_head_scale{suffix}")
+        dequantized = c.to_compute(b.dequantize_linear(weight, scale, zero_point))
+        pieces.append(b.gemm(b.reshape(hidden, [1, spec.hidden]), dequantized, b_transpose=True))
+    logits = pieces[0] if parts == 1 else b.concat(pieces, 1)
     if spec.logit_softcap:
         cap = spec.logit_softcap
         logits = b.mul(b.tanh(b.mul(logits, c.scalar(1.0 / cap, 2))), c.scalar(cap, 2))

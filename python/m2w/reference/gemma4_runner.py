@@ -38,7 +38,7 @@ class Gemma4Runner:
         self.attention_names = {k: [n for n, _, _ in G.attention_weight_specs(spec, k)] for k in G.KINDS}
         self.ffn_names = [n for n, _, _ in G.feed_forward_weight_specs(spec)]
         self.head_names = [n for n, _, _ in G.head_extra_weight_specs(spec)]
-        self.externals = {"lm_head_weight": self.reader.embedding_rows_raw()[0], "lm_head_scale": self.reader.embedding_rows_raw()[1]}
+        self.externals = self._lm_head_externals()
         self.final_gamma = self.reader.raw(self.reader._role["final_norm"], "final_norm_gamma")
         self.reset()
 
@@ -71,6 +71,16 @@ class Gemma4Runner:
                                 "staging_rows": info.get("staging_rows", 64)})
         return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens,
                    graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
+
+    def _lm_head_externals(self) -> dict:
+        """The lm_head graph binds the embedding table as row blocks (lm_head_weight_<i> / lm_head_scale_<i>) when it is too big for one tensor: contiguous views of the table."""
+        weight, scale = self.reader.embedding_rows_raw()
+        out = {"lm_head_weight": weight, "lm_head_scale": scale}
+        parts = G.lm_head_parts(self.spec, self.opt)
+        rows = self.spec.vocab_padded // parts
+        for i in range(parts if parts > 1 else 0):
+            out[f"lm_head_weight_{i}"], out[f"lm_head_scale_{i}"] = weight[i * rows:(i + 1) * rows], scale[i * rows:(i + 1) * rows]
+        return out
 
     # ----------------------------------------------------------------------------------------------- weights / host side
     def _weights(self, layer: int, names) -> dict:

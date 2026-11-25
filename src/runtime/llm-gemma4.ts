@@ -165,10 +165,13 @@ export class Gemma4LLM {
   private async buildGraphs(progress: Progress, lmHead: { weight: Uint8Array; scale: Uint8Array }) {
     const t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength), table = plan.graphs[this.variant.id];
     const decode = table.decode[key] as unknown as GemmaDecodeTable;
-    const external = (c: { external?: string }) => {
-      if (c.external === 'lm_head_weight') return lmHead.weight;
-      if (c.external === 'lm_head_scale') return new Uint8Array(lmHead.scale);
-      throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
+    // the lm_head graph binds the table as row blocks lm_head_weight_<i> / lm_head_scale_<i> when it is too big for one WebNN tensor: contiguous views of the table
+    const external = (c: { external?: string; shape?: number[] }) => {
+      const part = /^lm_head_(weight|scale)(?:_(\d+))?$/.exec(c.external ?? '');
+      if (!part) throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
+      const [, kind, index] = part, rows = (c.shape as number[])[0], first = index === undefined ? 0 : +index * rows, count = index === undefined ? undefined : rows;
+      const bytes = kind === 'weight' ? lmHead.weight : lmHead.scale, width = kind === 'weight' ? this.pkg.model.hidden : 2;
+      return count === undefined ? (kind === 'weight' ? bytes : new Uint8Array(bytes)) : new Uint8Array(bytes.buffer, bytes.byteOffset + first * width, count * width);
     };
     const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
       progress({ stage: 'build', message: label });
