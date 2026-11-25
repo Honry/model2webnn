@@ -41,6 +41,8 @@ for (const name of ["attentionType", "rmsStyle", "valueLayout", "gqaStyle", "blo
     if (query.get(name)) graphOptions[name] = query.get(name);   // per-block diagnostics, see qwen3_subgraphs.js
 if (query.get("mergeRope") === "1") graphOptions.mergeRope = true;               // one "rope" input [1,2,S,128] instead of rope_cos / rope_sin
 if (query.get("deriveRowsToKeep") === "1") graphOptions.deriveRowsToKeep = true;   // rows_to_keep = 1 - row_selector inside the graph (S = 1)
+if (query.get("kvNoInput") === "1") graphOptions.kvNoInput = true;   // kvStyle=tensorScatter without the cache input (PoC browser build), see qwen3_subgraphs.js
+if (query.get("scatterOptions")) graphOptions.scatterOptions = JSON.parse(query.get("scatterOptions"));   // e.g. {"axis":2,"shape":"$shape"}
 if (query.get("keepPresentRows") === "1") graphOptions.keepPresentRows = true;   // A/B: keep the (unused) present_key / present_value outputs of the fused graphs
 if (query.get("stagingRows")) graphOptions.stagingRows = +query.get("stagingRows");
 // like chat.html: decode (S = 1) blocks default to kvStyle=staged (+ the natural value layout it needs: with the transposed layout the NPU compiler returns NaN, see 05 notes 27); kvStyle=onehot gives the whole-cache update

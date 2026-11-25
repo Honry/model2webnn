@@ -237,10 +237,20 @@ function repeatKeyValueHeads(context, x, trailingShape) {
 //          "broadcast"  : past * rows_to_keep + row_selector * new           (S = 1 only: the matmul with contraction 1 is an outer product = a broadcast mul)
 //          "select"     : where(row_selector > 0, new, past)                 (S = 1 only: one element-wise select, new rows broadcast)
 //          "scatterND"  : scatterND(past, kv_indices, new)                   (kv_indices int32 [1,8,S,3] = (0, head, row); natural value layout)
+//          kvNoInput=true (PoC browser build; kvStyle "tensorScatter" only): tensorScatter(new, kv_write_index, {axis: 2, ...}) WITHOUT the cache as input: the graph has no past_key / past_value
+//                           inputs, the op output (updated_key / updated_value) IS the cache and is bound as a graph output only (persisting across dispatches). The output shape cannot come from an
+//                           input any more: scatterOptions (a template, "$shape" is replaced by the cache shape [1,kvHeads,P,128]; default {axis: 2, shape: "$shape", outputShape: "$shape"}) is passed as the options.
 //          "tensorScatter": tensorScatter(past, new, kv_write_index, {axis: 2})  (kv_write_index int32|int64 [1] = the first cache row that is written; the S new rows go to
 //                           rows kv_write_index .. kv_write_index+S-1; natural value layout; attention reads the result like scatterND)
 // ---------------------------------------------------------------------------------------------------------------------
-function updateKeyValueCache(context, { pastKey, pastValue, key, value, pastLength, sequenceLength, naturalValue, selectorPrefix = "", style }) {
+// tensorScatter without the cache input (kvNoInput): the options of the PoC op; "$shape" in the template is replaced by the cache shape
+function scatterWithoutInput(context, update, writeIndex, cacheShape) {
+    const template = context.options.scatterOptions || { axis: 2, shape: "$shape", outputShape: "$shape" };
+    const options = Object.fromEntries(Object.entries(template).map(([name, value]) => [name, value === "$shape" ? [...cacheShape] : value]));
+    return context.builder.tensorScatter(update, writeIndex, options);
+}
+
+function updateKeyValueCache(context, { pastKey, pastValue, key, value, pastLength, sequenceLength, naturalValue, selectorPrefix = "", style, noInput = false }) {
     const { builder } = context, kvStyle = style || context.options.kvStyle || "onehot";
     const presentKey = toFloat16(context, key), presentValue = toFloat16(context, value);
     if (kvStyle === "scatterND") {
@@ -253,6 +263,10 @@ function updateKeyValueCache(context, { pastKey, pastValue, key, value, pastLeng
         if (typeof builder.tensorScatter !== "function") throw new Error("this browser has no MLGraphBuilder.tensorScatter");
         // one write position for the whole [1, kvHeads, S, 128] update: the sequence axis is 2 in both caches
         const writeIndex = context.sharedInput("kv_write_index", context.options.scatterIndexType || "int32", [1]);
+        if (noInput) {
+            const cacheShape = [1, numKeyValueHeads, pastLength, headDim];
+            return { updated_key: scatterWithoutInput(context, presentKey, writeIndex, cacheShape), updated_value: scatterWithoutInput(context, presentValue, writeIndex, cacheShape) };
+        }
         return { updated_key: builder.tensorScatter(pastKey, presentKey, writeIndex, { axis: 2 }), updated_value: builder.tensorScatter(pastValue, presentValue, writeIndex, { axis: 2 }) };
     }
     const selectOnly = sequenceLength === 1 && kvStyle === "select";   // select needs only row_selector (an unused graph input would be dropped and break the binding)
@@ -304,6 +318,8 @@ function attentionHalf(context, residualStream, weights, { sequenceLength, pastL
         && (((context.options.kvStyle === "scatterND" || context.options.kvStyle === "tensorScatter") && context.options.scatterAttention !== "concat") || context.options.attendInCache === true);
     // kvStyle=staged (decode only; use valueLayout=natural): the O(cache) one-hot update is replaced by an update of a SMALL staging buffer [1,8,R,128] that holds the newest R rows;
     // attention reads concat(main cache, updated staging). The main cache is only written by a separate "flush" graph once every R steps (see 05 notes 27).
+    const noInput = pastLength > 0 && context.options.kvNoInput === true;   // tensorScatter without the cache input: no past_key / past_value inputs (see updateKeyValueCache)
+    if (noInput && !(context.options.kvStyle === "tensorScatter" && attendInCache)) throw new Error("kvNoInput needs kvStyle=tensorScatter with fuseKvUpdate");
     const staged = pastLength > 0 && sequenceLength === 1 && context.options.fuseKvUpdate && context.options.kvStyle === "staged";
     const stagingRows = context.options.stagingRows || 64;
     const totalLength = attendInCache ? pastLength : staged ? pastLength + stagingRows : pastLength + sequenceLength;
@@ -316,9 +332,9 @@ function attentionHalf(context, residualStream, weights, { sequenceLength, pastL
     const cos = context.ropeParts ? context.ropeParts.cos : context.sharedInput("rope_cos", "float16", [1, 1, sequenceLength, headDim]);
     const sin = context.ropeParts ? context.ropeParts.sin : context.sharedInput("rope_sin", "float16", [1, 1, sequenceLength, headDim]);
     const attentionMask = context.sharedInput("attention_mask", maskDataType, [1, 1, sequenceLength, totalLength]);
-    const pastKey = pastLength > 0 ? context.declareInput(prefix + "past_key", "float16", [1, numKeyValueHeads, pastLength, headDim]) : null;
+    const pastKey = pastLength > 0 && !noInput ? context.declareInput(prefix + "past_key", "float16", [1, numKeyValueHeads, pastLength, headDim]) : null;
     const naturalValue = context.options.valueLayout === "natural";   // diagnostic: value cache [1,kvHeads,T,128] (default: transposed [1,kvHeads,128,T])
-    const pastValue = pastLength > 0 ? context.declareInput(prefix + "past_value", "float16", naturalValue ? [1, numKeyValueHeads, pastLength, headDim] : [1, numKeyValueHeads, headDim, pastLength]) : null;
+    const pastValue = pastLength > 0 && !noInput ? context.declareInput(prefix + "past_value", "float16", naturalValue ? [1, numKeyValueHeads, pastLength, headDim] : [1, numKeyValueHeads, headDim, pastLength]) : null;
 
     // 1. normalise, then project to query / key / value
     const normalized = rmsNorm(context, residualStream, weights.input_layernorm_gamma, 3);
@@ -342,7 +358,7 @@ function attentionHalf(context, residualStream, weights, { sequenceLength, pastL
     const attentionType = context.options.attentionType === "float16" ? "float16" : context.computeType;
     const asAttentionType = (x) => (x.dataType === attentionType ? x : builder.cast(x, attentionType));
     const queryForAttention = asAttentionType(scaledQuery), keyForAttention = asAttentionType(key), valueForAttention = asAttentionType(value);
-    const updateCache = () => updateKeyValueCache(context, { pastKey, pastValue, key, value, pastLength, sequenceLength, naturalValue });
+    const updateCache = () => updateKeyValueCache(context, { pastKey, pastValue, key, value, pastLength, sequenceLength, naturalValue, noInput });
     const updatedCache = attendInCache ? updateCache() : null;
     let stagingUpdate = null;
     if (staged) {
