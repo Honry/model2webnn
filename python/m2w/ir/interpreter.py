@@ -44,6 +44,8 @@ def _eval(op: str, ins: list, opt: dict, out_dtype: str):
         return np.sqrt(_f32(x)).astype(np_dtype(out_dtype))
     if op == "sigmoid":
         return (1.0 / (1.0 + np.exp(-_f32(x)))).astype(np_dtype(out_dtype))
+    if op == "tanh":
+        return np.tanh(_f32(x)).astype(np_dtype(out_dtype))
     if op == "cast":
         return x.astype(np_dtype(out_dtype))
     if op == "reshape":

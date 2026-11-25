@@ -21,13 +21,13 @@ describe('ir-loader', () => {
     const { builder, calls } = mockBuilder();
     const { inputs, outputs } = loadGraph(builder, doc);
     expect(Object.keys(inputs)).toEqual(doc.inputs.map((i) => i.name));
-    expect(Object.keys(outputs)).toEqual(['e', 'updated', 'half_const']);
+    expect(Object.keys(outputs)).toEqual(['e', 'updated', 'scattered', 'half_const']);
     expect(calls.length).toBe(doc.inputs.length + doc.constants.length + doc.nodes.length);
     const ops = calls.slice(doc.inputs.length + doc.constants.length).map((c) => c.op);
     expect(ops).toEqual(doc.nodes.map((n) => n.op));
     // every operator the IR defines appears in the golden graph
-    for (const op of ['add', 'sub', 'mul', 'div', 'pow', 'sqrt', 'sigmoid', 'cast', 'reshape', 'transpose', 'slice', 'concat', 'expand', 'reduceMean',
-      'reduceMax', 'reduceSum', 'softmax', 'matmul', 'gemm', 'dequantizeLinear', 'tensorScatter']) expect(ops).toContain(op);
+    for (const op of ['add', 'sub', 'mul', 'div', 'pow', 'sqrt', 'sigmoid', 'tanh', 'cast', 'reshape', 'transpose', 'slice', 'concat', 'expand', 'reduceMean',
+      'reduceMax', 'reduceSum', 'softmax', 'matmul', 'gemm', 'dequantizeLinear', 'tensorScatter', 'scatterND']) expect(ops).toContain(op);
   });
 
   it('maps options to WebNN call shapes', () => {

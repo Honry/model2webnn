@@ -19,11 +19,14 @@ def tiny_all_ops():
     m = b.matmul(b.reshape(y, [1, 4, 6]), b.reshape(matrix, [1, 6, 8]))             # [1,4,8]
     n = b.mul(m, b.div(b.scalar(1, "float32", 3), b.sqrt(b.add(b.reduce_mean(b.pow(m, b.scalar(2, "float32", 3)), [2], True), b.scalar(1e-6, "float32", 3)))))
     p = b.softmax(b.sub(n, b.reduce_max(n, [2], True)), 2)
-    r = b.reduce_sum(b.mul(p, b.sigmoid(n)), [1], False)                              # [1,8]
+    r = b.reduce_sum(b.mul(p, b.tanh(b.sigmoid(n))), [1], False)                              # [1,8]
     parts = b.concat([b.slice(r, [0, 0], [1, 4]), b.slice(r, [0, 4], [1, 4])], 1)     # [1,8]
     e = b.reshape(b.expand(b.reshape(parts, [1, 1, 1, 8]), [1, 2, 3, 8]), [1, 6, 8])
     updated = b.tensor_scatter(cache, rows, index, axis=2)
+    nd_indices = b.input("nd_indices", "int32", [1, 2, 2, 3], "control")
+    scattered = b.scatter_nd(cache, nd_indices, rows)
     b.output("e", e)
     b.output("updated", updated)
+    b.output("scattered", scattered)
     b.output("half_const", b.mul(b.cast(parts, "float16"), b.scalar(1e-6, "float16", 2)))
     return b.build()

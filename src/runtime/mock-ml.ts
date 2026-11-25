@@ -35,6 +35,7 @@ export class MockBuilder {
   add = this.binary; sub = this.binary; mul = this.binary; div = this.binary; pow = this.binary;
   sqrt = (x: MockOperand) => this.op(x.dataType, x.shape);
   sigmoid = (x: MockOperand) => this.op(x.dataType, x.shape);
+  tanh = (x: MockOperand) => this.op(x.dataType, x.shape);
   cast = (x: MockOperand, to: string) => this.op(to, x.shape);
   reshape = (x: MockOperand, shape: number[]) => { if (count(shape) !== count(x.shape)) throw new Error(`reshape [${x.shape}] -> [${shape}]`); return this.op(x.dataType, shape); };
   transpose = (x: MockOperand, o: { permutation: number[] }) => this.op(x.dataType, o.permutation.map((p) => x.shape[p]));

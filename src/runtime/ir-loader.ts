@@ -95,7 +95,7 @@ export function constantData(c: IRConstant): ArrayBufferView {
 type Ref = (name: string | null) => OperandLike;
 
 const BINARY = new Set(['add', 'sub', 'mul', 'div', 'pow']);
-const UNARY = new Set(['sqrt', 'sigmoid']);
+const UNARY = new Set(['sqrt', 'sigmoid', 'tanh']);
 const REDUCE = new Set(['reduceMean', 'reduceMax', 'reduceSum']);
 
 function emitNode(b: BuilderLike, n: IRNode, ref: Ref): OperandLike {

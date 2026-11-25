@@ -24,8 +24,10 @@ def test_golden_graph_loads_and_runs():
     rng = np.random.default_rng(0)
     out = run(g, {"x": rng.standard_normal((1, 4, 8)).astype(np.float32), "q": rng.integers(-8, 8, (2, 6, 4)).astype(np.int8),
                   "s": rng.uniform(0.05, 0.2, (2, 6, 1)).astype(np.float16), "cache": np.zeros((1, 2, 6, 4), np.float16),
-                  "rows": np.ones((1, 2, 2, 4), np.float16), "index": np.array([1], np.int32)})
+                  "rows": np.ones((1, 2, 2, 4), np.float16), "index": np.array([1], np.int32),
+                  "nd_indices": np.array([[[[0, 0, 4], [0, 0, 5]], [[0, 1, 0], [0, 1, 1]]]], np.int32)})
     assert out["e"].shape == (1, 6, 8) and out["updated"][0, :, 1:3].min() == 1
+    assert out["scattered"][0, 0, 4:6].min() == 1 and out["scattered"][0, 1, 0:2].min() == 1 and out["scattered"][0, 0, 0:4].max() == 0
 
 
 def test_golden_and_generated_graphs_satisfy_the_json_schema():
