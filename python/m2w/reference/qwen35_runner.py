@@ -178,13 +178,16 @@ class Qwen35Runner:
         out = run(graphs["head"], {"hidden_states": hidden, **feeds_for(0)})
         store(0, out)
         residual, attention = out["residual"], out["attention_output"]
+        self.trace = [residual]   # the hidden state entering layer i (the residual of its BLOCK): what tools/qwen35_trace.py writes for the on-device comparison (bench/raw/qwen35check.html)
         for i in range(N - 1):
             out = run(graphs["blocks"][self.kinds[i + 1]], {"residual": residual, "attention_output": attention, **self._weights(i, self.ffn_names), **feeds_for(i + 1)})
             store(i + 1, out)
             residual, attention = out["next_residual"], out["next_attention_output"]
+            self.trace.append(residual)
         if not last:
             return None
         tail = run(graphs["tail"], {"residual": residual, "attention_output": attention, **self._weights(N - 1, self.ffn_names), "final_norm_gamma": self.final_gamma})
+        self.trace.append(tail["final_hidden_states"])
         logits = run(self.g["lm_head"], {"final_hidden_states": tail["final_hidden_states"]}, externals=self.externals)["logits"]
         return logits.reshape(-1)[: s.vocab].astype(np.float32)
 

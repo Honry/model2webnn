@@ -23,6 +23,8 @@ type Cache = { key: ML; value: ML };
 type LinearState = { conv: ML; rec: ML };
 
 export class Qwen35LLM {
+  /** debugging (bench/raw/qwen35check.html): create the per-layer residual tensors readable so that debugTrace() can read them back; set BEFORE load */
+  static debugReadback = false;
   readonly pkg: ModelPackage;
   maxLength = 0;
   variant!: Variant;
@@ -225,11 +227,12 @@ export class Qwen35LLM {
     const activations = async (S: number, columns: number): Promise<Activations> => {
       const a: Activations = { hidden: await this.writable('float16', [1, S, s.hidden]), ropeCos: await this.writable('float16', [1, 1, S, s.head_dim]), ropeSin: await this.writable('float16', [1, 1, S, s.head_dim]),
         mask: await this.writable('float16', [1, 1, S, columns]), residuals: [], attentionOutputs: [], finalHidden: null };
+      const readable = { readable: Qwen35LLM.debugReadback };
       for (let l = 0; l < N; l++) {
-        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden]));
+        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], readable));
         a.attentionOutputs.push(await this.createTensor('float16', [1, S, s.hidden]));
       }
-      a.finalHidden = await this.createTensor('float16', [1, 1, s.hidden]);
+      a.finalHidden = await this.createTensor('float16', [1, 1, s.hidden], readable);
       return a;
     };
     const pair = async (rows: number, columns: number): Promise<Selectors> => ({ keep: await this.writable('float16', [1, 1, rows, 1]), select: await this.writable('float16', [1, 1, rows, columns]) });
@@ -326,6 +329,22 @@ export class Qwen35LLM {
   }
 
   planFor(tokenCount: number): number[] { return planPrefill(this.chunkSizes, tokenCount, this.fixedTokens); }
+
+  /** Debugging: prefill `tokens`, then one decode step with `decodeToken` (not sampled), reading back after each of the two the hidden state that enters every layer (and the final hidden state).
+   *  -> per phase an array of N + 1 float16 arrays ([rows * hidden]: all rows of the last prefill chunk, left-padded, | the one row of the decode step) and the logits. Needs Qwen35LLM.debugReadback. */
+  async debugTrace(tokens: number[], decodeToken: number) {
+    if (!Qwen35LLM.debugReadback) throw new Error('set Qwen35LLM.debugReadback = true before loading the model');
+    const readAll = async (a: Activations) => {
+      const out: Half[] = [];
+      for (const t of [...a.residuals, a.finalHidden]) { const h = newHalf(t.shape.reduce((x: number, y: number) => x * y, 1)); await this.ctx.readTensor(t, h); out.push(h); }
+      return out;
+    };
+    const plan = this.planFor(tokens.length), last = this.prefillSets.get(plan[plan.length - 1]) as PrefillSet;
+    const prefillLogits = (await this.prefill(tokens)).slice();
+    const prefill = await readAll(last.act);
+    const decodeLogits = (await this.step(decodeToken)).slice();
+    return { plan, prefill, prefillLogits, decode: await readAll(this.dec), decodeLogits };
+  }
 
   private get cacheFull() { return this.position >= this.P; }
 
