@@ -1,6 +1,7 @@
 // Times every graph of a package ON ITS OWN (random inputs, N back-to-back dispatches of the same tensors, one readback): which graph of a model is slow?
 // URL: m2wgraphs.html?package=../packages/aion-2.3b-i8/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
 //      m2wgraphs.html?package=../packages/gemma4-e4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Gemma 4: one block graph per attention kind, and the sum over the layers = an estimate of a decode step)
+//      m2wgraphs.html?package=../packages/qwen35-4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Qwen3.5: linear_attention / full_attention blocks; chunk=128&only=prefill_block for the prefill)
 import { openPackage, loadGraph } from "../../lib/runtime/index.js";
 import { buildLmHeadGraph, setLmHeadFormat } from "./qwen3_subgraphs.js?v=20261124a";   // the hand-written lm_head (Qwen3-4B dims), timed side by side with the package graph
 
@@ -26,7 +27,9 @@ function dataFor(spec) {
     if (spec.dataType === "uint8" || spec.dataType === "int8") return randomBytes(n);
     if (spec.dataType === "int32") return new Int32Array(n);
     const half = new Float16Array(n);   // activations, scales, gammas, caches, masks (0 = visible), selectors
-    if (spec.name.endsWith("_scale")) half.fill(0.002); else if (spec.name.endsWith("_gamma") || spec.name === "layer_scalar") half.fill(1); else if (spec.role === "weight") half.fill(0.02); else if (spec.role === "activation" || spec.role === "kv") half.fill(0.05);
+    if (spec.name.endsWith("_scale")) half.fill(0.002); else if (spec.name.endsWith("_gamma") || spec.name === "layer_scalar" || spec.name === "decay_rate" || spec.name === "valid_mask") half.fill(1);
+    else if (spec.name === "conv_perm") { const size = spec.shape[1]; for (let i = 0; i < size; i++) half[i * size + i] = 1; }   // a permutation matrix: the identity
+    else if (spec.name === "dt_bias") half.fill(0); else if (spec.role === "weight") half.fill(0.02); else if (spec.role === "activation" || spec.role === "kv") half.fill(0.05);
     return spec.dataType === "float32" ? Float32Array.from(half) : half;
 }
 
@@ -131,10 +134,10 @@ async function main() {
     const pkg = await openPackage(packageUrl, false);
     const key = param("maxLength", String(Math.min(...pkg.plan.max_lengths))), chunk = param("chunk", String(Math.min(...Object.keys(pkg.plan.graphs[pkg.plan.default_variant].prefill[key]).map(Number))));
     const variant = param("variant", pkg.plan.default_variant), table = pkg.plan.graphs[variant];
-    const decode = table.decode[key], prefill = table.prefill[key][chunk], gemma = pkg.plan.architecture_kind === "gemma4";
+    const decode = table.decode[key], prefill = table.prefill[key][chunk], kind = pkg.plan.architecture_kind, gemma = kind === "gemma4" || kind === "qwen35";   // one block graph per attention kind
     const blocksOf = (phase, t) => (gemma ? Object.entries(t.blocks).map(([kind, p]) => [`${phase}_block ${kind}`, p]) : [[`${phase}_block`, t.block]]);
     const list = [["lm_head", table.lm_head], ["decode_head", decode.head], ...blocksOf("decode", decode), ["decode_tail", decode.tail],
-        ...(gemma ? Object.entries(decode.flush).map(([type, p]) => [`kv_flush ${type}`, p]) : decode.flush ? [["kv_flush", decode.flush]] : []),
+        ...(kind === "gemma4" ? Object.entries(decode.flush).map(([type, p]) => [`kv_flush ${type}`, p]) : decode.flush ? [["kv_flush", decode.flush]] : []),
         ...Object.entries(decode.block_groups ?? {}).map(([k, p]) => [`decode_block_x${k}`, p]),
         ["prefill_head", prefill.head], ...blocksOf("prefill", prefill), ["prefill_tail", prefill.tail]].filter(([name]) => !only.length || only.some((o) => name === o || name.startsWith(o + " ")));
     const chainedMs = {};   // graph name -> ms per dispatch when chained: the sum over the layers estimates a decode step

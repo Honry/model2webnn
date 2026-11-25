@@ -12,7 +12,7 @@ if [ "${1:-}" = "--ir" ]; then
   mkdir -p "$bench/ir" && cp "$here"/python/_out/qwen3-4b/*.json "$bench/ir/" && echo "bench/ir: $(ls "$bench/ir" | wc -l) graphs"
 fi
 mkdir -p "$bench/packages"
-for name in tiny-pkg aion-2.3b-i8 qwen3-4b-pkg-i8 gemma4-e4b-pkg; do
+for name in tiny-pkg aion-2.3b-i8 qwen3-4b-pkg-i8 gemma4-e4b-pkg qwen35-4b-pkg; do
   src="$here/python/_out/$name"
   [ "$name" = tiny-pkg ] && src="$here/tests/golden/tiny-package"
   if [ -d "$src" ] && [ ! -e "$bench/packages/$name" ]; then

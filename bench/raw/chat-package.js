@@ -23,6 +23,7 @@ const kvCacheMegabytes = (model, maxLength) => {
     let bytes = 0;
     for (let i = 0; i < model.num_layers; i++) {
         if (model.kv_producer && model.kv_producer[i] >= 0) continue;
+        if (model.layer_types[i] === "linear_attention") continue;   // Gated DeltaNet layers carry a small state instead of a KV cache
         const d = model.layer_dims?.[model.layer_types[i]];
         bytes += 2 * 2 * (d?.num_kv_heads ?? model.num_kv_heads) * (maxLength - 1) * (d?.head_dim ?? model.head_dim) * 2;
     }
@@ -87,7 +88,7 @@ export async function loadPackageModel(ui, { url, deviceType }) {
     const format = pkg.chatFormat, stop = new Set(pkg.model.eos_token_ids);
     const promptIds = (text) => tokenizer.encode(format ? buildPrompt(format, [{ user: text }]) : text);
     let llm = null, current = null;
-    const model = pkg.model, cacheLayers = model.kv_producer?.length ? model.kv_producer.filter((p) => p < 0).length : model.num_layers;
+    const model = pkg.model, cacheLayers = (model.kv_producer?.length ? model.kv_producer.filter((p) => p < 0).length : model.num_layers) - model.layer_types.filter((t) => t === "linear_attention").length;
     document.querySelectorAll(".layerCount").forEach((e) => (e.textContent = model.num_layers));
     document.querySelectorAll(".layerCountMinusOne").forEach((e) => (e.textContent = model.num_layers - 1));
     document.querySelectorAll(".cacheLayerCount").forEach((e) => (e.textContent = cacheLayers));
