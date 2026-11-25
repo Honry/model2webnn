@@ -18,7 +18,16 @@ export async function listPackages() {
 export const peekPackage = (url) => openPackage(url, true);
 export const clearPackageCache = (url) => new CachedSource(new UrlSource(url)).clear();
 
-const kvCacheMegabytes = (model, maxLength) => (model.num_layers * 2 * 2 * model.num_kv_heads * (maxLength - 1) * model.head_dim * 2) / 2 ** 20;
+/** K + V (double buffered) of the layers that have a cache of their own; the head dim / KV heads can differ per layer type (Gemma 4) */
+const kvCacheMegabytes = (model, maxLength) => {
+    let bytes = 0;
+    for (let i = 0; i < model.num_layers; i++) {
+        if (model.kv_producer && model.kv_producer[i] >= 0) continue;
+        const d = model.layer_dims?.[model.layer_types[i]];
+        bytes += 2 * 2 * (d?.num_kv_heads ?? model.num_kv_heads) * (maxLength - 1) * (d?.head_dim ?? model.head_dim) * 2;
+    }
+    return bytes / 2 ** 20;
+};
 
 /** Fill and lock the option selects of the page from what the package contains. `initial`: the session options of the URL. Returns { lock } to call whenever the page re-enables its controls. */
 export function setupPackageControls(pkg, c, initial = {}) {

@@ -313,6 +313,8 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     tokenizer_files = [n for n in TOKENIZER_FILES if (source / n).exists() and not shutil.copy2(source / n, out / "tokenizer" / n)]
 
     source_name = Path(model).name if Path(model).is_dir() else model   # a local folder is recorded by its name, never by its absolute path
+    if "/" not in source_name and source_name.count("--") == 1:
+        source_name = source_name.replace("--", "/")   # the folder of the Hugging Face cache (org--name) is the model id org/name
     index = _write_index(out, spec, source_name, plan, manifest, chat_file, tokenizer_files)
     progress(f"wrote {out} ({index['summary']['weights_bytes'] / 2**20:.0f} MB of weights, {len(index['files'])} files, variants: {', '.join(index['summary']['variants'])})")
     return out

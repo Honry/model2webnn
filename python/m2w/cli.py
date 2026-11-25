@@ -50,6 +50,10 @@ def cmd_inspect(args) -> int:
     dims = spec.decoder_dims()
     per_layer = (dims.hidden * (dims.attention_width + 2 * dims.kv_width) + dims.attention_width * dims.hidden + 3 * dims.hidden * dims.ffn)
     weights = spec.num_layers * per_layer * (0.5 + 2 / dims.group_size) + spec.vocab_padded * spec.hidden * 1.0
+    if spec.builder == "gemma4":   # full attention layers are wider; the per-layer embedding table is int8 (rows read one at a time, not loaded as a whole)
+        wide = spec.decoder_dims("full_attention")
+        weights += sum(2 * dims.hidden * (wide.attention_width + wide.kv_width) - 2 * dims.hidden * (dims.attention_width + dims.kv_width) for t in spec.layer_types if t == "full_attention") * (0.5 + 2 / dims.group_size)
+        weights += spec.vocab_padded * spec.num_layers * spec.ple_dim * 1.0
     kinds = {t: spec.layer_types.count(t) for t in sorted(set(spec.layer_types))}
     print(f"{spec.architecture}  ->  supported (family {spec.family})")
     print(f"  layers {spec.num_layers}  hidden {spec.hidden}  heads {spec.num_heads}/{spec.num_kv_heads}  head_dim {spec.head_dim}  ffn {spec.ffn}")

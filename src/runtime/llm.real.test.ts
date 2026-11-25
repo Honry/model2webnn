@@ -4,7 +4,7 @@
 import { existsSync, openSync, readSync, closeSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { LLM } from './llm.js';
+import { loadModel } from './model.js';
 import type { PackageSource } from './package.js';
 import { installMockBuilder, MockContext } from './mock-ml.js';
 
@@ -17,6 +17,11 @@ const fileSource: PackageSource = {
     try { for (let done = 0; done < size;) done += readSync(fd, buffer, done, Math.min(size - done, 1 << 28), done); } finally { closeSync(fd); }
     return buffer.buffer;
   },
+  slice: async (p, start, end) => {   // Gemma 4: one row of the per-layer embedding table at a time
+    const buffer = new Uint8Array(end - start), fd = openSync(path.join(dir, p), 'r');
+    try { readSync(fd, buffer, 0, end - start, start); } finally { closeSync(fd); }
+    return buffer.buffer;
+  },
 };
 
 describe.skipIf(!dir || !existsSync(path.join(dir, 'm2w.json')))('real package on the validating mock', () => {
@@ -25,25 +30,26 @@ describe.skipIf(!dir || !existsSync(path.join(dir, 'm2w.json')))('real package o
     const context = new MockContext();
     context.allowAlias = process.env.M2W_INPLACE === '1';
     const chunkSizes = process.env.M2W_CHUNKS ? process.env.M2W_CHUNKS.split(',').map(Number) : undefined;
-    const llm = await LLM.load(fileSource, {
+    const llm: any = await loadModel(fileSource, {
       context, cache: false, maxLength: process.env.M2W_MAX_LENGTH ? +process.env.M2W_MAX_LENGTH : undefined, variant: process.env.M2W_VARIANT, chunkSizes, kvInPlace: process.env.M2W_INPLACE === '1',
       blocksPerGraph: process.env.M2W_BPG ? +process.env.M2W_BPG : 1, prefillBlocksPerGraph: process.env.M2W_PBPG ? +process.env.M2W_PBPG : 0,
     });
-    const m = llm.pkg.model, N = m.num_layers, R = llm.variant.staging_rows ?? 0, staged = llm.variant.kv_style === 'staged';
+    const m = llm.pkg.model, N = m.num_layers, R = llm.variant.staging_rows ?? 0, staged = llm.variant.kv_style === 'staged', gemma = llm.pkg.plan.architecture_kind === 'gemma4';
+    const ownCaches = gemma ? (m.kv_producer ?? []).filter((p: number) => p < 0).length || N : N;   // layers that have K / V of their own
     context.onRead = (_t, d) => { d.fill(0); d[3] = 5; };
     const prompt = Array.from({ length: 46 }, (_, i) => 3 + (i % 50)), steps = (staged ? R : 0) + 3;   // staged: enough decode steps to need one flush
     const out: number[] = [];
     for await (const token of llm.generate(prompt, { maxNewTokens: steps + 1, stopTokens: [] })) out.push(token);
     expect(out.length).toBe(steps + 1);
     if (staged) {
-      const flush = (llm as any).decodeSet.flush.graph;
-      expect(context.dispatches.filter((d) => d.graph === flush).length).toBe(N);   // exactly one flush
+      const flushes = gemma ? [...(llm as any).decodeSet.flush.values()].map((g: any) => g.graph) : [(llm as any).decodeSet.flush.graph];
+      expect(context.dispatches.filter((d: any) => flushes.includes(d.graph)).length).toBe(ownCaches);   // exactly one flush
     }
     const bpg = process.env.M2W_BPG ? +process.env.M2W_BPG : 1, pbpg = process.env.M2W_PBPG ? +process.env.M2W_PBPG : bpg;
     const decodeChain = 1 + Math.ceil((N - 1) / bpg) + 2;
     const plan = llm.stats.prefillPlan, blockDispatches = 1 + Math.ceil((N - 1) / pbpg);
     const prefillChain = (plan.length - 1) * blockDispatches + (blockDispatches + 2);   // head + blocks per chunk, plus tail + lm_head on the last
-    expect(context.dispatches.length).toBe(prefillChain + steps * decodeChain + (staged ? N : 0));
-    console.log(`${m.architecture}: ${N} layers, ${context.dispatches.length} dispatches validated, ${context.tensors.length} tensors, graphs ${new Set(context.dispatches.map((d) => d.graph.name ?? '')).size}, variant ${llm.variant.id}, prefill plan ${plan.join('+')}`);
+    expect(context.dispatches.length).toBe(prefillChain + steps * decodeChain + (staged ? ownCaches : 0));
+    console.log(`${m.architecture}: ${N} layers, ${context.dispatches.length} dispatches validated, ${context.tensors.length} tensors, graphs ${new Set(context.dispatches.map((d: any) => d.graph.name ?? '')).size}, variant ${llm.variant.id}, prefill plan ${plan.join('+')}`);
   }, 300000);
 });
