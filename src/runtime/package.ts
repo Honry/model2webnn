@@ -35,15 +35,25 @@ export interface PackageSource {
   /** identifies the package in the cache */
   readonly id: string;
   text(path: string): Promise<string>;
-  bytes(path: string, progress?: (loaded: number, total: number) => void): Promise<ArrayBuffer>;
+  /** `size`: the size of the file when the caller knows it (m2w.json lists it), which saves a round trip for the segmented download of a UrlSource */
+  bytes(path: string, progress?: (loaded: number, total: number) => void, size?: number): Promise<ArrayBuffer>;
+}
+
+export interface UrlSourceOptions {
+  /** big files are fetched as this many parallel byte ranges (a single connection is often slower than the link, e.g. from a CDN); 1 = one request per file. Default 4. */
+  segments?: number;
+  /** files smaller than this are fetched in one request. Default 48 MiB. */
+  segmentMinBytes?: number;
 }
 
 export class UrlSource implements PackageSource {
   readonly base: string;
   readonly id: string;
-  constructor(base: string) {
+  private segments: number; private segmentMinBytes: number;
+  constructor(base: string, options: UrlSourceOptions = {}) {
     this.base = base.endsWith('/') ? base : base + '/';
     this.id = this.base;
+    this.segments = Math.max(1, options.segments ?? 4); this.segmentMinBytes = options.segmentMinBytes ?? 48 * 2 ** 20;
   }
   private url(path: string) { return new URL(path, new URL(this.base, globalThis.location?.href ?? 'http://localhost/')).href; }
   async text(path: string) {
@@ -51,7 +61,49 @@ export class UrlSource implements PackageSource {
     if (!response.ok) throw new Error(`failed to fetch ${this.url(path)}: ${response.status}`);
     return response.text();
   }
-  async bytes(path: string, progress?: (loaded: number, total: number) => void) {
+  async bytes(path: string, progress?: (loaded: number, total: number) => void, size?: number) {
+    if (this.segments > 1) {
+      const segmented = await this.segmentedBytes(path, progress, size);
+      if (segmented) return segmented;
+    }
+    return this.singleBytes(path, progress);
+  }
+
+  /** A big file as parallel byte ranges written into one pre-sized buffer; null when the file is small or the server does not serve ranges (the caller then fetches it in one request). */
+  private async segmentedBytes(path: string, progress: ((loaded: number, total: number) => void) | undefined, size?: number): Promise<ArrayBuffer | null> {
+    const url = this.url(path);
+    let total = size ?? 0;
+    if (!total) {
+      const head = await fetch(url, { method: 'HEAD', cache: 'no-store' }).catch(() => null);
+      if (!head?.ok || head.headers.get('Accept-Ranges') !== 'bytes') return null;
+      total = +(head.headers.get('Content-Length') ?? 0);
+    }
+    if (total < this.segmentMinBytes) return null;
+    const parts = this.segments, step = Math.ceil(total / parts);
+    const out = new Uint8Array(total), loadedBy = new Array<number>(parts).fill(0);
+    try {
+      await Promise.all(Array.from({ length: parts }, async (_, i) => {
+        const from = i * step, to = Math.min(total, from + step) - 1;
+        const response = await fetch(url, { headers: { Range: `bytes=${from}-${to}` }, cache: 'no-store' });
+        if (response.status !== 206 || !response.body) throw new Error(`no byte ranges: ${response.status}`);
+        const reader = response.body.getReader();
+        let at = from;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (at + value.byteLength > to + 1) throw new Error(`${path}: a range delivered more bytes than requested`);
+          out.set(value, at);
+          at += value.byteLength;
+          loadedBy[i] = at - from;
+          progress?.(loadedBy.reduce((a, b) => a + b, 0), total);
+        }
+        if (at !== to + 1) throw new Error(`${path}: incomplete range ${from}-${to}`);
+      }));
+    } catch { return null; }   // whatever went wrong with ranges (proxy, CORS, a server that answers 200): fetch the file in one request
+    return out.buffer;
+  }
+
+  private async singleBytes(path: string, progress?: (loaded: number, total: number) => void) {
     const response = await fetch(this.url(path), { cache: 'no-store' });
     if (!response.ok || !response.body) throw new Error(`failed to fetch ${this.url(path)}: ${response.status}`);
     const total = +(response.headers.get('Content-Length') ?? 0);
@@ -109,7 +161,7 @@ export class CachedSource implements PackageSource {
       const file = await (await (await this.directory(false)).getFileHandle(name)).getFile();
       if (file.size === info.bytes) return file.arrayBuffer();
     } catch { /* not cached */ }
-    const data = await this.inner.bytes(path, progress);
+    const data = await this.inner.bytes(path, progress, info.bytes);
     try {
       const directory = await this.directory(true);
       const writable = await (await directory.getFileHandle(name, { create: true })).createWritable();
@@ -125,19 +177,19 @@ export class CachedSource implements PackageSource {
   }
 }
 
-export function sourceFrom(src: string | PackageSource): PackageSource {
+export function sourceFrom(src: string | PackageSource, options: UrlSourceOptions = {}): PackageSource {
   if (typeof src !== 'string') return src;
   const hf = /^hf:([^@/]+\/[^@/]+)(?:@(.+))?$/.exec(src);
-  if (hf) return new UrlSource(`https://huggingface.co/${hf[1]}/resolve/${hf[2] ?? 'main'}/`);
-  return new UrlSource(src);
+  if (hf) return new UrlSource(`https://huggingface.co/${hf[1]}/resolve/${hf[2] ?? 'main'}/`, options);
+  return new UrlSource(src, options);
 }
 
 export interface ModelPackage {
   source: PackageSource; index: PackageIndex; model: ModelSpecJson; plan: Plan; chatFormat: ChatFormat | null; manifest: WeightsManifest;
 }
 
-export async function openPackage(src: string | PackageSource, cache = false): Promise<ModelPackage> {
-  let source = sourceFrom(src);
+export async function openPackage(src: string | PackageSource, cache = false, download: UrlSourceOptions = {}): Promise<ModelPackage> {
+  let source = sourceFrom(src, download);
   const index: PackageIndex = JSON.parse(await source.text('m2w.json'));
   if (index.format !== 'm2w-package') throw new Error('not an m2w package (m2w.json has another format)');
   if (index.version !== 0) throw new Error(`package format version ${index.version} is newer than this runtime understands (0); update model2webnn`);

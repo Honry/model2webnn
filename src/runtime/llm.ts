@@ -32,7 +32,8 @@ export interface LoadOptions extends SessionOptions {
   device?: 'npu' | 'gpu' | 'cpu';
   context?: ML;                    // an existing MLContext instead of navigator.ml.createContext({ deviceType: device })
   cache?: boolean;                 // OPFS cache of the downloaded files (default true)
-  parallelDownloads?: number;      // default 4
+  parallelDownloads?: number;      // files downloaded at the same time (a window ahead of the consumer), default 4
+  downloadSegments?: number;       // big files are fetched as this many parallel byte ranges (default 4; 1 = one request per file)
   onProgress?: Progress;
 }
 export interface GenerateOptions {
@@ -117,7 +118,7 @@ export class LLM {
     const t0 = performance.now();
     const progress = options.onProgress ?? (() => {});
     progress({ stage: 'package', message: 'reading the package index' });
-    const pkg = await openPackage(src, options.cache ?? true);
+    const pkg = await openPackage(src, options.cache ?? true, { segments: options.downloadSegments });
     const llm = new LLM(pkg);
     llm.adopt(llm.resolve(options));   // fails early (before anything is downloaded) when the package lacks what is asked for
     await llm.init(options, progress);
@@ -171,7 +172,7 @@ export class LLM {
     const prefetch = new Prefetcher(ordered.map((f) => f.file), (file, i) => source.bytes(`weights/${file}`, (l) => {
       loaded.set(file, l);
       progress({ stage: 'download', loaded: [...loaded.values()].reduce((a, b) => a + b, 0), total, message: ordered[i].file });
-    }), options.parallelDownloads ?? 4);
+    }, ordered[i].bytes), options.parallelDownloads ?? 4);
 
     const weightsStart = performance.now();
     progress({ stage: 'embedding', message: 'loading the embedding table' });

@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>m2w package: download throughput</title>
+<style>body{font:14px/1.5 Consolas,monospace;margin:16px}pre{white-space:pre-wrap}</style>
+<h3>Download throughput of a package <small id="status">running</small></h3>
+<p>URL parameters: <code>package=../packages/qwen3-4b-pkg-i8/</code> (or an absolute URL, e.g. a package hosted on Hugging Face / a CDN), <code>windows=1,2,4,8</code> (files in flight at once),
+<code>segments=1,4</code> (byte ranges per big file), <code>limitMB=600</code> (stop adding files after this many MB), <code>repeat=1</code>. Every combination downloads the same files with the HTTP cache bypassed.</p>
+<pre id="out"></pre>
+<script type="module" src="download.js?v=1"></script>

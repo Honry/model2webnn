@@ -93,7 +93,10 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         } };
         const reused = !!llm;
         if (llm) await llm.reconfigure(session);
-        else llm = await LLM.load(url, { device: deviceType, ...session });
+        else {
+            const query = new URLSearchParams(location.search);   // ?parallelDownloads=4&downloadSegments=4: see download.html for good values
+            llm = await LLM.load(url, { device: deviceType, parallelDownloads: +query.get("parallelDownloads") || undefined, downloadSegments: +query.get("downloadSegments") || undefined, ...session });
+        }
         const variant = llm.variant, sizes = llm.chunkSizes.join("+");
         byId("pastLengthLabel").textContent = String(maxLength - 1); byId("chunkSizeLabel").textContent = sizes;
         const kvText = variant.kv_style === "staged" ? `kv staged (${variant.staging_rows} rows)` : `kv ${variant.kv_style}`;

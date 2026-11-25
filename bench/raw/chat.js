@@ -29,7 +29,7 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=2";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=3";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
