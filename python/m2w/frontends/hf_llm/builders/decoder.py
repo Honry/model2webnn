@@ -114,6 +114,7 @@ class Ctx:
         self.compute = opt.compute_type
         self.seq = 0
         self.rope = None
+        self.per_block_controls = False   # block groups of hybrid models: every block declares its own rope_cos / rope_sin / attention_mask (b<j>_...)
 
     def declare(self, name: str, dtype: str, shape, role: str = "activation") -> Value:
         return self.b.input(name, dtype, shape, role)
@@ -204,9 +205,10 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
     # tensorScatter: attention reads the scattered cache itself (length P); staged: concat(main, staging); otherwise concat(past, new rows)
     total = past_len if use_tensor_scatter else past_len + staging_rows if staged else past_len + seq
 
-    cos = c.shared("rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
-    sin = c.shared("rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
-    mask = c.shared("attention_mask", mask_dtype, [1, 1, seq, total], "control")
+    control = prefix if c.per_block_controls else ""   # the rope tables / mask are shared by all blocks of a group, unless every block gets its own (layers of different types)
+    cos = c.shared(control + "rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
+    sin = c.shared(control + "rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
+    mask = c.shared(control + "attention_mask", mask_dtype, [1, 1, seq, total], "control")
     past_key = c.declare(prefix + "past_key", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv") if past_len > 0 else None
     past_value = c.declare(prefix + "past_value", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv") if past_len > 0 else None
 
@@ -312,11 +314,14 @@ def build_block_graph(dims: DecoderDims, opt: GraphOptions, *, seq: int, past_le
     return b.build()
 
 
-def build_block_group_graph(dims: DecoderDims, opt: GraphOptions, *, block_count: int, seq: int, past_len: int, mask_dtype: str = "float16", name: str | None = None):
+def build_block_group_graph(dims: DecoderDims, opt: GraphOptions, *, block_count: int, seq: int, past_len: int, mask_dtype: str = "float16", name: str | None = None,
+                            per_block_controls: bool = False):
     """``block_count`` consecutive BLOCKs in one graph (fewer dispatches). Block j declares its inputs / outputs with the prefix ``b<j>_``;
-    rope / mask / selectors are shared."""
+    selectors are shared; rope / mask are shared too, unless ``per_block_controls``: then every block declares ``b<j>_rope_cos`` / ``b<j>_rope_sin`` /
+    ``b<j>_attention_mask`` (a model whose layers have different types, e.g. sliding and full attention, groups any consecutive blocks that way)."""
     b = GraphBuilder(name or f"block_x{block_count}")
     c = Ctx(b, dims, opt)
+    c.per_block_controls = per_block_controls
     residual = c.to_compute(c.declare("residual", "float16", [1, seq, dims.hidden]))
     attention_output = c.to_compute(c.declare("attention_output", "float16", [1, seq, dims.attention_width]))
     last_attention = None

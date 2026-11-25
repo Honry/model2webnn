@@ -25,7 +25,7 @@ export interface SessionOptions {
   chunkSizes?: number[];           // prefill chunk sizes (the package's prefill chunks); several: the chunk sequence of a prompt is planned (planPrefill); default: the smallest
   chunkSize?: number;              // shorthand for chunkSizes: [chunkSize]
   prefillFixedTokens?: number;     // planning cost of one prefill dispatch in tokens (default 200: the int4 weights are dequantized again by every dispatch)
-  blocksPerGraph?: number;         // decode: K consecutive blocks per dispatch (needs a package built with --blocks-per-graph K and a single layer type)
+  blocksPerGraph?: number;         // decode: K consecutive blocks per dispatch (needs a package built with --blocks-per-graph K)
   prefillBlocksPerGraph?: number;  // the same for the prefill graphs (default 1)
 }
 export interface LoadOptions extends SessionOptions {
@@ -134,7 +134,9 @@ export class LLM {
     const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
     for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
     const group = o.blocksPerGraph ?? 1, prefillGroup = o.prefillBlocksPerGraph || group;
-    if ((group > 1 || prefillGroup > 1) && this.types.length > 1) throw new Error('blocksPerGraph > 1 needs a model with one layer type (blocks of a group share one mask and one RoPE table)');
+    if ((group > 1 || prefillGroup > 1) && this.types.length > 1 && plan.block_group_controls !== 'per_block') {
+      throw new Error('blocksPerGraph > 1 needs a model with one layer type, or a package whose block groups take a mask and RoPE table per block (m2w compile of a newer version)');
+    }
     const groupsOf = (t: GraphTable) => Object.keys(t.block_groups ?? {}).map(Number);
     if (group > 1 && !groupsOf(table.decode[key]).includes(group)) throw new Error(`the package has no decode graph with ${group} blocks (it has ${groupsOf(table.decode[key]).join(', ') || 'none'})`);
     for (const size of sizes) {
@@ -364,11 +366,15 @@ export class LLM {
     if (groups) {
       for (let start = 0; start < N - 1; start += groupSize) {
         const count = Math.min(groupSize, N - 1 - start), graph = groups.get(count) as Built;
-        const inputs: Record<string, ML> = { residual: a.residuals[start], attention_output: a.attentionOutputs[start], ...shared(start + 1) };
+        const perBlock = this.pkg.plan.block_group_controls === 'per_block';
+        const inputs: Record<string, ML> = { residual: a.residuals[start], attention_output: a.attentionOutputs[start], ...(perBlock ? selectors : shared(start + 1)) };
         const outputs: Record<string, ML> = { next_residual: a.residuals[start + count], next_attention_output: a.attentionOutputs[start + count] };
         for (let j = 0; j < count; j++) {
           const layer = start + j, prefix = `b${j}_`;
           Object.assign(inputs, this.pick(layer, w.ffn, prefix), this.pick(layer + 1, w.attention, prefix), cacheInputs(layer + 1, prefix));
+          if (perBlock) {   // the attention half of layer + 1 has the rope tables / mask of ITS layer type
+            Object.assign(inputs, { [prefix + 'rope_cos']: a.ropeCos[types[layer + 1]], [prefix + 'rope_sin']: a.ropeSin[types[layer + 1]], [prefix + 'attention_mask']: a.mask[types[layer + 1]] });
+          }
           outputs[prefix + 'updated_key'] = spare[layer + 1].key; outputs[prefix + 'updated_value'] = spare[layer + 1].value;
         }
         dispatch(graph, inputs, outputs);

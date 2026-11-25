@@ -96,7 +96,7 @@ describe('LLM scheduler on a validating mock of WebNN', () => {
     installMockBuilder();
     const load = (o: LoadOptions) => LLM.load(fsSource, { context: new MockContext(), cache: false, ...o });
     await expect(load({ maxLength: 4096 })).rejects.toThrow(/no graphs for max length 4096/);
-    await expect(load({ blocksPerGraph: 2 })).rejects.toThrow(/one layer type/);
+    await expect(load({ blocksPerGraph: 3 })).rejects.toThrow(/no decode graph with 3 blocks/);
     await expect(load({ variant: 'nope' })).rejects.toThrow(/no variant 'nope'/);
     await expect(load({ chunkSize: 32 })).rejects.toThrow(/no prefill graphs for chunk 32/);
     await expect(load({ stagingRows: 5 })).rejects.toThrow(/no graphs for kv style staged, 5 staging rows/);
@@ -140,6 +140,25 @@ describe('every variant of the package runs through the protocol with valid bind
     expect((await loaded({ kvStyle: 'onehot' })).llm.variant.id).toBe('onehot-float32');
     expect((await loaded({ kvStyle: 'tensorScatter', computeType: 'float16' })).llm.variant.id).toBe('tensorScatter-float16');
     expect((await loaded({ computeType: 'float16', stagingRows: 8 })).llm.variant.id).toBe('staged-r8-float16');
+  });
+});
+
+describe('block groups of a hybrid model', () => {
+  it('bind the rope / mask of the layer type of EVERY block of the group (b<j>_ inputs), in decode and prefill', async () => {
+    const { llm, context } = await loaded({ blocksPerGraph: 2, prefillBlocksPerGraph: 2, chunkSize: 16 });
+    await run(llm, prompt.slice(0, 5), 2);   // one prefill chunk and one decode step
+    const types: string[] = llm.pkg.model.layer_types, internals = llm as any, dec = internals.dec, pre = internals.prefillSets.get(16).act;
+    const groups = context.dispatches.filter((d) => 'b0_attention_mask' in d.inputs);
+    expect(groups.length).toBe(2);   // N - 1 = 2 blocks = one group per phase: [prefill group, decode group]
+    [[groups[0], pre], [groups[1], dec]].forEach(([d, act]: any) => {
+      for (const j of [0, 1]) {
+        expect(d.inputs[`b${j}_attention_mask`]).toBe(act.mask[types[j + 1]]);
+        expect(d.inputs[`b${j}_rope_cos`]).toBe(act.ropeCos[types[j + 1]]);
+        expect(d.inputs[`b${j}_rope_sin`]).toBe(act.ropeSin[types[j + 1]]);
+      }
+      expect(d.inputs.b0_attention_mask).not.toBe(d.inputs.b1_attention_mask);   // layers 1 (full) and 2 (sliding): two different masks
+    });
+    expect(context.dispatches.length).toBe((1 + 1 + 2) + (1 + 1 + 2));   // head + group + tail + lm_head, in prefill and in decode
   });
 });
 

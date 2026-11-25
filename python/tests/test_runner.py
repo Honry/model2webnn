@@ -136,12 +136,15 @@ def test_float16_compute_agrees_with_float32(tiny):
 
 
 @pytest.mark.parametrize("style", ["staged", "onehot", "tensorScatter"])
-def test_block_groups_equal_single_blocks_for_a_single_layer_type_model(tiny, style):
-    """Blocks of a group share one mask / RoPE table, so the graphs are only valid for a model with ONE layer type (here: the tiny model with full attention everywhere)."""
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_block_groups_equal_single_blocks(tiny, style, hybrid):
+    """A group of blocks gives the same result as single blocks. One layer type: the blocks share one mask / RoPE table (here: the tiny model with full attention everywhere);
+    hybrid (sliding + full): every block of the group has its own mask / RoPE inputs."""
     import dataclasses
 
     spec, _, pkg = tiny
-    spec = dataclasses.replace(spec, layer_types=["full_attention"] * spec.num_layers)
+    if not hybrid:
+        spec = dataclasses.replace(spec, layer_types=["full_attention"] * spec.num_layers)
     tokens = [int(t) for t in np.random.default_rng(6).integers(3, spec.vocab, 19)]
     make = lambda **kw: PackageRunner(spec, pkg, max_length=64, chunk_size=8, staging_rows=4, kv_style=style, **kw)   # noqa: E731
     single, grouped = make(), make(decode_group=2, prefill_group=2)

@@ -34,6 +34,7 @@
       }
     },
     "default_variant": { "type": "string" },
+    "block_group_controls": { "enum": ["shared", "per_block"], "description": "block groups: rope_cos / rope_sin / attention_mask shared by all blocks (models with one layer type) or declared per block as b<j>_rope_cos ... (hybrid models)" },
     "max_lengths": { "type": "array", "items": { "type": "integer" } },
     "prefill_chunks": { "type": "array", "items": { "type": "integer" } },
     "blocks_per_graph": { "type": "array", "items": { "type": "integer" }, "description": "decode block groups the package contains" },

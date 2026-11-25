@@ -30,7 +30,7 @@ export function setupPackageControls(pkg, c, initial = {}) {
     replace(c.maxLengthSelect, lengths.map((l) => [l, `${l} tokens  (KV cache ${Math.round(kvCacheMegabytes(model, l))} MB)`]));
     const fillChunks = () => replace(c.chunkSizeSelect, chunksOf(+c.maxLengthSelect.value).map((s) => [s, `${s} tokens`]), c.chunkSizeSelect.value);
     fillChunks();
-    const singleType = new Set(model.layer_types).size === 1;
+    const singleType = new Set(model.layer_types).size === 1 || plan.block_group_controls === "per_block";   // hybrid models: groups take a mask / RoPE table per block
     const groupsOf = (table) => Object.keys(table?.block_groups ?? {}).map(Number);
     const fillBlocks = () => {
         const length = c.maxLengthSelect.value, decode = groupsOf(plan.graphs[defaultVariant.id].decode[length]), biggest = decode.length ? Math.max(...decode) : 0;

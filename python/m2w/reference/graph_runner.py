@@ -26,7 +26,7 @@ from . import protocol
 class PackageRunner:
     def __init__(self, spec: ModelSpec, weights_dir, *, max_length: int = 128, chunk_size: int = 16, chunk_sizes=None, staging_rows: int = 8,
                  opt: Optional[D.GraphOptions] = None, kv_style: Optional[str] = None, compute_type: Optional[str] = None, decode_group: int = 1, prefill_group: int = 1,
-                 prefill_fixed_tokens: int = 200, graphs: Optional[dict] = None):
+                 prefill_fixed_tokens: int = 200, graphs: Optional[dict] = None, per_block_controls: Optional[bool] = None):
         self.spec, self.dir = spec, Path(weights_dir)   # a directory with manifest.json and the shards
         opt = opt or D.GraphOptions(kv_style="staged", staging_rows=staging_rows)
         changes = {k: v for k, v in (("kv_style", kv_style), ("compute_type", compute_type)) if v}
@@ -35,6 +35,7 @@ class PackageRunner:
         self.sizes = sorted(set(chunk_sizes or [chunk_size]))
         self.fixed_tokens = prefill_fixed_tokens
         self.decode_group, self.prefill_group = decode_group, prefill_group
+        self.per_block = len(set(spec.layer_types)) > 1 if per_block_controls is None else per_block_controls   # block groups: rope / mask per block (hybrid models)
         if self.P < min(self.sizes):
             raise ValueError("max_length is smaller than the prefill chunk")
         manifest = json.loads((self.dir / "manifest.json").read_text())
@@ -57,12 +58,12 @@ class PackageRunner:
         if self.style == "staged":
             g["decode"]["flush"] = D.build_kv_update_graph(dims, seq=self.R, past_len=P)
         if self.decode_group > 1:
-            g["decode"]["groups"] = {c: D.build_block_group_graph(dims, opt, block_count=c, seq=1, past_len=P) for c in counts(self.decode_group)}
+            g["decode"]["groups"] = {c: D.build_block_group_graph(dims, opt, block_count=c, seq=1, past_len=P, per_block_controls=self.per_block) for c in counts(self.decode_group)}
         for C in self.sizes:
             g["prefill"][C] = {"head": D.build_head_graph(dims, opt, seq=C, past_len=P), "block": D.build_block_graph(dims, opt, seq=C, past_len=P),
                                "tail": D.build_tail_graph(dims, opt, seq=C), "groups": {}}
             if self.prefill_group > 1:
-                g["prefill"][C]["groups"] = {c: D.build_block_group_graph(dims, opt, block_count=c, seq=C, past_len=P) for c in counts(self.prefill_group)}
+                g["prefill"][C]["groups"] = {c: D.build_block_group_graph(dims, opt, block_count=c, seq=C, past_len=P, per_block_controls=self.per_block) for c in counts(self.prefill_group)}
         return g
 
     @classmethod
@@ -89,7 +90,8 @@ class PackageRunner:
         opt = D.GraphOptions(**{**plan["profile"], "compute_type": info["compute_type"], "kv_style": info["kv_style"], "staging_rows": info.get("staging_rows", 64),
                                        "scatter_index_type": info.get("scatter_index_type", "int32")})
         return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, decode_group=decode_group, prefill_group=prefill_group,
-                   prefill_fixed_tokens=prefill_fixed_tokens, graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
+                   prefill_fixed_tokens=prefill_fixed_tokens, graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])},
+                   per_block_controls=plan.get("block_group_controls") == "per_block")
 
     # -------------------------------------------------------------------------------------------------- weights
     def _tensor(self, shard: dict, entry: dict) -> np.ndarray:
@@ -129,9 +131,12 @@ class PackageRunner:
         types = s.layer_types
         staged_decode = decode and self.style == "staged"
 
-        def shared(layer):
+        def controls(layer, prefix=""):
             cos, sin = rope[types[layer]]
-            return {"rope_cos": cos, "rope_sin": sin, "attention_mask": masks[types[layer]], **selectors}
+            return {prefix + "rope_cos": cos, prefix + "rope_sin": sin, prefix + "attention_mask": masks[types[layer]]}
+
+        def shared(layer):
+            return {**controls(layer), **selectors}
 
         def cache_feeds(layer, prefix=""):
             feeds = {prefix + "past_key": self.k[layer], prefix + "past_value": self.v[layer]}
@@ -156,9 +161,11 @@ class PackageRunner:
                                             **self._layer_weights(layer + 1, self.attention_names), **self._layer_weights(layer, self.ffn_names)})
                 store(layer + 1, out)
             else:
-                feeds = {"residual": residual, "attention_output": attention, **shared(layer + 1)}
+                feeds = {"residual": residual, "attention_output": attention, **(selectors if self.per_block else shared(layer + 1))}
                 for j in range(count):
                     prefix = f"b{j}_"
+                    if self.per_block:
+                        feeds.update(controls(layer + j + 1, prefix))
                     feeds.update(self._layer_weights(layer + j, self.ffn_names, prefix))
                     feeds.update(self._layer_weights(layer + j + 1, self.attention_names, prefix))
                     feeds.update(cache_feeds(layer + j + 1, prefix))

@@ -70,6 +70,7 @@
   }
  ],
  "default_variant": "staged-r8-float32",
+ "block_group_controls": "per_block",
  "max_lengths": [
   128
  ],
@@ -78,10 +79,12 @@
   8
  ],
  "blocks_per_graph": [
-  1
+  1,
+  2
  ],
  "prefill_blocks_per_graph": [
-  1
+  1,
+  2
  ],
  "graphs": {
   "staged-r8-float32": {
@@ -91,7 +94,9 @@
      "head": "graphs/staged-r8-float32/decode_head_L128.json",
      "block": "graphs/staged-r8-float32/decode_block_L128.json",
      "tail": "graphs/staged-r8-float32/decode_tail.json",
-     "block_groups": {},
+     "block_groups": {
+      "2": "graphs/staged-r8-float32/decode_block_x2_L128.json"
+     },
      "flush": "graphs/staged-r8-float32/kv_flush_L128.json"
     }
    },
@@ -101,13 +106,17 @@
       "head": "graphs/staged-r8-float32/prefill_head_L128_C16.json",
       "block": "graphs/staged-r8-float32/prefill_block_L128_C16.json",
       "tail": "graphs/staged-r8-float32/prefill_tail_C16.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/staged-r8-float32/prefill_block_x2_L128_C16.json"
+      }
      },
      "8": {
       "head": "graphs/staged-r8-float32/prefill_head_L128_C8.json",
       "block": "graphs/staged-r8-float32/prefill_block_L128_C8.json",
       "tail": "graphs/staged-r8-float32/prefill_tail_C8.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/staged-r8-float32/prefill_block_x2_L128_C8.json"
+      }
      }
     }
    }
@@ -119,7 +128,9 @@
      "head": "graphs/staged-r8-float16/decode_head_L128.json",
      "block": "graphs/staged-r8-float16/decode_block_L128.json",
      "tail": "graphs/staged-r8-float16/decode_tail.json",
-     "block_groups": {},
+     "block_groups": {
+      "2": "graphs/staged-r8-float16/decode_block_x2_L128.json"
+     },
      "flush": "graphs/staged-r8-float16/kv_flush_L128.json"
     }
    },
@@ -129,13 +140,17 @@
       "head": "graphs/staged-r8-float16/prefill_head_L128_C16.json",
       "block": "graphs/staged-r8-float16/prefill_block_L128_C16.json",
       "tail": "graphs/staged-r8-float16/prefill_tail_C16.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/staged-r8-float16/prefill_block_x2_L128_C16.json"
+      }
      },
      "8": {
       "head": "graphs/staged-r8-float16/prefill_head_L128_C8.json",
       "block": "graphs/staged-r8-float16/prefill_block_L128_C8.json",
       "tail": "graphs/staged-r8-float16/prefill_tail_C8.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/staged-r8-float16/prefill_block_x2_L128_C8.json"
+      }
      }
     }
    }
@@ -147,7 +162,9 @@
      "head": "graphs/onehot-float32/decode_head_L128.json",
      "block": "graphs/onehot-float32/decode_block_L128.json",
      "tail": "graphs/onehot-float32/decode_tail.json",
-     "block_groups": {}
+     "block_groups": {
+      "2": "graphs/onehot-float32/decode_block_x2_L128.json"
+     }
     }
    },
    "prefill": {
@@ -156,13 +173,17 @@
       "head": "graphs/onehot-float32/prefill_head_L128_C16.json",
       "block": "graphs/onehot-float32/prefill_block_L128_C16.json",
       "tail": "graphs/onehot-float32/prefill_tail_C16.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/onehot-float32/prefill_block_x2_L128_C16.json"
+      }
      },
      "8": {
       "head": "graphs/onehot-float32/prefill_head_L128_C8.json",
       "block": "graphs/onehot-float32/prefill_block_L128_C8.json",
       "tail": "graphs/onehot-float32/prefill_tail_C8.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/onehot-float32/prefill_block_x2_L128_C8.json"
+      }
      }
     }
    }
@@ -174,7 +195,9 @@
      "head": "graphs/onehot-float16/decode_head_L128.json",
      "block": "graphs/onehot-float16/decode_block_L128.json",
      "tail": "graphs/onehot-float16/decode_tail.json",
-     "block_groups": {}
+     "block_groups": {
+      "2": "graphs/onehot-float16/decode_block_x2_L128.json"
+     }
     }
    },
    "prefill": {
@@ -183,13 +206,17 @@
       "head": "graphs/onehot-float16/prefill_head_L128_C16.json",
       "block": "graphs/onehot-float16/prefill_block_L128_C16.json",
       "tail": "graphs/onehot-float16/prefill_tail_C16.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/onehot-float16/prefill_block_x2_L128_C16.json"
+      }
      },
      "8": {
       "head": "graphs/onehot-float16/prefill_head_L128_C8.json",
       "block": "graphs/onehot-float16/prefill_block_L128_C8.json",
       "tail": "graphs/onehot-float16/prefill_tail_C8.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/onehot-float16/prefill_block_x2_L128_C8.json"
+      }
      }
     }
    }
@@ -201,7 +228,9 @@
      "head": "graphs/tensorScatter-float32/decode_head_L128.json",
      "block": "graphs/tensorScatter-float32/decode_block_L128.json",
      "tail": "graphs/tensorScatter-float32/decode_tail.json",
-     "block_groups": {}
+     "block_groups": {
+      "2": "graphs/tensorScatter-float32/decode_block_x2_L128.json"
+     }
     }
    },
    "prefill": {
@@ -210,13 +239,17 @@
       "head": "graphs/tensorScatter-float32/prefill_head_L128_C16.json",
       "block": "graphs/tensorScatter-float32/prefill_block_L128_C16.json",
       "tail": "graphs/tensorScatter-float32/prefill_tail_C16.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/tensorScatter-float32/prefill_block_x2_L128_C16.json"
+      }
      },
      "8": {
       "head": "graphs/tensorScatter-float32/prefill_head_L128_C8.json",
       "block": "graphs/tensorScatter-float32/prefill_block_L128_C8.json",
       "tail": "graphs/tensorScatter-float32/prefill_tail_C8.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/tensorScatter-float32/prefill_block_x2_L128_C8.json"
+      }
      }
     }
    }
@@ -228,7 +261,9 @@
      "head": "graphs/tensorScatter-float16/decode_head_L128.json",
      "block": "graphs/tensorScatter-float16/decode_block_L128.json",
      "tail": "graphs/tensorScatter-float16/decode_tail.json",
-     "block_groups": {}
+     "block_groups": {
+      "2": "graphs/tensorScatter-float16/decode_block_x2_L128.json"
+     }
     }
    },
    "prefill": {
@@ -237,13 +272,17 @@
       "head": "graphs/tensorScatter-float16/prefill_head_L128_C16.json",
       "block": "graphs/tensorScatter-float16/prefill_block_L128_C16.json",
       "tail": "graphs/tensorScatter-float16/prefill_tail_C16.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/tensorScatter-float16/prefill_block_x2_L128_C16.json"
+      }
      },
      "8": {
       "head": "graphs/tensorScatter-float16/prefill_head_L128_C8.json",
       "block": "graphs/tensorScatter-float16/prefill_block_L128_C8.json",
       "tail": "graphs/tensorScatter-float16/prefill_tail_C8.json",
-      "block_groups": {}
+      "block_groups": {
+       "2": "graphs/tensorScatter-float16/prefill_block_x2_L128_C8.json"
+      }
      }
     }
    }

@@ -67,6 +67,7 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
     """Write the graphs of every variant (graphs/<variant id>/) and return the plan's 'graphs' table: variant id -> lm_head / decode / prefill (names relative to the package root)."""
     dims = spec.decoder_dims()
     counts = lambda k: sorted({k, (spec.num_layers - 1) % k} - {0})   # noqa: E731
+    per_block = len(set(spec.layer_types)) > 1   # block groups of a hybrid model take the rope / mask of every block as separate inputs
     tables: dict = {}
     for variant in variants:
         vopt = D.with_options(opt, kv_style=variant["kv_style"], compute_type=variant["compute_type"], staging_rows=variant.get("staging_rows", opt.staging_rows))
@@ -88,7 +89,8 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
             for k in blocks_per_graph:
                 if k > 1:
                     for count in counts(k):
-                        decode["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, vopt, block_count=count, seq=1, past_len=past, name=f"decode_block_x{count}_L{L}"))
+                        decode["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, vopt, block_count=count, seq=1, past_len=past, name=f"decode_block_x{count}_L{L}",
+                                                                                                  per_block_controls=per_block))
             table["decode"][str(L)] = decode
             table["prefill"][str(L)] = {}
             for C in chunks:
@@ -101,7 +103,7 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
                     if k > 1:
                         for count in counts(k):
                             prefill["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, vopt, block_count=count, seq=C, past_len=past,
-                                                                                                name=f"prefill_block_x{count}_L{L}_C{C}"))
+                                                                                                name=f"prefill_block_x{count}_L{L}_C{C}", per_block_controls=per_block))
                 table["prefill"][str(L)][str(C)] = prefill
         tables[variant["id"]] = table
     return tables
@@ -120,6 +122,7 @@ def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict
         },
         "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type")},
         "variants": variants, "default_variant": variants[0]["id"],
+        "block_group_controls": "per_block" if len(set(spec.layer_types)) > 1 else "shared",
         "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": list(prefill_blocks_per_graph),
         "graphs": graphs,
         "chain": {

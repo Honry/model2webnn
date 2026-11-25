@@ -15,6 +15,7 @@ export interface VariantGraphs { lm_head: string; decode: Record<string, GraphTa
 export interface Plan {
   max_lengths: number[]; prefill_chunks: number[]; blocks_per_graph: number[]; prefill_blocks_per_graph: number[];
   variants: Variant[]; default_variant: string;
+  block_group_controls?: 'shared' | 'per_block';   // block groups: one rope / mask for all blocks (single layer type), or b<j>_rope_cos / b<j>_attention_mask per block (hybrid models)
   graphs: Record<string, VariantGraphs>;
   weights: { attention: string[]; ffn: string[]; final_norm: string[]; embedding: string[] };
   profile: { merge_projections: boolean; lm_head_format: string };

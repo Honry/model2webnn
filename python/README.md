@@ -16,7 +16,7 @@ Useful `compile` options (the graphs are static, so what a runtime can choose be
 - `--max-length` / `--chunk 64 128 256`: KV cache capacities and prefill chunk sizes. With several chunk sizes the runtime plans the chunk sequence of each prompt (fewer, bigger dispatches for long prompts, a small one for short prompts).
 - `--kv-style staged onehot tensorScatter`: KV protocols (staged = staging buffer flushed every N steps, onehot = whole-cache update, tensorScatter = in-graph scatter); `--staging-rows 64 32 128`; `--compute-type float32 float16`.
   Every combination becomes a graph **variant** (`staged-r64-float32`, `onehot-float16`, ...) listed in `plan.json`; the first value of each option is the default. Without these options a package has one variant.
-- `--blocks-per-graph 1 5` / `--prefill-blocks-per-graph 1 5`: also build graphs with 5 blocks each (fewer dispatches, longer compile; single layer type models only).
+- `--blocks-per-graph 1 5` / `--prefill-blocks-per-graph 1 5`: also build graphs with 5 blocks each (fewer dispatches, longer compile; hybrid models such as sliding + full attention get a mask and RoPE table per block as graph inputs).
 - `--lm-head-format int8-sym|uint8-asym` (default int8-sym: same accuracy as the OpenVINO-style uint8 table, compiles faster on the NPU).
 
 `m2w rebuild-graphs <package> --kv-style ...` rewrites the graphs and plan of an existing package with other variants (no quantization); `m2w verify <package> --variant all --chunk 64 128` runs the graph files of

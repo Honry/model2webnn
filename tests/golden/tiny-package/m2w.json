@@ -41,6 +41,11 @@
    "sha256": "858169060fc7430c284f4c922e7bdb6256dedd1b81d69508071c02b4f5b70e67"
   },
   {
+   "path": "graphs/onehot-float16/decode_block_x2_L128.json",
+   "bytes": 20832,
+   "sha256": "258bac3c16deb9aa192739e3340c311551738f95c99cf4a0b82499d29311c674"
+  },
+  {
    "path": "graphs/onehot-float16/decode_head_L128.json",
    "bytes": 7566,
    "sha256": "842606e851a736503ab4d4d3971b196e5f3c48a8245fd119080a2889091b3085"
@@ -64,6 +69,16 @@
    "path": "graphs/onehot-float16/prefill_block_L128_C8.json",
    "bytes": 10841,
    "sha256": "f4e7c5871e48a94c8ad80a579050a71a7461019a4ae42056f2d042d4ded6ceb8"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_block_x2_L128_C16.json",
+   "bytes": 20890,
+   "sha256": "9f44c18257f7f2c95cb4fb15f8e9171963207a6137e5acc6d11c106cb0400eb7"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_block_x2_L128_C8.json",
+   "bytes": 20836,
+   "sha256": "f89572685ca341e4f53b66cb3eeb9fb6051f950ddb1d5971ba3c36625fd627f5"
   },
   {
    "path": "graphs/onehot-float16/prefill_head_L128_C16.json",
@@ -91,6 +106,11 @@
    "sha256": "4bd6758d0ec0f1944dc412e29fb9afbdfe077af173dcba3b68b3ebf783448084"
   },
   {
+   "path": "graphs/onehot-float32/decode_block_x2_L128.json",
+   "bytes": 23960,
+   "sha256": "b6ce818feb59afbd3b8b6dda381fb6ec0d52889eae1d293c90756bff8578f8d5"
+  },
+  {
    "path": "graphs/onehot-float32/decode_head_L128.json",
    "bytes": 8675,
    "sha256": "d297e1381c2e311683597802637119d463efc0f1dd703b529f9dea6acb315c19"
@@ -116,6 +136,16 @@
    "sha256": "b58ca90d88bd6f92c2a703a066e7bd0fc8f49ab7d3a692fe7b1858bf49480a59"
   },
   {
+   "path": "graphs/onehot-float32/prefill_block_x2_L128_C16.json",
+   "bytes": 24018,
+   "sha256": "6fd38b4b456dffcf3afb8f7bb0e63a18512fab322640e1f640aac62d2fd5f0a8"
+  },
+  {
+   "path": "graphs/onehot-float32/prefill_block_x2_L128_C8.json",
+   "bytes": 23964,
+   "sha256": "769555c4e06abe73676c0c920bbfd907f5c03c9caa720c5319bc488cc38a2751"
+  },
+  {
    "path": "graphs/onehot-float32/prefill_head_L128_C16.json",
    "bytes": 8700,
    "sha256": "d2d340b89b3416929add27d21a0c0a228db6d6ca748b97b2ca90a40821175ef3"
@@ -139,6 +169,11 @@
    "path": "graphs/staged-r8-float16/decode_block_L128.json",
    "bytes": 11035,
    "sha256": "7ec6b296e0206b9dd8247a9e8e845a08c49bbfc020dedbdcc9e4c403b2ec79bf"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_block_x2_L128.json",
+   "bytes": 21228,
+   "sha256": "54d4d52cff5ba4e304a291a9f31ff88739e812a1c9827590eb0577758861c45c"
   },
   {
    "path": "graphs/staged-r8-float16/decode_head_L128.json",
@@ -171,6 +206,16 @@
    "sha256": "f4e7c5871e48a94c8ad80a579050a71a7461019a4ae42056f2d042d4ded6ceb8"
   },
   {
+   "path": "graphs/staged-r8-float16/prefill_block_x2_L128_C16.json",
+   "bytes": 20890,
+   "sha256": "9f44c18257f7f2c95cb4fb15f8e9171963207a6137e5acc6d11c106cb0400eb7"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_block_x2_L128_C8.json",
+   "bytes": 20836,
+   "sha256": "f89572685ca341e4f53b66cb3eeb9fb6051f950ddb1d5971ba3c36625fd627f5"
+  },
+  {
    "path": "graphs/staged-r8-float16/prefill_head_L128_C16.json",
    "bytes": 7592,
    "sha256": "3b33d2bdb176ee3f0e3944ba9402528e8aaa5552af94f7b4b9e3cd836161d0ef"
@@ -194,6 +239,11 @@
    "path": "graphs/staged-r8-float32/decode_block_L128.json",
    "bytes": 12834,
    "sha256": "def529411af889db0d4840052b269df7cd1881fd5bc3b2a69053bc19fc7cdbb9"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_block_x2_L128.json",
+   "bytes": 24668,
+   "sha256": "8ab7b09c13b6b9ebd0adcef4d4cceab53117eac66d17f9ccda5d32704c3a2e9b"
   },
   {
    "path": "graphs/staged-r8-float32/decode_head_L128.json",
@@ -226,6 +276,16 @@
    "sha256": "b58ca90d88bd6f92c2a703a066e7bd0fc8f49ab7d3a692fe7b1858bf49480a59"
   },
   {
+   "path": "graphs/staged-r8-float32/prefill_block_x2_L128_C16.json",
+   "bytes": 24018,
+   "sha256": "6fd38b4b456dffcf3afb8f7bb0e63a18512fab322640e1f640aac62d2fd5f0a8"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_block_x2_L128_C8.json",
+   "bytes": 23964,
+   "sha256": "769555c4e06abe73676c0c920bbfd907f5c03c9caa720c5319bc488cc38a2751"
+  },
+  {
    "path": "graphs/staged-r8-float32/prefill_head_L128_C16.json",
    "bytes": 8700,
    "sha256": "d2d340b89b3416929add27d21a0c0a228db6d6ca748b97b2ca90a40821175ef3"
@@ -249,6 +309,11 @@
    "path": "graphs/tensorScatter-float16/decode_block_L128.json",
    "bytes": 10405,
    "sha256": "6d833fba2468aa95a97049a2940a56720e0d634e9c2ca3dc061180654cb6e96e"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/decode_block_x2_L128.json",
+   "bytes": 20046,
+   "sha256": "bd69b25d09c311d2798110b107f297a4bc1994e953e616c0280297bdb762e8c4"
   },
   {
    "path": "graphs/tensorScatter-float16/decode_head_L128.json",
@@ -276,6 +341,16 @@
    "sha256": "c98dda2a75da92676110286744094ec05c0b1be873707298826fb8ed58d9c660"
   },
   {
+   "path": "graphs/tensorScatter-float16/prefill_block_x2_L128_C16.json",
+   "bytes": 20103,
+   "sha256": "d79873b5773af7959fd66c77e170dd49e737bef89822d111de6b023feb84c2b8"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_block_x2_L128_C8.json",
+   "bytes": 20050,
+   "sha256": "ea1cc153cda28035149b5cf0a24142b7fcd38c751fbbb22f28cfb9b8c15b20ec"
+  },
+  {
    "path": "graphs/tensorScatter-float16/prefill_head_L128_C16.json",
    "bytes": 7171,
    "sha256": "a8908526bd91c40971bd898d925d70dce03c43119930284b2908f79128a2db34"
@@ -301,6 +376,11 @@
    "sha256": "e568d2ce69ead275caf556bba6df14bf294f13f1a25b219a01598c9ea200ff71"
   },
   {
+   "path": "graphs/tensorScatter-float32/decode_block_x2_L128.json",
+   "bytes": 23174,
+   "sha256": "cadd814f7186427c8bfafd8fa19b1e318340b0cf8c8753f893003c1112468fe7"
+  },
+  {
    "path": "graphs/tensorScatter-float32/decode_head_L128.json",
    "bytes": 8255,
    "sha256": "ba8a432cf02fbd5f823119484eb9f0d13e6e6dc0580463b3eb0e001d53efe441"
@@ -324,6 +404,16 @@
    "path": "graphs/tensorScatter-float32/prefill_block_L128_C8.json",
    "bytes": 12052,
    "sha256": "ea8b0527c2fd7eff806db32e17dc1075dbd44f7317781da9e46d798b76f3e047"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_block_x2_L128_C16.json",
+   "bytes": 23231,
+   "sha256": "8cda00d72499323ca26ee110c3c2ccf733e9a6b05d682a94f71a61f396910821"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_block_x2_L128_C8.json",
+   "bytes": 23178,
+   "sha256": "66233dd067f05d76057c01d07383ee44601fa8eefe73f42712bfb5121caf06cb"
   },
   {
    "path": "graphs/tensorScatter-float32/prefill_head_L128_C16.json",
@@ -352,8 +442,8 @@
   },
   {
    "path": "plan.json",
-   "bytes": 9113,
-   "sha256": "35564c1d2de03fbecdbe05bebb21750742e403c16358f3ac882301803169aad3"
+   "bytes": 10505,
+   "sha256": "b804ae82ab79ce8b08c575f55d552a08111acc619048e31ac36e6ca155326583"
   },
   {
    "path": "weights/embed.bin",
