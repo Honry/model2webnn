@@ -11,7 +11,7 @@ from typing import Optional, Sequence
 from .graph import DATA_TYPES, Constant, Graph, InputSpec, Node, Value
 
 FLOATS = ("float32", "float16")
-UNARY_FLOAT_OPS = ("sigmoid", "sqrt", "tanh")
+UNARY_FLOAT_OPS = ("sigmoid", "sqrt", "tanh", "exp", "log")
 ELEMENTWISE_BINARY_OPS = ("add", "sub", "mul", "div", "pow")
 REDUCE_OPS = ("reduceMean", "reduceMax", "reduceSum")
 
@@ -235,6 +235,8 @@ class GraphBuilder:
     def sqrt(self, x): return self._emit("sqrt", [x])
     def sigmoid(self, x): return self._emit("sigmoid", [x])
     def tanh(self, x): return self._emit("tanh", [x])
+    def exp(self, x): return self._emit("exp", [x])
+    def log(self, x): return self._emit("log", [x])
     def cast(self, x, to: str): return self._emit("cast", [x], {"to": to})
     def reshape(self, x, new_shape): return self._emit("reshape", [x], {"newShape": [int(d) for d in new_shape]})
     def transpose(self, x, permutation): return self._emit("transpose", [x], {"permutation": [int(p) for p in permutation]})
