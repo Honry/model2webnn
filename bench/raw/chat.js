@@ -98,10 +98,9 @@ function applySessionOptions(requested) {
     prefillBlocksPerGraph = Math.max(1, requested.prefillBlocksPerGraph || blocksPerGraph);
     prefillChunkSizesParam = requested.chunkSizes;
     computeType = requested.computeType === "float16" ? "float16" : "float32";
-    keyValueNoInput = keyValueNoInputRequested && tensorScatterKv;   // the other KV styles ignore kvNoInput
     graphOptions = {
         matmulStyle: param("matmulStyle", "mm", "gemm"), zeroPoint: param("zeroPoint", "zp", "const"),
-        dequantStyle: param("dequantStyle", "deq", "dequantizeLinear"), computeType, fuseKvUpdate, ...(kvStyle !== "onehot" ? { kvStyle } : {}), ...(attendInCache ? { attendInCache: true } : {}), ...(tensorScatterKv ? { scatterIndexType } : {}), ...(keyValueNoInput ? { kvNoInput: true, ...(scatterOptionsTemplate ? { scatterOptions: scatterOptionsTemplate } : {}) } : {}), ...(stagedKv ? { stagingRows } : {}), ...(naturalValueLayout ? { valueLayout: "natural" } : {}),
+        dequantStyle: param("dequantStyle", "deq", "dequantizeLinear"), computeType, fuseKvUpdate, ...(kvStyle !== "onehot" ? { kvStyle } : {}), ...(attendInCache ? { attendInCache: true } : {}), ...(tensorScatterKv ? { scatterIndexType } : {}), ...(stagedKv ? { stagingRows } : {}), ...(naturalValueLayout ? { valueLayout: "natural" } : {}),
     };
 }
 const sessionOptionKey = () => [kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, computeType].join("|");
@@ -114,14 +113,6 @@ const weightFormat = param("weightFormat", "wf", "int4"), dequantizeAt = param("
 // kvInPlace=1: the KV-update graph reads and writes the SAME MLTensor (past_key == updated_key, past_value == updated_value) instead of ping-ponging
 // between two buffers; saves the spare cache (about 0.3 GB at max length 1152). Whether the runtime accepts an input tensor as an output is what this tests.
 const keyValueInPlace = param("kvInPlace", null, "0") === "1";
-// kvNoInput=1 (with kvStyle=tensorScatter; needs the PoC browser build): MLGraphBuilder.tensorScatter(update, writeIndices, {axis, ...}) WITHOUT the cache as input. The head / block graphs
-// have no past_key / past_value inputs; updated_key / updated_value ARE the cache tensors (bound as outputs only, one set of KV tensors per layer, no spare). scatterOptions={"axis":2,"shape":"$shape"}
-// overrides the options passed to the op ("$shape" = the cache shape [1,kvHeads,P,128]; default: axis 2 plus the shape as both `shape` and `outputShape`).
-const keyValueNoInputRequested = param("kvNoInput", null, "0") === "1";
-const scatterOptionsTemplate = (() => { try { return query.get("scatterOptions") ? JSON.parse(query.get("scatterOptions")) : null; } catch (error) { throw new Error("scatterOptions is not valid JSON: " + error); } })();
-let keyValueNoInput = false;
-const keyValueZeroInit = param("kvZeroInit", null, "1") !== "0";   // kvNoInput: the cache tensors are zero-filled once when a session is created (rows that are not written yet are masked, but NaN x 0 would still poison attention); kvZeroInit=0 skips it
-
 if (weightFormat === "float16") setWeightLayout("float16");
 const { E: hiddenSize, NH: numAttentionHeads, KVH: numKeyValueHeads, D: headDim, VOCAB: vocabularySize } = CFG;
 const attentionWidth = numAttentionHeads * headDim;
@@ -143,7 +134,7 @@ function log(eventName, message, fields = {}) {
     byId("log").textContent += `[${elapsed} s] ${message}\n`;
     byId("log").scrollTop = byId("log").scrollHeight;
     if (eventName === "fatal") byId("log").closest("details")?.setAttribute("open", "");
-    const record = JSON.stringify({ experiment: "chat", tag: resultTag, device: deviceType, layers: layerCount, weight_format: weightFormat, kv_in_place: keyValueInPlace, kv_no_input: keyValueNoInput, fuse_kv_update: fuseKvUpdate, kv_style: kvStyle, value_layout: naturalValueLayout ? 'natural' : 'transposed', blocks_per_graph: blocksPerGraph, ...graphOptions, event: eventName, message, ...fields });
+    const record = JSON.stringify({ experiment: "chat", tag: resultTag, device: deviceType, layers: layerCount, weight_format: weightFormat, kv_in_place: keyValueInPlace, fuse_kv_update: fuseKvUpdate, kv_style: kvStyle, value_layout: naturalValueLayout ? 'natural' : 'transposed', blocks_per_graph: blocksPerGraph, ...graphOptions, event: eventName, message, ...fields });
     console.log(record);
     fetch("/log", { method: "POST", body: record }).catch(() => {});
 }
@@ -500,8 +491,8 @@ async function loadSharedModel() {
                 key: await createWritableTensor("float16", [1, numKeyValueHeads, pastLength, headDim]),
                 value: await createWritableTensor("float16", naturalValueLayout ? [1, numKeyValueHeads, pastLength, headDim] : [1, numKeyValueHeads, headDim, pastLength]),   // value cache: transposed (default) or natural
             });
-            const first = await create(), second = keyValueInPlace || keyValueNoInput ? first : await create();   // in place / no cache input: the "spare" cache IS the cache
-            if (!(keyValueNoInput && !keyValueZeroInit)) for (const tensor of new Set([first.key, first.value, second.key, second.value])) mlContext.writeTensor(tensor, new Float16Array(numKeyValueHeads * pastLength * headDim));   // kvNoInput + kvZeroInit=0: the cache is never written by the host, prefill fills it
+            const first = await create(), second = keyValueInPlace ? first : await create();   // in place: the "spare" cache IS the cache
+            for (const tensor of new Set([first.key, first.value, second.key, second.value])) mlContext.writeTensor(tensor, new Float16Array(numKeyValueHeads * pastLength * headDim));
             session.keyValueCache.push(first); session.keyValueCacheSpare.push(second);
         }
         const attentionLength = (newRows) => (attendInCache ? pastLength : pastLength + newRows);   // attendInCache: attention reads the updated cache itself (length P); else concat(cache, new rows)
@@ -608,7 +599,7 @@ async function loadSharedModel() {
             }, { updated_key: session.keyValueCacheSpare[layer].key, updated_value: session.keyValueCacheSpare[layer].value });
             [session.keyValueCache[layer], session.keyValueCacheSpare[layer]] = [session.keyValueCacheSpare[layer], session.keyValueCache[layer]];
         };
-        const pastOfLayer = (layer) => (keyValueNoInput ? {} : { past_key: session.keyValueCache[layer].key, past_value: session.keyValueCache[layer].value });   // kvNoInput: the graphs have no cache inputs
+        const pastOfLayer = (layer) => ({ past_key: session.keyValueCache[layer].key, past_value: session.keyValueCache[layer].value });
         const shared = { rope_cos: state.ropeCos, rope_sin: state.ropeSin, attention_mask: state.attentionMask };
         const guardOutput = state.attentionGuard ? { attention_guard: state.attentionGuard } : {};
 

@@ -73,9 +73,7 @@ function makeBuilder() {
       return make('gemm', [a, c], { ...(o.bTranspose ? { bTranspose: true } : {}), ...(o.aTranspose ? { aTranspose: true } : {}) }, a.dataType, [m, n]);
     },
     dequantizeLinear: (x, scale, zp) => make('dequantizeLinear', [x, scale, zp ?? null], {}, scale.dataType, x.shape),
-    // tensorScatter(input, update, writeIndices, {axis}) or, without the cache input (PoC, kvNoInput): tensorScatter(update, writeIndices, {axis, shape, ...})
-    tensorScatter: (...args) => (args.length === 3 && !args[2].dataType ? make('tensorScatter', [args[0], args[1]], { axis: args[2].axis }, args[0].dataType, args[2].shape ?? args[2].outputShape)
-      : make('tensorScatter', [args[0], args[1], args[2]], { axis: args[3].axis }, args[0].dataType, args[0].shape)),
+    tensorScatter: (x, u, i, o) => make('tensorScatter', [x, u, i], { axis: o.axis }, x.dataType, x.shape),
   };
 }
 // what WebNN compiles: the nodes reachable from the outputs, and the graph inputs they use
@@ -142,21 +140,5 @@ for (const [name, create] of cases) {
   if (hand.nodes.length !== ir.nodes.length) problems.push(`reachable node count: hand ${hand.nodes.length}, IR ${ir.nodes.length}`);
   if (problems.length) { failures++; console.log(`DIFF  ${name}\n  ${problems.join('\n  ')}`); }
   else console.log(`SAME  ${name}: ${hand.nodes.length} reachable nodes, ${hand.declaredInputs.length} inputs, ${hand.outputs.length} outputs (hand-written graph had ${'-'} dead nodes ignored)`.replace(' (hand-written graph had - dead nodes ignored)', ''));
-}
-
-// kvNoInput (tensorScatter without the cache input): the hand-written PoC graphs have no past_key / past_value inputs and scatter the new rows into an output of the cache shape
-for (const [name, seq] of [['decode', 1], [`prefill_c${C}`, C]]) {
-  for (const [graph, create] of [['head', sub.buildHeadGraph], ['block', sub.buildBlockGraph], ['block_x2', (b, o) => sub.buildBlockGroupGraph(b, { ...o, blockCount: 2 })]]) {
-    const b = makeBuilder(), options = { ...optionsFor('tensorScatter'), attendInCache: true, kvNoInput: true };
-    const d = describe(b, create(b, { sequenceLength: seq, pastLength: P, maskDataType: 'float16', options }).outputs);
-    const scatters = d.nodes.filter((n) => n.op === 'tensorScatter'), expected = graph === 'block_x2' ? 4 : 2;
-    const cacheOutputs = d.outputs.filter((o) => /updated_(key|value):/.test(o));
-    const problems = [];
-    if (d.declaredInputs.some((x) => /past_(key|value)/.test(x))) problems.push('still declares past_key / past_value');
-    if (!d.usedInputs.includes('kv_write_index:int32[1]')) problems.push('does not use kv_write_index');
-    if (scatters.length !== expected || !scatters.every((n) => n.ins.length === 2 && n.type === `float16[1,8,${P},128]`)) problems.push(`tensorScatter nodes: ${scatters.map((n) => `${n.ins.length} inputs ${n.type}`)}`);
-    if (cacheOutputs.length !== expected || !cacheOutputs.every((o) => o.includes(`float16[1,8,${P},128]`))) problems.push(`cache outputs: ${cacheOutputs}`);
-    if (problems.length) { failures++; console.log(`DIFF  kvNoInput ${name} ${graph}: ${problems.join('; ')}`); } else console.log(`OK    kvNoInput ${name} ${graph}: no cache input, ${scatters.length} tensorScatter(update, index) -> float16[1,8,${P},128] outputs`);
-  }
 }
 process.exit(failures ? 1 : 0);
