@@ -29,7 +29,8 @@
           "kv_style": { "enum": ["staged", "onehot", "tensorScatter"], "description": "see kv_protocols" },
           "compute_type": { "enum": ["float32", "float16"], "description": "type of the computation inside the graphs; the boundaries stay float16" },
           "staging_rows": { "type": "integer", "description": "staged only: rows of the staging buffer = decode steps between flushes" },
-          "scatter_index_type": { "enum": ["int32", "int64"], "description": "tensorScatter only: data type of kv_write_index" }
+          "scatter_index_type": { "enum": ["int32", "int64"], "description": "tensorScatter only: data type of kv_write_index" },
+          "value_layout": { "enum": ["natural", "transposed"], "description": "layout of the value cache: natural [1,kvHeads,P,128] (default) or transposed [1,kvHeads,128,P] (onehot variants); a transposed variant has an attention_guard output in its prefill graphs" }
         }
       }
     },

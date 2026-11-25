@@ -56,7 +56,7 @@ interface Activations {
   residuals: ML[]; attentionOutputs: ML[]; finalHidden: ML;
 }
 interface Selectors { keep: ML; select: ML }
-interface PrefillSet { head: Built; block: Built; tail: Built; groups: Map<number, Built>; act: Activations; sel: Selectors | null }
+interface PrefillSet { head: Built; block: Built; tail: Built; groups: Map<number, Built>; act: Activations; sel: Selectors | null; guards: ML[] }
 interface DecodeSet { head: Built; block: Built; tail: Built; flush: Built | null; groups: Map<number, Built> }
 
 /** The variant of the package that matches the options (the default variant when none is asked for). */
@@ -251,7 +251,7 @@ export class LLM {
       const files = table.prefill[key][String(size)], label = `prefill c${size}`;
       this.prefillSets.set(size, {
         head: await build(files.head, `${label} head`), block: await build(files.block, `${label} block`), tail: await build(files.tail, `${label} tail`),
-        groups: await groupsOf(files, this.prefillGroupSize, label), act: null as any, sel: null,
+        groups: await groupsOf(files, this.prefillGroupSize, label), act: null as any, sel: null, guards: [],
       });
     }
     this.stats.buildMs = performance.now() - t;
@@ -282,8 +282,10 @@ export class LLM {
     const s = this.pkg.model, { P, R, N } = this;
     const zero = (n: number) => newHalf(n);
     const kvShape = (rows: number) => [1, s.num_kv_heads, rows, s.head_dim];
+    const transposed = this.variant.value_layout === 'transposed';   // value cache [1, kvHeads, 128, rows] (one-hot variants)
+    const valueShape = (rows: number) => (transposed ? [1, s.num_kv_heads, s.head_dim, rows] : kvShape(rows));
     const makeKv = async (rows: number) => {
-      const t = { key: await this.writable('float16', kvShape(rows)), value: await this.writable('float16', kvShape(rows)) };
+      const t = { key: await this.writable('float16', kvShape(rows)), value: await this.writable('float16', valueShape(rows)) };
       const zeros = zero(s.num_kv_heads * rows * s.head_dim);
       this.ctx.writeTensor(t.key, zeros); this.ctx.writeTensor(t.value, zeros);
       return t;
@@ -312,6 +314,8 @@ export class LLM {
     for (const [size, set] of this.prefillSets) {
       set.act = await activations(size, scatter ? P : P + size);
       set.sel = scatter ? null : await pair(P, size);
+      // transposed value cache: the prefill graphs have an attention_guard output per block (see decoder.py); the values are not needed, the tensors only receive them
+      if (transposed) for (let i = 0; i <= this.prefillGroupSize; i++) set.guards.push(await this.createTensor('float16', [1, s.num_heads, P + size, 1]));
     }
     this.dec = await activations(1, this.style === 'staged' ? P + R : scatter ? P : P + 1);
     this.decodeSel = this.style === 'staged' ? await pair(R, 1) : this.style === 'onehot' ? await pair(P, 1) : null;
@@ -356,9 +360,11 @@ export class LLM {
     });
     const dispatch = (graph: Built, inputs: Record<string, ML>, outputs: Record<string, ML>) => this.ctx.dispatch(graph.graph, this.bind(graph, inputs), this.bind(graph, outputs, true));
 
+    const guards = decode ? [] : (set as PrefillSet).guards, guardOut = (i: number, prefix = '') => (guards.length ? { [prefix + 'attention_guard']: guards[i] } : {});
+
     // HEAD: attention half of layer 0
     dispatch(set.head, { hidden_states: a.hidden, ...shared(0), ...cacheInputs(0), ...this.pick(0, w.attention) },
-      { residual: a.residuals[0], attention_output: a.attentionOutputs[0], updated_key: spare[0].key, updated_value: spare[0].value });
+      { residual: a.residuals[0], attention_output: a.attentionOutputs[0], updated_key: spare[0].key, updated_value: spare[0].value, ...guardOut(0) });
     this.swap(caches, spare, 0);
 
     // BLOCK i: feed-forward half of layer i + attention half of layer i+1
@@ -376,6 +382,7 @@ export class LLM {
             Object.assign(inputs, { [prefix + 'rope_cos']: a.ropeCos[types[layer + 1]], [prefix + 'rope_sin']: a.ropeSin[types[layer + 1]], [prefix + 'attention_mask']: a.mask[types[layer + 1]] });
           }
           outputs[prefix + 'updated_key'] = spare[layer + 1].key; outputs[prefix + 'updated_value'] = spare[layer + 1].value;
+          Object.assign(outputs, guardOut(j, prefix));
         }
         dispatch(graph, inputs, outputs);
         for (let j = 0; j < count; j++) this.swap(caches, spare, start + j + 1);
@@ -384,7 +391,7 @@ export class LLM {
       for (let layer = 0; layer < N - 1; layer++) {
         dispatch(set.block, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...shared(layer + 1), ...cacheInputs(layer + 1),
           ...this.pick(layer, w.ffn), ...this.pick(layer + 1, w.attention) },
-        { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], updated_key: spare[layer + 1].key, updated_value: spare[layer + 1].value });
+        { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], updated_key: spare[layer + 1].key, updated_value: spare[layer + 1].value, ...guardOut(0) });
         this.swap(caches, spare, layer + 1);
       }
     }

@@ -25,11 +25,11 @@ from . import protocol
 
 class PackageRunner:
     def __init__(self, spec: ModelSpec, weights_dir, *, max_length: int = 128, chunk_size: int = 16, chunk_sizes=None, staging_rows: int = 8,
-                 opt: Optional[D.GraphOptions] = None, kv_style: Optional[str] = None, compute_type: Optional[str] = None, decode_group: int = 1, prefill_group: int = 1,
+                 opt: Optional[D.GraphOptions] = None, kv_style: Optional[str] = None, compute_type: Optional[str] = None, value_layout: Optional[str] = None, decode_group: int = 1, prefill_group: int = 1,
                  prefill_fixed_tokens: int = 200, graphs: Optional[dict] = None, per_block_controls: Optional[bool] = None):
         self.spec, self.dir = spec, Path(weights_dir)   # a directory with manifest.json and the shards
         opt = opt or D.GraphOptions(kv_style="staged", staging_rows=staging_rows)
-        changes = {k: v for k, v in (("kv_style", kv_style), ("compute_type", compute_type)) if v}
+        changes = {k: v for k, v in (("kv_style", kv_style), ("compute_type", compute_type), ("value_layout", value_layout)) if v}
         self.opt = D.with_options(opt, **changes) if changes else opt
         self.R, self.P, self.style = self.opt.staging_rows, max_length - 1, self.opt.kv_style
         self.sizes = sorted(set(chunk_sizes or [chunk_size]))
@@ -88,7 +88,8 @@ class PackageRunner:
             prefill[C] = {"head": load(files["head"]), "block": load(files["block"]), "tail": load(files["tail"]),
                           "groups": {int(c): load(path) for c, path in files.get("block_groups", {}).items()} if prefill_group > 1 else {}}
         opt = D.GraphOptions(**{**plan["profile"], "compute_type": info["compute_type"], "kv_style": info["kv_style"], "staging_rows": info.get("staging_rows", 64),
-                                       "scatter_index_type": info.get("scatter_index_type", "int32")})
+                                       "scatter_index_type": info.get("scatter_index_type", "int32"),
+                                       "value_layout": info.get("value_layout", "natural")})
         return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, decode_group=decode_group, prefill_group=prefill_group,
                    prefill_fixed_tokens=prefill_fixed_tokens, graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])},
                    per_block_controls=plan.get("block_group_controls") == "per_block")
@@ -115,7 +116,8 @@ class PackageRunner:
         s = self.spec
         zeros = lambda rows: np.zeros((1, s.num_kv_heads, rows, s.head_dim), np.float16)  # noqa: E731
         self.k = [zeros(self.P) for _ in range(s.num_layers)]
-        self.v = [zeros(self.P) for _ in range(s.num_layers)]
+        transposed = self.opt.value_layout == "transposed"
+        self.v = [np.zeros((1, s.num_kv_heads, s.head_dim, self.P) if transposed else (1, s.num_kv_heads, self.P, s.head_dim), np.float16) for _ in range(s.num_layers)]
         self.sk = [zeros(self.R) for _ in range(s.num_layers)]
         self.sv = [zeros(self.R) for _ in range(s.num_layers)]
         self.base = self.filled = self.pad = self.position = 0

@@ -60,6 +60,8 @@ class GraphOptions:
     kv_style: str = "staged"  # decode: "staged" | "onehot" | "tensorScatter";  prefill (S > 1) always one-hot (or tensorScatter)
     staging_rows: int = 64
     scatter_index_type: str = "int32"
+    value_layout: str = "natural"  # "natural": value cache [1,kvHeads,P,128] like the key cache | "transposed": [1,kvHeads,128,P] (onehot only; faster than natural on the NPU for the one-hot update,
+    #                                the compiler needs the attention_guard output of the prefill graphs with it)
     lm_head_format: str = "int8-sym"  # "int8-sym": int8 per-row symmetric (scale only) | "uint8-asym": uint8 per-row asymmetric (scale + zero point, the OpenVINO export)
 
 
@@ -180,7 +182,7 @@ def repeat_kv(c: Ctx, x: Value, trailing) -> Value:
     return b.reshape(expanded, [1, d.num_heads, *trailing])
 
 
-def update_kv_cache(c: Ctx, past_key, past_value, key, value, past_len: int, seq: int, selector_prefix: str = "", style: str = "onehot"):
+def update_kv_cache(c: Ctx, past_key, past_value, key, value, past_len: int, seq: int, selector_prefix: str = "", style: str = "onehot", transposed_value: bool = False):
     """Write the new key / value rows into a fixed-size cache inside the graph. Returns (updated_key, updated_value).
     onehot       : past * rows_to_keep + row_selector @ new     (rows_to_keep [1,1,P,1], row_selector [1,1,P,S], both host inputs)
     tensorScatter: tensorScatter(past, new, kv_write_index, axis=2)   (one start row; the S rows go in contiguously)"""
@@ -191,6 +193,10 @@ def update_kv_cache(c: Ctx, past_key, past_value, key, value, past_len: int, seq
         return b.tensor_scatter(past_key, present_key, index, axis=2), b.tensor_scatter(past_value, present_value, index, axis=2)
     row_selector = c.shared(selector_prefix + "row_selector", "float16", [1, 1, past_len, seq], "control")
     rows_to_keep = c.shared(selector_prefix + "rows_to_keep", "float16", [1, 1, past_len, 1], "control")
+    if transposed_value:   # value cache [1,kvHeads,128,P], new rows [1,kvHeads,128,S]: the selectors are transposed inside the graph
+        flip = lambda x: b.transpose(x, [0, 1, 3, 2])   # noqa: E731
+        return (b.add(b.mul(past_key, rows_to_keep), b.matmul(row_selector, present_key)),
+                b.add(b.mul(past_value, flip(rows_to_keep)), b.matmul(present_value, flip(row_selector))))
     return (b.add(b.mul(past_key, rows_to_keep), b.matmul(row_selector, present_key)),
             b.add(b.mul(past_value, rows_to_keep), b.matmul(row_selector, present_value)))
 
@@ -210,7 +216,11 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
     sin = c.shared(control + "rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
     mask = c.shared(control + "attention_mask", mask_dtype, [1, 1, seq, total], "control")
     past_key = c.declare(prefix + "past_key", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv") if past_len > 0 else None
-    past_value = c.declare(prefix + "past_value", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv") if past_len > 0 else None
+    transposed = opt.value_layout == "transposed"
+    if transposed and opt.kv_style != "onehot":
+        raise ValueError("the transposed value layout is only available with the onehot KV protocol")
+    value_shape = [1, d.num_kv_heads, d.head_dim, past_len] if transposed else [1, d.num_kv_heads, past_len, d.head_dim]
+    past_value = c.declare(prefix + "past_value", "float16", value_shape, "kv") if past_len > 0 else None
 
     # 1. normalise, project to q / k / v
     normalized = rms_norm(c, residual, w["input_layernorm_gamma"], 3)
@@ -231,7 +241,7 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
         v_proj = quantized_linear(c, normalized, w["value_weight"], w["value_scale"], d.hidden, d.kv_width, seq)
     query = apply_rotary(c, split_heads(q_proj, d.num_heads, w.get("query_norm_gamma")), cos, sin, d.num_heads)
     key = apply_rotary(c, split_heads(k_proj, d.num_kv_heads, w.get("key_norm_gamma")), cos, sin, d.num_kv_heads)
-    value = b.transpose(b.reshape(v_proj, [1, seq, d.num_kv_heads, d.head_dim]), [0, 2, 1, 3])   # natural layout [1,kvHeads,S,hd]
+    value = b.transpose(b.reshape(v_proj, [1, seq, d.num_kv_heads, d.head_dim]), [0, 2, 3, 1] if transposed else [0, 2, 1, 3])   # natural layout [1,kvHeads,S,hd] | transposed [1,kvHeads,hd,S]
     scaled_query = b.mul(query, c.scalar(1.0 / math.sqrt(d.head_dim), 4))
 
     # 2. attention over [cache + new rows]; the cache update is part of the same graph
@@ -249,9 +259,9 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
         all_values = b.concat([to_c(past_value), to_c(updated_value)], 2)
         kv_out = {"updated_key": updated_key, "updated_value": updated_value}
     elif past_len > 0:
-        updated_key, updated_value = update_kv_cache(c, past_key, past_value, key, value, past_len, seq)
+        updated_key, updated_value = update_kv_cache(c, past_key, past_value, key, value, past_len, seq, transposed_value=transposed)
         all_keys = b.concat([to_c(past_key), to_c(key)], 2)
-        all_values = b.concat([to_c(past_value), to_c(value)], 2)
+        all_values = b.concat([to_c(past_value), to_c(value)], 3 if transposed else 2)
         kv_out = {"updated_key": updated_key, "updated_value": updated_value}
     else:
         all_keys, all_values = to_c(key), to_c(value)
@@ -260,7 +270,13 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
     keys_t = b.transpose(repeat_kv(c, all_keys, [total, d.head_dim]), [0, 1, 3, 2])           # [1,heads,hd,T]
     scores = b.add(b.matmul(to_c(scaled_query), keys_t), to_c(mask))                           # [1,heads,S,T]
     probabilities = b.softmax(scores, 3)
-    values_expanded = repeat_kv(c, all_values, [total, d.head_dim])                            # [1,heads,T,hd]
+    if transposed:   # [1,kvHeads,hd,T] -> expand heads -> [1,heads,hd,T] -> [1,heads,T,hd]
+        values_expanded = b.transpose(repeat_kv(c, all_values, [d.head_dim, total]), [0, 1, 3, 2])
+        if seq > 1 and past_len > 0:
+            # the NPU compiler returned WRONG attention results for S > 1 with a past cache and a transposed value cache unless the expanded values have a second (tiny) consumer
+            kv_out["attention_guard"] = c.to_f16(b.reduce_max(values_expanded, [3], True))
+    else:
+        values_expanded = repeat_kv(c, all_values, [total, d.head_dim])                        # [1,heads,T,hd]
     context = b.matmul(probabilities, values_expanded)                                         # [1,heads,S,hd]
     attention_output = b.reshape(b.transpose(context, [0, 2, 1, 3]), [1, seq, d.attention_width])
     return c.to_f16(attention_output), kv_out

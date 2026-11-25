@@ -162,6 +162,29 @@ describe('block groups of a hybrid model', () => {
   });
 });
 
+describe('one-hot variants store the value cache transposed', () => {
+  it('value cache [kvHeads, 128, P]; the prefill graphs write an attention_guard per block (single blocks and groups), decode has none', async () => {
+    for (const groups of [1, 2]) {
+      const { llm, context } = await loaded({ variant: 'onehot-float32', blocksPerGraph: groups, prefillBlocksPerGraph: groups });
+      const spec = llm.pkg.model, internals = llm as any;
+      expect(llm.variant.value_layout).toBe('transposed');
+      expect(internals.kv[0].value.shape).toEqual([1, spec.num_kv_heads, spec.head_dim, 127]);
+      expect(internals.kv[0].key.shape).toEqual([1, spec.num_kv_heads, 127, spec.head_dim]);
+      await run(llm, prompt.slice(0, 5), 2);
+      const withGuard = context.dispatches.filter((d) => Object.keys(d.outputs).some((n) => n.endsWith('attention_guard')));
+      expect(withGuard.length).toBe(groups === 1 ? 3 : 2);   // prefill: head + 2 blocks, or head + 1 group; decode graphs have no guard
+      const guards = new Set(withGuard.flatMap((d) => Object.entries(d.outputs).filter(([n]) => n.endsWith('attention_guard')).map(([, t]) => t.id)));
+      expect(guards.size).toBe(groups === 1 ? 1 : 2);        // one scratch tensor for single blocks; one per block of a group (the head reuses the first)
+    }
+  });
+  it('staged and tensorScatter variants keep the natural layout', async () => {
+    for (const variant of ['staged-r8-float32', 'tensorScatter-float32']) {
+      const { llm } = await loaded({ variant });
+      expect((llm as any).kv[0].value.shape).toEqual([1, llm.pkg.model.num_kv_heads, 127, llm.pkg.model.head_dim]);
+    }
+  });
+});
+
 describe('prefill with several chunk sizes', () => {
   it('plans the chunk sequence per prompt and uses one graph set per size', async () => {
     const { llm, context } = await loaded({ chunkSizes: [8, 16], prefillFixedTokens: 2 });

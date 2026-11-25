@@ -31,6 +31,7 @@
  "profile": {
   "zero_point": "const",
   "merge_projections": true,
+  "value_layout": "natural",
   "lm_head_format": "int8-sym"
  },
  "variants": [
@@ -49,12 +50,14 @@
   {
    "id": "onehot-float32",
    "kv_style": "onehot",
-   "compute_type": "float32"
+   "compute_type": "float32",
+   "value_layout": "transposed"
   },
   {
    "id": "onehot-float16",
    "kv_style": "onehot",
-   "compute_type": "float16"
+   "compute_type": "float16",
+   "value_layout": "transposed"
   },
   {
    "id": "tensorScatter-float32",

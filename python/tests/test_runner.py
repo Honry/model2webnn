@@ -102,14 +102,22 @@ def test_runner_with_the_uint8_asymmetric_lm_head(tmp_path):
 
 
 # ------------------------------------------------------------------------------------------------------------- option variants (KV protocol, chunk plans, groups)
-@pytest.mark.parametrize("style", ["staged", "onehot", "tensorScatter"])
+STYLES = ["staged", "onehot", "onehot-transposed", "tensorScatter"]   # onehot-transposed: the one-hot protocol with the value cache stored [1,kvHeads,128,P]
+
+
+def style_kw(style):
+    kind, _, layout = style.partition("-")
+    return {"kv_style": kind, **({"value_layout": layout} if layout else {})}
+
+
+@pytest.mark.parametrize("style", STYLES)
 @pytest.mark.parametrize("chunks", [(8,), (4, 8)])
 def test_every_kv_protocol_matches_the_reference_in_prefill_and_decode(tiny, style, chunks):
     """Prefill + single-token decode steps with each KV protocol and a single / several chunk sizes: logits = the independent reference on the dequantized weights."""
     spec, _, pkg = tiny
     quantized = ReferenceModel(spec, PackageReader(spec, pkg).read)
     tokens = [int(t) for t in np.random.default_rng(3).integers(3, spec.vocab, 27)]   # beyond the 16-token sliding window; padded last chunk / front padding
-    runner = PackageRunner(spec, pkg, max_length=64, chunk_sizes=chunks, staging_rows=4, kv_style=style, prefill_fixed_tokens=2)
+    runner = PackageRunner(spec, pkg, max_length=64, chunk_sizes=chunks, staging_rows=4, prefill_fixed_tokens=2, **style_kw(style))
     got = runner.prefill(tokens[:21])
     assert cosine(got, quantized.logits(tokens[:21])[-1]) > 0.9999, (style, chunks, runner.plan(21))
     for i in range(21, 27):   # decode steps; staged: crosses a flush of the 4-row staging buffer
@@ -135,7 +143,7 @@ def test_float16_compute_agrees_with_float32(tiny):
     assert cosine(f16, expected) > 0.999
 
 
-@pytest.mark.parametrize("style", ["staged", "onehot", "tensorScatter"])
+@pytest.mark.parametrize("style", STYLES)
 @pytest.mark.parametrize("hybrid", [False, True])
 def test_block_groups_equal_single_blocks(tiny, style, hybrid):
     """A group of blocks gives the same result as single blocks. One layer type: the blocks share one mask / RoPE table (here: the tiny model with full attention everywhere);
@@ -146,7 +154,7 @@ def test_block_groups_equal_single_blocks(tiny, style, hybrid):
     if not hybrid:
         spec = dataclasses.replace(spec, layer_types=["full_attention"] * spec.num_layers)
     tokens = [int(t) for t in np.random.default_rng(6).integers(3, spec.vocab, 19)]
-    make = lambda **kw: PackageRunner(spec, pkg, max_length=64, chunk_size=8, staging_rows=4, kv_style=style, **kw)   # noqa: E731
+    make = lambda **kw: PackageRunner(spec, pkg, max_length=64, chunk_size=8, staging_rows=4, **style_kw(style), **kw)   # noqa: E731
     single, grouped = make(), make(decode_group=2, prefill_group=2)
     assert cosine(grouped.prefill(tokens), single.prefill(tokens)) > 0.99999
     for t in (5, 9, 4, 7, 3, 11):

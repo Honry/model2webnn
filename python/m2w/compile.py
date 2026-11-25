@@ -59,6 +59,8 @@ def expand_variants(kv_styles, staging_rows, compute_types) -> list:
                     v["staging_rows"] = int(rows)
                 if kv == "tensorScatter":
                     v["scatter_index_type"] = "int32"
+                if kv == "onehot":
+                    v["value_layout"] = "transposed"   # the layout of the hand-written one-hot graphs; faster than natural on the NPU (staged / tensorScatter need natural)
                 variants.append(v)
     return variants
 
@@ -70,7 +72,8 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
     per_block = len(set(spec.layer_types)) > 1   # block groups of a hybrid model take the rope / mask of every block as separate inputs
     tables: dict = {}
     for variant in variants:
-        vopt = D.with_options(opt, kv_style=variant["kv_style"], compute_type=variant["compute_type"], staging_rows=variant.get("staging_rows", opt.staging_rows))
+        vopt = D.with_options(opt, kv_style=variant["kv_style"], compute_type=variant["compute_type"], staging_rows=variant.get("staging_rows", opt.staging_rows),
+                           value_layout=variant.get("value_layout", "natural"))
         gdir = out / "graphs" / variant["id"]
         gdir.mkdir(parents=True, exist_ok=True)
 

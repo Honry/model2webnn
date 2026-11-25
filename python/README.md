@@ -15,7 +15,7 @@ m2w verify  aion --source microsoft/Aion-1.0-Instruct-2.3B         # run the pac
 Useful `compile` options (the graphs are static, so what a runtime can choose between is decided here; weights are shared by all of them):
 - `--max-length` / `--chunk 64 128 256`: KV cache capacities and prefill chunk sizes. With several chunk sizes the runtime plans the chunk sequence of each prompt (fewer, bigger dispatches for long prompts, a small one for short prompts).
 - `--kv-style staged onehot tensorScatter`: KV protocols (staged = staging buffer flushed every N steps, onehot = whole-cache update, tensorScatter = in-graph scatter); `--staging-rows 64 32 128`; `--compute-type float32 float16`.
-  Every combination becomes a graph **variant** (`staged-r64-float32`, `onehot-float16`, ...) listed in `plan.json`; the first value of each option is the default. Without these options a package has one variant.
+  The one-hot variants keep the value cache transposed (`[1,kvHeads,128,P]`, as the hand-written graphs do: faster on the NPU than the natural layout; the prefill graphs then carry an `attention_guard` output). Every combination becomes a graph **variant** (`staged-r64-float32`, `onehot-float16`, ...) listed in `plan.json`; the first value of each option is the default. Without these options a package has one variant.
 - `--blocks-per-graph 1 5` / `--prefill-blocks-per-graph 1 5`: also build graphs with 5 blocks each (fewer dispatches, longer compile; hybrid models such as sliding + full attention get a mask and RoPE table per block as graph inputs).
 - `--lm-head-format int8-sym|uint8-asym` (default int8-sym: same accuracy as the OpenVINO-style uint8 table, compiles faster on the NPU).
 

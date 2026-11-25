@@ -10,7 +10,7 @@ export interface ModelSpecJson {
 }
 export interface GraphTable { head: string; block: string; tail: string; flush?: string; block_groups?: Record<string, string> }
 /** One set of graphs of the package: a KV protocol x a compute type (x the staging rows of the staged protocol). Weights are shared by all variants. */
-export interface Variant { id: string; kv_style: 'staged' | 'onehot' | 'tensorScatter'; compute_type: 'float32' | 'float16'; staging_rows?: number; scatter_index_type?: 'int32' | 'int64' }
+export interface Variant { id: string; kv_style: 'staged' | 'onehot' | 'tensorScatter'; compute_type: 'float32' | 'float16'; staging_rows?: number; scatter_index_type?: 'int32' | 'int64'; value_layout?: 'natural' | 'transposed' }
 export interface VariantGraphs { lm_head: string; decode: Record<string, GraphTable>; prefill: Record<string, Record<string, GraphTable>> }
 export interface Plan {
   max_lengths: number[]; prefill_chunks: number[]; blocks_per_graph: number[]; prefill_blocks_per_graph: number[];
