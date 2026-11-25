@@ -98,7 +98,7 @@ for await (const piece of chat(llm, tokenizer, [{ user: 'What is the capital of 
 **Limit to know:** WebNN (Chromium) does not accept a tensor above 2^31 - 1 bytes, inside a graph or as an MLTensor. The compiler checks every graph it writes and the runtime checks the state tensors it creates; the
 dequantized lm_head of a big vocabulary (Gemma 4: 2.5 GiB in float32) is built in row blocks for that reason (see the [Python README](python/README.md#limits-of-the-target-webnn)).
 
-Models run so far: Qwen3-4B and Aion-1.0-Instruct-2.3B (a hybrid sliding / full attention model with two RoPE types). Supported architectures are described by data (`python/m2w/frontends/hf_llm/families/`); see the [Python README](python/README.md) for what is and is not supported yet.
+Models run so far: Qwen3-4B and Aion-1.0-Instruct-2.3B (a hybrid sliding / full attention model with two RoPE types), Gemma 4 E4B (KV sharing, per-layer embeddings) and Qwen3.5-4B (Gated DeltaNet linear attention: chunked prefill without a loop, see [docs/models/qwen35.md](docs/models/qwen35.md)). Supported architectures are described by data (`python/m2w/frontends/hf_llm/families/`); see the [Python README](python/README.md) for what is and is not supported yet.
 
 ---
 
