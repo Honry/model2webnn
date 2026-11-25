@@ -120,7 +120,7 @@ describe('Gemma 4 runtime on a validating mock of WebNN', () => {
     expect(weightWrites()).toBe(before);
     expect((await run(llm, prompt.slice(0, 21), 3)).length).toBe(3);
     await expect(llm.reconfigure({ kvStyle: 'onehot' })).rejects.toThrow(/staged/);
-    await expect(llm.reconfigure({ blocksPerGraph: 5 })).rejects.toThrow(/block groups/);
+    await expect(llm.reconfigure({ blocksPerGraph: 6 })).rejects.toThrow(/block groups/);
   });
 
   it('loadModel picks the runtime from the plan; the standard runtime refuses a Gemma 4 package', async () => {
@@ -133,6 +133,74 @@ describe('Gemma 4 runtime on a validating mock of WebNN', () => {
   it('rejects prompts that do not fit', async () => {
     const { llm } = await loaded();
     await expect(async () => { for await (const _ of llm.generate(Array(127).fill(5))) void _; }).rejects.toThrow(/KV cache holds 127/);
+  });
+});
+
+describe('Gemma 4 decode block groups', () => {
+  // the tiny model has 5 BLOCKs (the attention halves of layers 1..5): sliding own, full own, sliding own, full shared (reads layer 2), sliding shared (reads layer 3)
+  const stateIndex = (llm: Gemma4LLM) => {
+    const x = internals(llm), at = (t: any) => x.stateTensors.indexOf(t);
+    return { kv: [...x.kv.entries()].map(([l, c]: any) => [l, at(c.key), at(c.value)]), stg: [...x.stg.entries()].map(([l, c]: any) => [l, at(c.key), at(c.value)]) };
+  };
+
+  it.each([2, 3, 4, 5])('%i blocks per graph: one dispatch per group, the same tokens and the same main / staging buffers as without groups', async (group) => {
+    const plain = await loaded({ chunkSizes: [8, 16] }), grouped = await loaded({ chunkSizes: [8, 16], blocksPerGraph: group });
+    const a = await run(plain.llm, prompt, 12), b = await run(grouped.llm, prompt, 12);
+    expect(b).toEqual(a);
+    const steps = 11, groups = Math.ceil(5 / group), plan = planPrefill([8, 16], 45, 200), prefill = (plan.length - 1) * N + (N + 2);
+    expect(plain.context.dispatches.length).toBe(prefill + steps * (N + 2) + 4);
+    expect(grouped.context.dispatches.length).toBe(prefill + steps * (groups + 3) + 4);   // HEAD + groups + TAIL + lm_head per decode step; the prefill chain and the flushes are as before
+    expect(stateIndex(grouped.llm)).toEqual(stateIndex(plain.llm));   // every layer's main / spare staging buffers were swapped exactly as often
+    const labels = grouped.llm.stats.graphBuilds.map((g) => g.label);
+    expect(labels.some((l) => l.startsWith('decode block'))).toBe(false);
+    expect(labels.filter((l) => l.startsWith('decode group')).length).toBe(group === 2 ? 3 : group === 3 ? 2 : group === 4 ? 2 : 1);
+  });
+
+  it('binds a group by input name: controls per layer type, caches of the producer layers, the staging buffer of a producer in the group is its own output of the group', async () => {
+    const { llm, context } = await loaded({ chunkSizes: [8, 16], blocksPerGraph: 4 });
+    await run(llm, prompt, 2);
+    const x = internals(llm), prefill = (planPrefill([8, 16], 45, 200).length - 1) * N + (N + 2);
+    const [head, g0, g1, tail] = context.dispatches.slice(prefill, prefill + 4);   // the decode step: HEAD, blocks 0..3, block 4, TAIL
+    expect(head.inputs.hidden_states.shape).toEqual([1, 1, 128]);
+    expect(g0.inputs.residual).toBe(head.outputs.residual);
+    expect(g0.inputs.attention_output).toBe(head.outputs.attention_output);
+    expect(g0.inputs.sliding_attention_attention_mask).toBe(x.dec.mask.sliding_attention);
+    expect(g0.inputs.full_attention_rope_sin).toBe(x.dec.ropeSin.full_attention);
+    expect(g0.inputs.b3_per_layer_input).toBe(x.dec.ples[3]);
+    // block 3 (layer 4, full, shared) reads the caches of layer 2 = block 1 inside the group: no inputs of its own for them
+    expect(Object.keys(g0.inputs).filter((n) => n.startsWith('b3_') && /past|staging/.test(n))).toEqual([]);
+    expect(Object.keys(g0.inputs).filter((n) => n.endsWith('past_key'))).toEqual(['b0_past_key', 'b1_past_key', 'b2_past_key']);
+    expect(g0.inputs.b1_past_key.shape).toEqual([1, 2, 127, 64]);
+    expect(g0.inputs.b3_query_projection_weight).toBe(x.weights[4].query_projection_weight);
+    expect(g0.inputs.b3_gate_up_projection_weight).toBe(x.weights[3].gate_up_projection_weight);   // the feed-forward half of layer 3, the attention half of layer 4
+    expect(Object.keys(g0.outputs)).toEqual(['b0_updated_key', 'b0_updated_value', 'b1_updated_key', 'b1_updated_value', 'b2_updated_key', 'b2_updated_value', 'next_residual', 'next_attention_output']);
+    // block 4 (layer 5, sliding, shared) reads layer 3 = block 2 of the previous group: its staging input is the staging buffer after that group's update
+    expect(g1.inputs.residual).toBe(g0.outputs.next_residual);
+    expect(g1.inputs.b0_staging_key).toBe(g0.outputs.b2_updated_key);
+    expect(g1.inputs.b0_past_key).toBe(g0.inputs.b2_past_key);
+    expect('b0_updated_key' in g1.outputs).toBe(false);
+    expect(tail.inputs.residual).toBe(g1.outputs.next_residual);
+  });
+
+  it('groups that read the caches of another group: the staging buffers are the updated ones of the dispatch that wrote them', async () => {
+    const { llm, context } = await loaded({ chunkSizes: [8, 16], blocksPerGraph: 2 });
+    await run(llm, prompt, 2);
+    const prefill = (planPrefill([8, 16], 45, 200).length - 1) * N + (N + 2);
+    const [, g0, g1, g2] = context.dispatches.slice(prefill, prefill + 5);   // blocks 0..1 | 2..3 | 4
+    expect(g1.inputs.b1_staging_key).toBe(g0.outputs.b1_updated_key);   // layer 4 reads layer 2 (block 1)
+    expect(g1.inputs.b1_past_key).toBe(g0.inputs.b1_past_key);
+    expect(g2.inputs.b0_staging_key).toBe(g1.outputs.b0_updated_key);   // layer 5 reads layer 3 (block 2)
+  });
+
+  it('reconfigures from and to groups; refuses prefill groups and sizes the package does not have', async () => {
+    const { llm, context } = await loaded({ chunkSizes: [8, 16] });
+    await expect(llm.reconfigure({ prefillBlocksPerGraph: 2 })).rejects.toThrow(/decode only/);
+    await expect(llm.reconfigure({ blocksPerGraph: 6 })).rejects.toThrow(/no decode block groups of 6 blocks \(it has 2, 3, 4, 5\)/);
+    await llm.reconfigure({ blocksPerGraph: 2, chunkSizes: [8, 16] });
+    context.onRead = (_t, destination) => { destination.fill(0); destination[7] = 5; };
+    expect(await run(llm, prompt.slice(0, 21), 4)).toEqual([7, 7, 7, 7]);
+    await llm.reconfigure({ blocksPerGraph: 1, chunkSizes: [8, 16] });
+    expect((internals(llm).decodeSet.blocks as Map<string, unknown>).size).toBe(4);
   });
 });
 

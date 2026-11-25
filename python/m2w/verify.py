@@ -75,7 +75,7 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
     for number, variant in enumerate(wanted):
         t = time.perf_counter()
         if spec.builder == "gemma4":
-            runner = Gemma4Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks)
+            runner = Gemma4Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group)
         elif spec.builder == "qwen35":
             runner = Qwen35Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks)
         else:

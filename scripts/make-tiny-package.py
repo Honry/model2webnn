@@ -26,7 +26,7 @@ status = verify_package(pkg, str(out / "tiny-hf"), prompt="", steps=12, token_id
 
 write_tiny_gemma4(out / "tiny-gemma4-hf", dtype="BF16")
 gemma = compile_model(str(out / "tiny-gemma4-hf"), golden / "tiny-gemma4-package", max_lengths=(max_length,), chunks=(chunk, small_chunk), staging_rows=(staging,),
-                      compute_types=("float32", "float16"), workers=2, progress=lambda m: None)
+                      compute_types=("float32", "float16"), blocks_per_graph=(1, 2, 3, 4, 5), workers=2, progress=lambda m: None)
 status |= verify_package(gemma, str(out / "tiny-gemma4-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk])
 
 try:   # a tiny Qwen3.5 (Gated DeltaNet hybrid) needs torch + transformers >= 5.3 to create its random weights

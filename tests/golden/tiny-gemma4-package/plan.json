@@ -104,7 +104,11 @@
   8
  ],
  "blocks_per_graph": [
-  1
+  1,
+  2,
+  3,
+  4,
+  5
  ],
  "prefill_blocks_per_graph": [
   1
@@ -125,6 +129,64 @@
      "flush": {
       "full_attention": "graphs/staged-r8-float32/kv_flush_full_attention_L128.json",
       "sliding_attention": "graphs/staged-r8-float32/kv_flush_sliding_attention_L128.json"
+     },
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "so-fo",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo_L128.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "so-fs",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fs_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float32/decode_group_ss_L128.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "so-fo-so",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo-so_L128.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "fs-ss",
+        "graph": "graphs/staged-r8-float32/decode_group_fs-ss_L128.json"
+       }
+      ],
+      "4": [
+       {
+        "first_block": 0,
+        "blocks": 4,
+        "key": "so-fo-so-fs",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo-so-fs_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float32/decode_group_ss_L128.json"
+       }
+      ],
+      "5": [
+       {
+        "first_block": 0,
+        "blocks": 5,
+        "key": "so-fo-so-fs-ss",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo-so-fs-ss_L128.json"
+       }
+      ]
      }
     }
    },
@@ -168,6 +230,64 @@
      "flush": {
       "full_attention": "graphs/staged-r8-float16/kv_flush_full_attention_L128.json",
       "sliding_attention": "graphs/staged-r8-float16/kv_flush_sliding_attention_L128.json"
+     },
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "so-fo",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo_L128.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "so-fs",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fs_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float16/decode_group_ss_L128.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "so-fo-so",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo-so_L128.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "fs-ss",
+        "graph": "graphs/staged-r8-float16/decode_group_fs-ss_L128.json"
+       }
+      ],
+      "4": [
+       {
+        "first_block": 0,
+        "blocks": 4,
+        "key": "so-fo-so-fs",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo-so-fs_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float16/decode_group_ss_L128.json"
+       }
+      ],
+      "5": [
+       {
+        "first_block": 0,
+        "blocks": 5,
+        "key": "so-fo-so-fs-ss",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo-so-fs-ss_L128.json"
+       }
+      ]
      }
     }
    },
@@ -207,7 +327,16 @@
    "sliding_attention_own",
    "full_attention_shared",
    "sliding_attention_shared"
-  ]
+  ],
+  "block_groups": {
+   "description": "decode only: graphs.<variant>.decode.<max length>.block_groups[K] = the N - 1 BLOCKs cut into runs of K ([{first_block, blocks, key, graph}], the last run may be shorter), one graph per distinct sequence of kinds (key: the kinds joined by '-', so / fo = sliding / full attention with K / V of its own, ss / fs = sliding / full attention sharing K / V). A group graph takes residual + attention_output of its first block and returns next_residual + next_attention_output of its last block. Block j (BLOCK first_block + j) has the prefix b<j>_: b<j>_per_layer_input (ple_<first_block + j>), the weights of the feed-forward half of layer first_block + j and of the attention half of layer first_block + j + 1, and b<j>_past_key / b<j>_past_value / b<j>_staging_key / b<j>_staging_value = the main cache and staging buffer of the layer whose K / V that attention half reads (model.json kv_producer); a block that reads the cache of a layer already read by an earlier block of the group has no cache inputs (it reuses that block's), and a block that reads the cache of a layer INSIDE the group attends over the staging buffer after that layer's update, computed in the graph. Output b<j>_updated_key / b<j>_updated_value (blocks with K / V of their own) = the spare staging buffer, to be swapped in. <layer type>_rope_cos / _rope_sin / _attention_mask: one per layer type (the decode masks of own and shared layers are the same). Prefill has no groups (prefill_blocks_per_graph = [1]).",
+   "kind_codes": {
+    "so": "sliding_attention_own",
+    "fo": "full_attention_own",
+    "ss": "sliding_attention_shared",
+    "fs": "full_attention_shared"
+   }
+  }
  },
  "per_layer_type_inputs": {
   "description": "rope_cos / rope_sin [1,1,S,head_dim of the type] / attention_mask of an attention half are bound with the tables of the layer type of ITS layer; a shared layer's mask has the columns of the cache it reads (prefill: P, decode: P + staging rows)",

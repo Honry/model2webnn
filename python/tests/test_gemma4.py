@@ -131,3 +131,87 @@ def test_lm_head_is_split_into_row_blocks_when_one_tensor_would_exceed_the_webnn
     split = Gemma4Runner(spec, root / "pkg" / "weights", max_length=64, chunk_sizes=(8,), staging_rows=4)
     assert G.lm_head_parts(spec, split.opt) == 3 and sorted(c.external for c in split.g["lm_head"].constants.values() if c.external) == [f"lm_head_{k}_{i}" for k in ("scale", "weight") for i in range(3)]
     np.testing.assert_allclose(split.prefill(tokens), expected, atol=1e-3)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# decode block groups
+# ---------------------------------------------------------------------------------------------------------------------
+def test_block_group_schedule_layout_and_keys(tiny):
+    """The tiny model: blocks 0..4 are the attention halves of layers 1..5 = sliding own, full own, sliding own, full shared (reads layer 2), sliding shared (reads layer 3)."""
+    spec, _, _, _ = tiny
+    assert G.block_group_key(G.block_group_layout(spec, 0, 5)) == "so-fo-so-fs-ss"
+    assert G.block_group_schedule(spec, 2) == [(0, 2), (2, 2), (4, 1)] and G.block_group_schedule(spec, 5) == [(0, 5)] and G.block_group_schedule(spec, 3) == [(0, 3), (3, 2)]
+    owners = lambda first, n: [item["owner"] for item in G.block_group_layout(spec, first, n)]   # noqa: E731
+    assert owners(0, 5) == [0, 1, 2, 1, 2]   # layer 4 reads layer 2 = block 1, layer 5 reads layer 3 = block 2: both producers are inside the group
+    assert owners(2, 2) == [0, 1] and owners(4, 1) == [0]   # blocks 2, 3: layer 4 reads layer 2, which an earlier group wrote: its first reader declares the cache inputs
+    assert owners(3, 2) == [0, 1]            # both producers are outside: the first reader of each declares the cache inputs
+
+
+def test_block_group_graph_interface(tiny):
+    spec, _, _, _ = tiny
+    opt, P, R = D.GraphOptions(staging_rows=4), 63, 4
+    g = G.build_block_group_graph(spec, opt, G.block_group_layout(spec, 0, 5), seq=1, past_len=P, name="g")
+    names = list(g.inputs)
+    # controls once per layer TYPE, never per block
+    assert sorted(n for n in names if n.endswith(("rope_cos", "rope_sin", "attention_mask"))) == sorted(f"{t}_{c}" for t in ("sliding_attention", "full_attention") for c in ("rope_cos", "rope_sin", "attention_mask"))
+    assert g.inputs["full_attention_attention_mask"].shape == (1, 1, 1, P + R) and g.inputs["full_attention_rope_cos"].shape == (1, 1, 1, 64)
+    assert [n for n in names if n.endswith("past_key")] == ["b0_past_key", "b1_past_key", "b2_past_key"]   # blocks 3 and 4 read the caches of blocks 1 and 2
+    assert [n for n in names if n.endswith("staging_key")] == ["b0_staging_key", "b1_staging_key", "b2_staging_key"]
+    assert [n for n in names if n.endswith("per_layer_input")] == [f"b{j}_per_layer_input" for j in range(5)]
+    assert g.inputs["b1_past_key"].shape == (1, 2, P, 64) and g.inputs["b0_past_key"].shape == (1, 2, P, 32)
+    assert "b3_qkv_projection_weight" not in g.inputs and "b3_query_projection_weight" in g.inputs and "b3_gate_up_projection_weight" in g.inputs
+    assert list(g.outputs) == ["b0_updated_key", "b0_updated_value", "b1_updated_key", "b1_updated_value", "b2_updated_key", "b2_updated_value", "next_residual", "next_attention_output"]
+    # a group of the two shared blocks: both producers are outside, the first reader of each declares the caches
+    g2 = G.build_block_group_graph(spec, opt, G.block_group_layout(spec, 3, 2), seq=1, past_len=P)
+    assert [n for n in g2.inputs if n.endswith("past_key")] == ["b0_past_key", "b1_past_key"] and list(g2.outputs) == ["next_residual", "next_attention_output"]
+    with pytest.raises(ValueError, match="decode only"):
+        G.build_block_group_graph(spec, opt, G.block_group_layout(spec, 0, 2), seq=8, past_len=P)
+
+
+@pytest.mark.parametrize("compute_type", ["float32", "float16"])
+def test_grouped_decode_is_the_ungrouped_decode(tiny, compute_type):
+    """Several group sizes: groups that hold the producers of the shared layers (G = 4, 5), groups that read caches written by earlier groups (G = 2, 3); the staging buffer is flushed on the way."""
+    spec, _, root, _ = tiny
+    tokens = [int(t) for t in np.random.default_rng(3).integers(3, spec.vocab, 30)]
+    opt = D.GraphOptions(staging_rows=4, compute_type=compute_type)
+    plain = Gemma4Runner(spec, root / "pkg" / "weights", max_length=64, chunk_sizes=(8,), opt=opt)
+    expected = [plain.prefill(tokens[:21])] + [plain.step(t) for t in tokens[21:30]]
+    for count in (2, 3, 4, 5):
+        grouped = Gemma4Runner(spec, root / "pkg" / "weights", max_length=64, chunk_sizes=(8,), opt=opt, blocks_per_graph=count)
+        assert len(grouped.g["decode"]["groups"]) == -(-5 // count)
+        got = [grouped.prefill(tokens[:21])] + [grouped.step(t) for t in tokens[21:30]]
+        for i, (a, b) in enumerate(zip(got, expected)):
+            assert int(np.argmax(a)) == int(np.argmax(b)), (count, i)
+            np.testing.assert_allclose(a, b, atol=2e-3 if compute_type == "float32" else 2e-2, err_msg=f"group {count}, step {i}")
+        for layer in grouped.k:   # the same caches, so the staging protocol is right and not only the logits
+            np.testing.assert_allclose(grouped.k[layer].astype(np.float32), plain.k[layer].astype(np.float32), atol=1e-2)
+            np.testing.assert_allclose(grouped.sk[layer].astype(np.float32), plain.sk[layer].astype(np.float32), atol=1e-2)
+
+
+def test_compile_with_block_groups_writes_the_schedule_and_the_compiled_groups_run(tmp_path, capsys):
+    write_tiny_gemma4(tmp_path / "hf", dtype="BF16")
+    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(64,), chunks=(8,), staging_rows=(4,), blocks_per_graph=(1, 2, 4), workers=2, progress=lambda m: None)
+    plan = json.loads((out / "plan.json").read_text())
+    assert plan["blocks_per_graph"] == [1, 2, 4] and plan["prefill_blocks_per_graph"] == [1] and plan["chain"]["block_groups"]["kind_codes"]["so"] == "sliding_attention_own"
+    groups = plan["graphs"]["staged-r4-float32"]["decode"]["64"]["block_groups"]
+    assert set(groups) == {"2", "4"}
+    assert [(e["first_block"], e["blocks"], e["key"]) for e in groups["2"]] == [(0, 2, "so-fo"), (2, 2, "so-fs"), (4, 1, "ss")]
+    assert [(e["first_block"], e["blocks"], e["key"]) for e in groups["4"]] == [(0, 4, "so-fo-so-fs"), (4, 1, "ss")]
+    assert groups["2"][2]["graph"] == "graphs/staged-r4-float32/decode_group_ss_L64.json" and (out / groups["4"][0]["graph"]).exists()
+    # prefill grouping is refused, before anything is quantized
+    with pytest.raises(ValueError, match="decode only"):
+        C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg2", prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
+    ids = [int(t) for t in np.random.default_rng(0).integers(3, 300, 19)]
+    for count in (2, 4):
+        assert verify_package(out, str(tmp_path / "hf"), prompt="", steps=6, token_ids=ids, chunks=[8], skip_float_reference=True, decode_group=count) == 0
+    assert "RESULT: pipeline OK" in capsys.readouterr().out
+    with pytest.raises(ValueError, match="no decode block groups of 3"):
+        Gemma4Runner.from_package(out, arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text())), decode_group=3)
+    # m2w rebuild-graphs adds / drops groups without touching the weights
+    C.rebuild_graphs(out, staging_rows=(4,), blocks_per_graph=(1, 3), progress=lambda m: None)
+    rebuilt = json.loads((out / "plan.json").read_text())
+    assert rebuilt["blocks_per_graph"] == [1, 3] and set(rebuilt["graphs"]["staged-r4-float32"]["decode"]["64"]["block_groups"]) == {"3"}
+    assert [e["key"] for e in rebuilt["graphs"]["staged-r4-float32"]["decode"]["64"]["block_groups"]["3"]] == ["so-fo-so", "fs-ss"]
+    assert not (out / "graphs" / "staged-r4-float32" / "decode_group_so-fo_L64.json").exists()
+    C.rebuild_graphs(out, staging_rows=(4,), progress=lambda m: None)
+    assert "block_groups" not in json.loads((out / "plan.json").read_text())["graphs"]["staged-r4-float32"]["decode"]["64"]

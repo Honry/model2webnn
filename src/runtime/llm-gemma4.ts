@@ -4,11 +4,13 @@
 //    prefill: the cache after the update of the chunk, mask columns = cache rows);
 //  * per-layer embeddings: a row of the int8 table per token is read on the host (a byte range of the file: the table is gigabytes), HEAD turns it into the per-layer inputs ple_0 .. ple_{N-1};
 //  * the embedding is multiplied by sqrt(hidden) on the host.
-// Python counterpart (the executable specification): python/m2w/reference/gemma4_runner.py. Only the staged KV protocol exists; there are no block groups.
+//  * decode block groups (blocksPerGraph = K > 1, a package built with --blocks-per-graph K): the N - 1 BLOCKs in runs of K, one dispatch per run (plan.chain.block_groups); the inputs of a group graph
+//    are bound by NAME: residual / attention_output of its first block, <layer type>_rope_cos / _rope_sin / _attention_mask, and b<j>_ = the weights, per-layer input and caches of block j. Prefill has no groups.
+// Python counterpart (the executable specification): python/m2w/reference/gemma4_runner.py. Only the staged KV protocol exists.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
-import { openPackage, type GemmaDecodeTable, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
+import { openPackage, type GemmaBlockGroup, type GemmaDecodeTable, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
   decodeMasks, decodeSelectors, flushSelectors, incachePrefillMasks, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables, type Half,
 } from './protocol.js';
@@ -33,13 +35,13 @@ export class Gemma4LLM {
 
   private ctx!: ML;
   private P = 0; private R = 0; private N: number;
-  private fixedTokens = 200;
+  private fixedTokens = 200; private groupSize = 1;
   private types: string[]; private kinds: string[]; private producer: number[];
   private weights: Record<string, ML>[] = [];
   private headExtra: Record<string, ML> = {};
   private finalGamma!: ML;
   private lmHead!: Built;
-  private decodeSet!: { head: Built; blocks: Map<string, Built>; tail: Built; flush: Map<string, Built> };
+  private decodeSet!: { head: Built; blocks: Map<string, Built>; tail: Built; flush: Map<string, Built>; groups: { first: number; blocks: number; built: Built }[] };
   private prefillSets = new Map<number, PrefillSet>();
   private kv = new Map<number, Cache>(); private kvSpare = new Map<number, Cache>(); private stg = new Map<number, Cache>(); private stgSpare = new Map<number, Cache>();
   private dec!: Activations;
@@ -91,12 +93,14 @@ export class Gemma4LLM {
     const available = Object.keys(table.prefill[key]).map(Number).sort((a, b) => a - b);
     const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
     for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
-    if ((o.blocksPerGraph ?? 1) > 1 || (o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('block groups are not available for Gemma 4 packages yet');
-    return { maxLength: +key, variant, sizes, fixedTokens: o.prefillFixedTokens ?? 200 };
+    if ((o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('Gemma 4 packages have block groups for decode only: prefillBlocksPerGraph must be 1');
+    const group = o.blocksPerGraph ?? 1, groupSizes = Object.keys((table.decode[key] as unknown as GemmaDecodeTable).block_groups ?? {}).join(', ') || 'none';
+    if (group > 1 && !(table.decode[key] as unknown as GemmaDecodeTable).block_groups?.[String(group)]) throw new Error(`the package has no decode block groups of ${group} blocks (it has ${groupSizes})`);
+    return { maxLength: +key, variant, sizes, group, fixedTokens: o.prefillFixedTokens ?? 200 };
   }
 
   private adopt(c: ReturnType<Gemma4LLM['resolve']>) {
-    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.fixedTokens = c.fixedTokens;
+    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.fixedTokens = c.fixedTokens; this.groupSize = c.group;
   }
 
   private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
@@ -191,10 +195,18 @@ export class Gemma4LLM {
       for (const kind of kindsNeeded) map.set(kind, await build(paths[kind], `${label} block ${kind}`));
       return map;
     };
+    // decode block groups replace the single decode blocks; groups with the same sequence of kinds share one graph
+    const groups: { first: number; blocks: number; built: Built }[] = [], byGraph = new Map<string, Built>();
+    if (this.groupSize > 1) {
+      for (const e of (decode.block_groups as Record<string, GemmaBlockGroup[]>)[String(this.groupSize)]) {
+        if (!byGraph.has(e.graph)) byGraph.set(e.graph, await build(e.graph, `decode group ${e.key}`));
+        groups.push({ first: e.first_block, blocks: e.blocks, built: byGraph.get(e.graph) as Built });
+      }
+    }
     this.lmHead = await build(table.lm_head, 'lm_head', external);
     const flush = new Map<string, Built>();
     for (const [type, path] of Object.entries(decode.flush)) flush.set(type, await build(path, `kv flush ${type}`));
-    this.decodeSet = { head: await build(decode.head, 'decode head'), blocks: await blocks(decode.blocks, 'decode'), tail: await build(decode.tail, 'decode tail'), flush };
+    this.decodeSet = { head: await build(decode.head, 'decode head'), blocks: this.groupSize > 1 ? new Map() : await blocks(decode.blocks, 'decode'), tail: await build(decode.tail, 'decode tail'), flush, groups };
     this.prefillSets = new Map();
     for (const size of this.chunkSizes) {
       const files = table.prefill[key][String(size)] as unknown as GraphTable & { blocks: Record<string, string> }, label = `prefill c${size}`;
@@ -312,11 +324,40 @@ export class Gemma4LLM {
       { residual: a.residuals[0], attention_output: a.attentionOutputs[0], ...pleOutputs, ...kvOutputs(0) });
     swapIfOwn(0);
     // BLOCK i: feed-forward half of layer i + attention half of layer i + 1
-    for (let layer = 0; layer < N - 1; layer++) {
-      dispatch(set.blocks.get(this.kinds[layer + 1]) as Built,
-        { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], per_layer_input: a.ples[layer], ...this.pick(ffnNames, layer), ...attentionInputs(layer + 1) },
-        { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], ...kvOutputs(layer + 1) });
-      swapIfOwn(layer + 1);
+    if (decode && this.groupSize > 1) {
+      // a block group (decode only): BLOCKs first .. first + blocks - 1 in one dispatch; the inputs are bound by name
+      const bindGroup = (first: number, name: string): ML => {
+        if (name === 'residual') return a.residuals[first];
+        if (name === 'attention_output') return a.attentionOutputs[first];
+        if (name in selectors) return (selectors as Record<string, ML>)[name];
+        const block = /^b(\d+)_(.+)$/.exec(name);
+        if (block) {
+          const ffnLayer = first + +block[1], layer = ffnLayer + 1, rest = block[2], p = this.producer[layer];
+          if (rest === 'per_layer_input') return a.ples[ffnLayer];
+          if (rest === 'past_key' || rest === 'past_value') return (this.kv.get(p) as Cache)[rest === 'past_key' ? 'key' : 'value'];
+          if (rest === 'staging_key' || rest === 'staging_value') return (this.stg.get(p) as Cache)[rest === 'staging_key' ? 'key' : 'value'];
+          return ffnNames.includes(rest) ? this.weights[ffnLayer][rest] : attentionNames[this.kinds[layer]].includes(rest) ? this.weights[layer][rest] : undefined;
+        }
+        const control = /^(.+)_(rope_cos|rope_sin|attention_mask)$/.exec(name);
+        return control ? (control[2] === 'rope_cos' ? a.ropeCos : control[2] === 'rope_sin' ? a.ropeSin : a.mask)[control[1]] : undefined;
+      };
+      for (const { first, blocks, built } of this.decodeSet.groups) {
+        const inputs: Record<string, ML> = {}, outputs: Record<string, ML> = { next_residual: a.residuals[first + blocks], next_attention_output: a.attentionOutputs[first + blocks] };
+        for (const name of built.inputs) inputs[name] = bindGroup(first, name);
+        for (let j = 0; j < blocks; j++) {
+          const layer = first + j + 1;   // a block with K / V of its own writes the spare staging buffer of its layer
+          if (this.producer[layer] === layer) { outputs[`b${j}_updated_key`] = (spare.get(layer) as Cache).key; outputs[`b${j}_updated_value`] = (spare.get(layer) as Cache).value; }
+        }
+        dispatch(built, inputs, outputs);
+        for (let j = 0; j < blocks; j++) swapIfOwn(first + j + 1);
+      }
+    } else {
+      for (let layer = 0; layer < N - 1; layer++) {
+        dispatch(set.blocks.get(this.kinds[layer + 1]) as Built,
+          { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], per_layer_input: a.ples[layer], ...this.pick(ffnNames, layer), ...attentionInputs(layer + 1) },
+          { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], ...kvOutputs(layer + 1) });
+        swapIfOwn(layer + 1);
+      }
     }
     if (!lastChunk) return;
     dispatch(set.tail, { residual: a.residuals[N - 1], attention_output: a.attentionOutputs[N - 1], per_layer_input: a.ples[N - 1], ...this.pick(ffnNames, N - 1), final_norm_gamma: this.finalGamma },

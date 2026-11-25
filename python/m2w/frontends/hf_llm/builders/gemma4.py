@@ -90,8 +90,9 @@ def _ctx(b: GraphBuilder, spec, opt: GraphOptions, layer_type: str) -> Ctx:
 # ---------------------------------------------------------------------------------------------------------------------
 # the halves
 # ---------------------------------------------------------------------------------------------------------------------
-def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, past_len: int, opt: GraphOptions, mask_dtype: str = "float16"):
-    """-> (attention_output f16 [1,S,hidden] = post_attention_layernorm(o_proj(attention)), kv_out {name: Value})"""
+def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, past_len: int, opt: GraphOptions, mask_dtype: str = "float16", bind: "dict | None" = None):
+    """-> (attention_output f16 [1,S,hidden] = post_attention_layernorm(o_proj(attention)), kv_out {name: Value})
+    `bind` (block groups): the already declared inputs {cos, sin, mask, past_key, past_value, staging_key, staging_value} instead of declaring them here."""
     b, d = c.b, c.dims
     c.seq = seq
     shared, decode = kind_shared(kind), seq == 1
@@ -102,11 +103,19 @@ def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, 
         total = past_len + R if decode else past_len
     else:
         total = past_len + R if decode else past_len + seq
-    cos = c.declare("rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
-    sin = c.declare("rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
-    mask = c.declare("attention_mask", mask_dtype, [1, 1, seq, total], "control")
-    past_key = c.declare("past_key", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
-    past_value = c.declare("past_value", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
+    if bind:
+        cos, sin, mask, past_key, past_value = bind["cos"], bind["sin"], bind["mask"], bind["past_key"], bind["past_value"]
+    else:
+        cos = c.declare("rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
+        sin = c.declare("rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
+        mask = c.declare("attention_mask", mask_dtype, [1, 1, seq, total], "control")
+        past_key = c.declare("past_key", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
+        past_value = c.declare("past_value", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
+
+    def staging():
+        if bind:
+            return bind["staging_key"], bind["staging_value"]
+        return (c.declare("staging_key", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv"), c.declare("staging_value", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv"))
 
     normalized = rms_norm(c, residual, w["input_layernorm_gamma"], 3)
 
@@ -120,8 +129,7 @@ def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, 
         q_proj = quantized_linear(c, normalized, w["query_projection_weight"], w["query_projection_scale"], d.hidden, d.attention_width, seq)
         query = apply_rotary(c, heads_of(q_proj, d.num_heads, w["query_norm_gamma"]), cos, sin, d.num_heads)
         if decode:   # the producer's main cache + its staging buffer after this step's update
-            staging_key = c.declare("staging_key", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
-            staging_value = c.declare("staging_value", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
+            staging_key, staging_value = staging()
             all_keys, all_values = b.concat([to_c(past_key), to_c(staging_key)], 2), b.concat([to_c(past_value), to_c(staging_value)], 2)
         else:        # the producer's cache after the update of this chunk
             all_keys, all_values = to_c(past_key), to_c(past_value)
@@ -132,8 +140,7 @@ def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, 
         key = apply_rotary(c, heads_of(part(d.attention_width, d.kv_width), d.num_kv_heads, w["key_norm_gamma"]), cos, sin, d.num_kv_heads)
         value = heads_of(part(d.attention_width + d.kv_width, d.kv_width), d.num_kv_heads, None)
         if decode:
-            staging_key = c.declare("staging_key", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
-            staging_value = c.declare("staging_value", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
+            staging_key, staging_value = staging()
             updated_key, updated_value = update_kv_cache(c, staging_key, staging_value, key, value, R, seq, selector_prefix="staging_")
             all_keys, all_values = b.concat([to_c(past_key), to_c(updated_key)], 2), b.concat([to_c(past_value), to_c(updated_value)], 2)
         else:
@@ -207,6 +214,92 @@ def build_block_graph(spec, opt: GraphOptions, kind: str, *, seq: int, past_len:
     b.output("next_attention_output", next_attention)
     for k, v in kv_out.items():
         b.output(k, v)
+    return b.build()
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# block groups (decode only): several consecutive BLOCKs in one graph
+# ---------------------------------------------------------------------------------------------------------------------
+# the key of a group graph spells its kinds (lower case only: graph file names must not differ in case alone): s / f = sliding / full attention, o / s = K / V of its own / shared
+KIND_CODES = {"sliding_attention_own": "so", "full_attention_own": "fo", "sliding_attention_shared": "ss", "full_attention_shared": "fs"}
+
+
+def block_group_schedule(spec, count: int) -> list:
+    """The N - 1 BLOCKs cut into runs of `count`: [(first block, blocks)]; the last run may be shorter."""
+    total = spec.num_layers - 1
+    return [(first, min(count, total - first)) for first in range(0, total, count)]
+
+
+def block_group_layout(spec, first: int, blocks: int) -> list:
+    """What a group of BLOCKs first .. first + blocks - 1 needs to be built: per block (its attention half is that of layer first + j + 1) the kind and the OWNER = the block of the group
+    that declares the cache tensors it reads: itself when it has K / V of its own or is the first block of the group that reads its producer's cache; for a block that reads the cache of
+    a producer inside the group, the producer's block (it attends over the producer's main cache and its staging buffer AFTER the producer's update, which happens inside the graph)."""
+    producer = [p if p >= 0 else i for i, p in enumerate(spec.kv_producer or [-1] * spec.num_layers)]
+    layout, first_reader = [], {}
+    for j in range(blocks):
+        layer = first + j + 1
+        p = producer[layer]
+        if p == layer:
+            owner = j
+        elif first + 1 <= p <= first + blocks:
+            owner = p - first - 1   # the block of the producer layer
+        else:
+            owner = first_reader.setdefault(p, j)
+        layout.append({"kind": spec.layer_kind(layer), "owner": owner})
+    return layout
+
+
+def block_group_key(layout: list) -> str:
+    return "-".join(KIND_CODES[item["kind"]] for item in layout)
+
+
+def build_block_group_graph(spec, opt: GraphOptions, layout: list, *, seq: int = 1, past_len: int, mask_dtype: str = "float16", name: str | None = None):
+    """len(layout) consecutive BLOCKs in one graph (fewer dispatches); decode only. `layout` = block_group_layout(): the kind and the cache OWNER of every block.
+    Inputs: residual, attention_output (of the first block), the controls once per layer TYPE (<type>_rope_cos / <type>_rope_sin / <type>_attention_mask: own and shared layers
+    of a type use the same mask in decode), and per block j with the prefix b<j>_: per_layer_input, the weights of the feed-forward half of layer i and of the attention half of
+    layer i + 1 and, for the OWNER of a cache, past_key / past_value (the main cache of the layer whose K / V the block attends over) and staging_key / staging_value (its staging
+    buffer). A block that reads a cache declared by an earlier block has no such inputs. Outputs: next_residual, next_attention_output, b<j>_updated_key / _value of the blocks with
+    K / V of their own."""
+    if seq != 1:
+        raise ValueError("block groups of Gemma 4 are built for decode only (seq = 1)")
+    b = GraphBuilder(name or f"block_x{len(layout)}")
+    R = opt.staging_rows
+    c0 = _ctx(b, spec, opt, kind_type(layout[0]["kind"]))
+    residual = c0.to_compute(c0.declare("residual", "float16", [1, seq, spec.hidden]))
+    attention_output = c0.to_compute(c0.declare("attention_output", "float16", [1, seq, spec.hidden]))
+    controls: dict = {}   # layer type -> {cos, sin, mask}
+    caches: dict = {}     # owner block -> {past_key, past_value, staging_key, staging_value}; the staging entries become the updated buffers once the owner's attention half has been built
+    last_attention = None
+    for j, item in enumerate(layout):
+        kind, owner, prefix = item["kind"], item["owner"], f"b{j}_"
+        t = kind_type(kind)
+        c = _ctx(b, spec, opt, t)
+        d = c.dims
+        per_layer_input = c.declare(prefix + "per_layer_input", "float16", [1, seq, spec.ple_dim])
+        layer_output = feed_forward_half(c, spec, residual, attention_output, per_layer_input, c.weights(feed_forward_weight_specs(spec), prefix), seq)
+        attention_weights = c.weights(attention_weight_specs(spec, kind), prefix)
+        if t not in controls:
+            controls[t] = {"cos": c.declare(f"{t}_rope_cos", "float16", [1, 1, seq, d.head_dim], "control"), "sin": c.declare(f"{t}_rope_sin", "float16", [1, 1, seq, d.head_dim], "control"),
+                           "mask": c.declare(f"{t}_attention_mask", mask_dtype, [1, 1, seq, past_len + R], "control")}
+        if owner == j:
+            shape, staging = [1, d.num_kv_heads, past_len, d.head_dim], [1, d.num_kv_heads, R, d.head_dim]
+            caches[j] = {"past_key": c.declare(prefix + "past_key", "float16", shape, "kv"), "past_value": c.declare(prefix + "past_value", "float16", shape, "kv"),
+                         "staging_key": c.declare(prefix + "staging_key", "float16", staging, "kv"), "staging_value": c.declare(prefix + "staging_value", "float16", staging, "kv")}
+        elif owner not in caches:
+            raise ValueError(f"block {j} of the group reads the cache of block {owner}, which does not precede it")
+        attention, kv_out = attention_half(c, spec, kind, layer_output, attention_weights, seq, past_len, opt, mask_dtype, bind={**controls[t], **caches[owner]})
+        if kv_out:   # a block with K / V of its own: its updated staging buffer is an output and what the later blocks that share its K / V read
+            caches[j]["staging_key"], caches[j]["staging_value"] = kv_out["updated_key"], kv_out["updated_value"]
+            b.output(prefix + "updated_key", kv_out["updated_key"])
+            b.output(prefix + "updated_value", kv_out["updated_value"])
+        if j < len(layout) - 1:
+            # the next block gets the boundary values of the ungrouped chain (float16 rounding): the same numbers as with one dispatch per block, and the add of the residual does not
+            # read the result of the elementwise op that also feeds the next attention half
+            residual, attention_output = c.to_compute(c.to_f16(layer_output)), c.to_compute(attention)
+        else:
+            b.output("next_residual", c.to_f16(layer_output))
+            last_attention = attention
+    b.output("next_attention_output", last_attention)
     return b.build()
 
 

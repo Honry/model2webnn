@@ -56,6 +56,41 @@
    "sha256": "64fa3de8f11c5ef5f4e10afd0ede2f9e93d4b95788c13a331ef2b266af69b57e"
   },
   {
+   "path": "graphs/staged-r8-float16/decode_group_fs-ss_L128.json",
+   "bytes": 25845,
+   "sha256": "8d3e70f7e638a1f3c900c86ec85fa102711ac3df3788a68fd7fc03b6b6add3d8"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_so-fo-so-fs-ss_L128.json",
+   "bytes": 69623,
+   "sha256": "c91eb66232a819d9baa16b44d0a963894ca562c036f4c00777893e6c49f179fa"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_so-fo-so-fs_L128.json",
+   "bytes": 57922,
+   "sha256": "98fe890a45fdcd1a6c4114f5180eb2649aec6d3b2f895873bc61287c3a07c92a"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_so-fo-so_L128.json",
+   "bytes": 46230,
+   "sha256": "d86fcc7b959e0c736ad2d1ddc7ef7e0e5f5696c07227824c16de510a1a7bd99a"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_so-fo_L128.json",
+   "bytes": 31467,
+   "sha256": "a0ddecc6431257ec020d65c7ed7b25f7ee7edef23c970eb30e0251e6a5d288f4"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_so-fs_L128.json",
+   "bytes": 28745,
+   "sha256": "94d2e0afcaf292470cc3266620401da5ea859527e003dc47692d65e622cdbb32"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_ss_L128.json",
+   "bytes": 13468,
+   "sha256": "40f80531cda4e3409f3f708724dd6844c27023299157a2b3f3e38c62a77f0132"
+  },
+  {
    "path": "graphs/staged-r8-float16/decode_head_L128.json",
    "bytes": 13055,
    "sha256": "cdc499df965978803aac88120db20f7b27ea4f5f8f20d4155a0f853a3f26e405"
@@ -161,6 +196,41 @@
    "sha256": "7621ffc47523d1ce11a78695646f588f3c635174be433c54e98bf3f9fe580cea"
   },
   {
+   "path": "graphs/staged-r8-float32/decode_group_fs-ss_L128.json",
+   "bytes": 29761,
+   "sha256": "8bbe15d1d0cf0b915f078fc1c4c37475b9ccb4df31d2542dc9c12d3a1cc171d6"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_so-fo-so-fs-ss_L128.json",
+   "bytes": 80600,
+   "sha256": "88d11040656a95de2334c8cc6ea8704f15ab8164be2980b758a6b424f3501711"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_so-fo-so-fs_L128.json",
+   "bytes": 66940,
+   "sha256": "f463816cffad6b88ecd3f54289d202a6ebc4326f7a38b83f859834a9e01b8e06"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_so-fo-so_L128.json",
+   "bytes": 53289,
+   "sha256": "7ad8db5b9ac2c8b4bd519bac1f377b35018f34f10439fb791019e986a02ba98d"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_so-fo_L128.json",
+   "bytes": 36173,
+   "sha256": "fa4ec09e6805a55030bb692b805263446493a29283f6e7feba823729fd7573dc"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_so-fs_L128.json",
+   "bytes": 33057,
+   "sha256": "72febc0b358e790be1dc659f49e5749fc054823cf1c95c878e491b869b4078f6"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_ss_L128.json",
+   "bytes": 15425,
+   "sha256": "e9474a7da69aed3cd06d4858c3b85c02258dd0a984bd0fc2c9a4acc32b6ad356"
+  },
+  {
    "path": "graphs/staged-r8-float32/decode_head_L128.json",
    "bytes": 15200,
    "sha256": "437db79ec4d7737c12606c58febe971f9800d011e318b4222fff92e4e9848765"
@@ -252,8 +322,8 @@
   },
   {
    "path": "plan.json",
-   "bytes": 9260,
-   "sha256": "e2c7a433abd615b3d40f31bd3d065ec6a3084081fe81b3d69e941407399fc6c3"
+   "bytes": 13854,
+   "sha256": "8a2894ee61660bcf42f9a431d38f4d42339d4aeaecea31131171efdcf2b29f51"
   },
   {
    "path": "weights/embed.safetensors",

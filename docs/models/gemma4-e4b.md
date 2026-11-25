@@ -42,3 +42,29 @@ so the lm_head graph works on row blocks (4 in float32, 2 in float16; `lm_head_p
 
 Text layers about 4 B parameters (int4: about 2 GB), tied embedding / lm_head 262144 x 2560 (int8: 671 MB), PLE table 2.8 B parameters (int8: 2.8 GB; int4: 1.4 GB).
 The PLE table is only ever read one row per token: it must not be loaded as a whole; random reads out of an OPFS file (or range requests) are the way.
+
+## Decode block groups (`--blocks-per-graph K`)
+
+Measured per graph on the NPU, a decode BLOCK graph costs about 1.9 ms whatever its size (sliding own 1.89, sliding shared 1.86, full own 2.19, full shared 2.38 ms; 41 blocks = about 80 of the 91 ms of a
+decode step): dispatch overhead, not bandwidth. A group fuses K consecutive BLOCKs into one graph (Aion with 5 blocks per graph: 47.6 -> 43.8 ms). Decode only; `prefillBlocksPerGraph > 1` is refused
+(prefill grouping gave no TTFT gain).
+
+* **Schedule.** The N - 1 = 41 BLOCKs (BLOCK i = feed-forward half of layer i + attention half of layer i + 1) are cut into runs of K, the last run may be shorter (K = 3: 13 groups of 3 + one of 2 = 14
+  dispatches instead of 41). The block kinds differ (sliding / full x own / shared K / V), so a graph exists per distinct SEQUENCE of kinds: key = the kinds joined by `-` (`so` / `fo` = sliding / full attention
+  with K / V of its own, `ss` / `fs` = sharing). For K = 3 there are six graphs (`so-so-so`, `so-fo-so`, `so-fo-ss`, `ss-ss-ss`, `ss-fs-ss`, `ss-fs`). Node counts are the sums of the single blocks (K = 3: 573 / 535 / 459 /
+  306 nodes), 69 - 85 inputs.
+* **Inputs.** `residual`, `attention_output` of the first block; the controls once per layer TYPE (`sliding_attention_rope_cos`, `..._rope_sin`, `..._attention_mask`, `full_attention_...`: the decode masks of own and
+  shared layers are the same tensor); per block `b<j>_` + `per_layer_input`, all feed-forward weights of layer i, all attention weights of layer i + 1, and the cache inputs `past_key` / `past_value` (main cache) and
+  `staging_key` / `staging_value` of the layer whose K / V the block attends over. The weights stay graph inputs (the runtime binds the weight MLTensors per layer).
+* **Shared K / V inside a group.** Cache inputs are declared once per producer layer: by the block with K / V of its own, or by the first block of the group that reads an outside producer (later blocks reuse them: no tensor
+  is bound twice). A block that reads the cache of a producer INSIDE the group (K = 3: blocks 21, 22, 23 = layers 22, 23, 24; layer 24 reads layer 22) attends over concat(main cache, the staging buffer after the update of
+  that producer computed in the same graph); the runtime gives it no staging input. Across groups the shared layer reads the producer's staging buffer after the producer's group has run.
+* **Outputs.** `next_residual`, `next_attention_output` of the last block; `b<j>_updated_key` / `_value` for the blocks with K / V of their own = the spare staging buffers, swapped in after the dispatch (the same main /
+  spare swap per layer as without groups: a layer's staging buffer is an input and the spare an output of the same dispatch, never the same tensor).
+* **Numerics.** Between two blocks of a group the residual and attention output are rounded to float16 exactly as at the boundary of two dispatches (`to_f16` then back to the compute type), so a group computes the same values
+  as K single dispatches (the tests compare logits and the staging caches of the numpy interpreter for K = 2 .. 5 incl. float16 compute) and the residual add never reads the op result that also feeds the next attention half.
+* **plan.json.** `plan.blocks_per_graph` lists the K the package has; `graphs.<variant>.decode.<max length>.block_groups[K]` = `[{first_block, blocks, key, graph}]`, the schedule, groups with the same kinds share a graph
+  file (`decode_group_<key>_L<max length>.json`); `plan.chain.block_groups` documents the binding. The runtime (`Gemma4LLM`, `blocksPerGraph: K`) and the numpy `Gemma4Runner(decode_group=K)` bind a group by input NAME
+  (`b<j>_x` -> layer first + j (feed-forward half) / first + j + 1 (attention half), producer from `kv_producer`), so nothing else model specific is in the plan. A package built without K has no such table
+  and a runtime asked for K reports which K it has.
+* **Not checked here:** the NPU compiler on these graphs (compile time, whether the output `updated_key` that also feeds a later block's concat is accepted, speed). Re-time with `bench/raw/m2wgraphs.html`.

@@ -41,12 +41,13 @@ export function setupPackageControls(pkg, c, initial = {}) {
     const fillChunks = () => replace(c.chunkSizeSelect, chunksOf(+c.maxLengthSelect.value).map((s) => [s, `${s} tokens`]), c.chunkSizeSelect.value);
     fillChunks();
     const singleType = new Set(model.layer_types).size === 1 || plan.block_group_controls === "per_block";   // hybrid models: groups take a mask / RoPE table per block
+    const gemma = plan.architecture_kind === "gemma4";   // Gemma 4: decode block groups of any K the package lists (cut per sequence of attention kinds), no prefill groups
     const groupsOf = (table) => Object.keys(table?.block_groups ?? {}).map(Number);
     const fillBlocks = () => {
         const length = c.maxLengthSelect.value, decode = groupsOf(plan.graphs[defaultVariant.id].decode[length]), biggest = decode.length ? Math.max(...decode) : 0;
-        replace(c.blocksSelect, [[1, "1"], ...(singleType && biggest > 1 ? [[biggest, String(biggest)]] : [])], c.blocksSelect.value);
+        replace(c.blocksSelect, [[1, "1"], ...(gemma ? decode.sort((a, b) => a - b).map((n) => [n, String(n)]) : singleType && biggest > 1 ? [[biggest, String(biggest)]] : [])], c.blocksSelect.value);
         const prefill = Object.values(plan.graphs[defaultVariant.id].prefill[length] ?? {}).map(groupsOf).reduce((common, list, i) => (i === 0 ? list : common.filter((n) => list.includes(n))), []);
-        replace(c.prefillBlocksSelect, [["0", "same as decode"], ["1", "1 (single blocks)"], ...(singleType ? prefill.map((n) => [n, String(n)]) : [])], c.prefillBlocksSelect.value);
+        replace(c.prefillBlocksSelect, gemma ? [["1", "1 (Gemma 4: decode groups only)"]] : [["0", "same as decode"], ["1", "1 (single blocks)"], ...(singleType ? prefill.map((n) => [n, String(n)]) : [])], c.prefillBlocksSelect.value);
     };
     fillBlocks();
     // KV protocol x compute type x staging rows: only the combinations the package contains
@@ -69,7 +70,8 @@ export function setupPackageControls(pkg, c, initial = {}) {
         c.kvStyleSelect.disabled = only(c.kvStyleSelect); c.computeTypeSelect.disabled = only(c.computeTypeSelect);
         c.stagingRowsSelect.disabled = c.kvStyleSelect.value !== "staged" || only(c.stagingRowsSelect);
         c.blocksSelect.disabled = only(c.blocksSelect); c.prefillBlocksSelect.disabled = only(c.prefillBlocksSelect);
-        if (!singleType) c.blocksSelect.title = c.prefillBlocksSelect.title = "Blocks of one graph share a single mask and RoPE table: models with sliding + full attention layers run one block per graph.";
+        if (gemma && only(c.blocksSelect)) c.blocksSelect.title = "This package has no decode block groups: compile with --blocks-per-graph 1 3 (or m2w rebuild-graphs).";
+        else if (!singleType && !gemma) c.blocksSelect.title = c.prefillBlocksSelect.title = "Blocks of one graph share a single mask and RoPE table: models with sliding + full attention layers run one block per graph.";
         c.stagingRowsSelect.title = c.kvStyleSelect.value === "staged" ? "" : "Only the staged KV protocol has a staging buffer.";
     };
     lock();
@@ -104,7 +106,7 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         for (const { label, ms } of builds) {
             const row = table.insertRow(); row.insertCell().textContent = label; row.insertCell().textContent = Math.round(ms);
             const phase = label.startsWith("prefill") ? "prefill" : "decode";
-            const id = label === "lm_head" ? "time-lm_head" : /flush/.test(label) ? "time-decode-kv_flush" : /\bhead\b/.test(label) ? `time-${phase}-head` : /\bblock\b/.test(label) ? `time-${phase}-block` : /\btail\b/.test(label) ? `time-${phase}-tail` : null;
+            const id = label === "lm_head" ? "time-lm_head" : /flush/.test(label) ? "time-decode-kv_flush" : /\bhead\b/.test(label) ? `time-${phase}-head` : /\b(block|group)\b/.test(label) ? `time-${phase}-block` : /\btail\b/.test(label) ? `time-${phase}-tail` : null;
             if (!id) continue;
             const entry = boxes.get(id) ?? { ms: 0, count: 0 };
             entry.ms += ms; entry.count++; boxes.set(id, entry);
