@@ -57,7 +57,7 @@ def unit_lower_inverse_blocked(b: GraphBuilder, n: Value, c: int, base: int, dty
     return b.concat([b.concat([r, b.constant(dtype, [1, heads, base, c - r.shape[3]], fill=0.0)], 3) if r.shape[3] < c else r for r in rows], 2)
 
 
-def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, beta: Value, state: Value, dtype: str, base: int):
+def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, beta: Value, state: Value, dtype: str, base: int, probes: dict | None = None):
     """One sub-chunk of C tokens. q, k [1,H,C,dk] (normalised, q already scaled), v [1,H,C,dv], gc [1,H,C,1] = cumulative sum of the log decays inside the chunk,
     beta [1,H,C,1], state [1,H,dk,dv] -> (out [1,H,C,dv], new state)."""
     c = q.shape[2]
@@ -76,13 +76,15 @@ def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, 
     inter = b.matmul(b.mul(q, gate), state)
     intra = b.matmul(b.mul(b.matmul(q, k_t), decay), v_new)                         # decay is lower incl. the diagonal
     out = b.add(inter, intra)
+    if probes is not None:   # intermediate results exposed as graph outputs, to find where a device deviates from the interpreter
+        probes.update(gc=gc, decay=decay, a=a, t=t, value=value, kcd=k_cumdecay, vnew=v_new, inter=inter, intra=intra)
     g_last = b.slice(gc, [0, 0, c - 1, 0], [1, gc.shape[1], 1, 1])
     k_decayed = b.mul(k, b.exp(b.sub(g_last, gc)))
     new_state = b.add(b.mul(state, b.exp(g_last)), b.matmul(b.transpose(k_decayed, [0, 1, 3, 2]), v_new))
     return out, new_state
 
 
-def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, base: int = 16):
+def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, base: int = 16, probes: dict | None = None):
     """T = n * sub tokens: q, k [1,H,T,dk], v [1,H,T,dv], g (log decay per token) and beta [1,H,T,1], state [1,H,dk,dv] -> (out [1,H,T,dv], state after the last token)."""
     heads, total = q.shape[1], q.shape[2]
     assert total % sub == 0, f"{total} tokens are not a multiple of the sub-chunk {sub}"
@@ -92,29 +94,33 @@ def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, 
         part = lambda x, width: b.slice(x, [0, 0, s * sub, 0], [1, heads, sub, width])
         gs = part(g, 1)
         gc = b.matmul(incl, gs)                                                     # cumulative sum inside the sub-chunk as a matmul with the triangular constant
-        out, state = gated_delta_chunk(b, part(q, q.shape[3]), part(k, k.shape[3]), part(v, v.shape[3]), gc, part(beta, 1), state, dtype, base)
+        out, state = gated_delta_chunk(b, part(q, q.shape[3]), part(k, k.shape[3]), part(v, v.shape[3]), gc, part(beta, 1), state, dtype, base, probes if s == 0 else None)
         outs.append(out)
     return (b.concat(outs, 2) if len(outs) > 1 else outs[0]), state
 
 
-def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16):
+def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    b = GraphBuilder(name or f"gdn_core_t{tokens}_c{sub}_b{min(base, sub)}_{dtype}")
+    b = GraphBuilder(name or f"gdn_core_t{tokens}_c{sub}_b{min(base, sub)}_{dtype}{'_probe' if probe else ''}")
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
     v = b.input("v", dtype, [1, heads, tokens, dv])
     g = b.input("g", dtype, [1, heads, tokens, 1])
     beta = b.input("beta", dtype, [1, heads, tokens, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
-    out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base)
+    probes = {} if probe else None
+    out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes)
+    for key, value in (probes or {}).items():
+        b.output(f"p_{key}", value)
+    b.graph.meta.update(sub=sub, base=min(base, sub))
     b.output("out", out)
     b.output("new_state", new_state)
     return b.build()
 
 
-def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", name: str | None = None):
+def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", name: str | None = None, probe: bool = False):
     """The decode step: one token, no chunk machinery."""
-    b = GraphBuilder(name or f"gdn_step_{dtype}")
+    b = GraphBuilder(name or f"gdn_step_{dtype}{'_probe' if probe else ''}")
     q = b.input("q", dtype, [1, heads, 1, dk])
     k = b.input("k", dtype, [1, heads, 1, dk])
     v = b.input("v", dtype, [1, heads, 1, dv])
@@ -122,8 +128,13 @@ def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", 
     beta = b.input("beta", dtype, [1, heads, 1, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
     decayed = b.mul(state, b.exp(g))                                                # g [1,H,1,1] broadcasts over [dk, dv]
-    delta = b.mul(b.sub(v, b.matmul(k, decayed)), beta)                             # [1,H,1,dv]
+    predicted = b.matmul(k, decayed)
+    delta = b.mul(b.sub(v, predicted), beta)                                        # [1,H,1,dv]
     new_state = b.add(decayed, b.matmul(b.transpose(k, [0, 1, 3, 2]), delta))
+    if probe:
+        b.output("p_decayed", decayed)
+        b.output("p_predicted", predicted)
+        b.output("p_delta", delta)
     b.output("out", b.matmul(q, new_state))
     b.output("new_state", new_state)
     return b.build()

@@ -11,7 +11,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from m2w.frontends.hf_llm.builders.gated_delta import build_core_graph, build_recurrent_graph  # noqa: E402
+from m2w.frontends.hf_llm.builders.gated_delta import build_core_graph, build_recurrent_graph, unit_lower_inverse, unit_lower_inverse_blocked  # noqa: E402
+from m2w.ir import GraphBuilder  # noqa: E402
 from m2w.ir import interpreter, serialize  # noqa: E402
 from m2w.reference.gated_delta import l2norm, recurrent  # noqa: E402
 
@@ -84,6 +85,41 @@ def long_run(heads, calls, tokens, config, regime, seed):
         print(line)
 
 
+def part_graphs(heads, dtype):
+    """Pieces of the blocked triangular inverse as graphs of their own: the NPU failed to create a session for the whole thing, which operator pattern is it?"""
+    out = []
+
+    def graph(name, shape, body):
+        b = GraphBuilder(f"part_{name}_{dtype}")
+        x = b.input("x", dtype, shape)
+        b.output("y", body(b, x))
+        out.append(b.build())
+
+    graph("diag_slices_c32", [1, heads, 32, 32], lambda b, x: b.concat([b.slice(x, [0, 0, i * 8, i * 8], [1, heads, 8, 8]) for i in range(4)], 1))
+    graph("slice_heads", [1, 4 * heads, 8, 8], lambda b, x: b.slice(x, [0, heads, 0, 0], [1, heads, 8, 8]))
+    graph("zero_concat", [1, heads, 8, 8], lambda b, x: b.concat([x, b.constant(dtype, [1, heads, 8, 24], fill=0.0)], 3))
+    graph("inverse8_batched", [1, 4 * heads, 8, 8], lambda b, x: unit_lower_inverse(b, x, 8, dtype))
+    graph("inverse16", [1, heads, 16, 16], lambda b, x: unit_lower_inverse(b, x, 16, dtype))
+    graph("inverse32_plain", [1, heads, 32, 32], lambda b, x: unit_lower_inverse(b, x, 32, dtype))
+    graph("inverse32_blocked8", [1, heads, 32, 32], lambda b, x: unit_lower_inverse_blocked(b, x, 32, 8, dtype))
+    graph("inverse16_blocked8", [1, heads, 16, 16], lambda b, x: unit_lower_inverse_blocked(b, x, 16, 8, dtype))
+    return out
+
+
+def build_part_twin(name):
+    base = name.rsplit("_", 1)[0]
+    return next(g for g in part_graphs(32, "float32") if g.name == f"{base}_float32")
+
+
+def build_graph_like(graph, dtype):
+    """The float32 twin of a probe graph (same name pattern, parameters read back from its inputs)."""
+    heads, tokens = graph.inputs["q"].shape[1], graph.inputs["q"].shape[2]
+    if tokens == 1:
+        return build_recurrent_graph(heads, DK, DV, dtype, probe=True)
+    sub, base = graph.meta.get("sub"), graph.meta.get("base")
+    return build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base, probe=True)
+
+
 def export(directory: Path, heads, tokens, subs, regimes, seed):
     directory.mkdir(parents=True, exist_ok=True)
     index = {"graphs": [], "regimes": regimes}
@@ -96,16 +132,30 @@ def export(directory: Path, heads, tokens, subs, regimes, seed):
         out1, state1 = recurrent(*decode_inputs, state0)
         for dtype in ("float32", "float16"):
             cases = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base), inputs, out_ref, state_ref) for sub, base in subs] + [(build_recurrent_graph(heads, DK, DV, dtype), decode_inputs, out1, state1)]
-            for graph, ins, want_out, want_state in cases:
+            # probe graphs: the same graph with the intermediate results of the first sub-chunk as extra outputs; the expected values are the float32 interpreter's
+            probes = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base, probe=True), inputs, out_ref, state_ref) for sub, base in subs[:1] + subs[-1:]] + [(build_recurrent_graph(heads, DK, DV, dtype, probe=True), decode_inputs, out1, state1)]
+            parts = [(g, None, None, None) for g in part_graphs(heads, dtype)]
+            for graph, ins, want_out, want_state in cases + probes + parts:
                 serialize.dump(graph, directory / f"{graph.name}.json")
-                feeds = graph_feeds(ins, state0, dtype)
+                if ins is None:   # a part: a random strictly lower-triangular input, the expected result is the float32 interpreter's
+                    shape = graph.inputs["x"].shape
+                    x = np.tril(rng.standard_normal(shape) * 0.2, -1)
+                    feeds = {"x": x.astype(np.float16 if dtype == "float16" else np.float32)}
+                    reference = interpreter.run(build_part_twin(graph.name), {"x": x.astype(np.float32)})
+                    want_out, want_state = reference["y"][0], reference["y"][0]
+                else:
+                    feeds = graph_feeds(ins, state0, dtype)
                 blob, entries = bytearray(), {"inputs": [], "expected": []}
                 for name in graph.inputs:
                     raw = np.ascontiguousarray(feeds[name]).tobytes()
                     entries["inputs"].append({"name": name, "dataType": dtype, "shape": list(feeds[name].shape), "offset": len(blob), "bytes": len(raw)}); blob += raw
-                for name, want in (("out", want_out), ("new_state", want_state)):
-                    raw = np.ascontiguousarray(want[None].astype(np.float32)).tobytes()
-                    entries["expected"].append({"name": name, "dataType": "float32", "shape": [1] + list(want.shape), "offset": len(blob), "bytes": len(raw)}); blob += raw
+                expected = {"out": want_out[None], "new_state": want_state[None]} if ins is not None else {"y": want_out[None]}
+                if any(n.startswith("p_") for n in graph.outputs):
+                    reference = interpreter.run(build_graph_like(graph, "float32"), graph_feeds(ins, state0, "float32"))
+                    expected.update({n: reference[n] for n in graph.outputs if n.startswith("p_")})
+                for name, want in expected.items():
+                    raw = np.ascontiguousarray(want.astype(np.float32)).tobytes()
+                    entries["expected"].append({"name": name, "dataType": "float32", "shape": list(want.shape), "offset": len(blob), "bytes": len(raw)}); blob += raw
                 (directory / f"{graph.name}.{regime}.bin").write_bytes(bytes(blob))
                 (directory / f"{graph.name}.{regime}.io.json").write_text(json.dumps(entries), encoding="utf-8")
                 if graph.name not in index["graphs"]:
