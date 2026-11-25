@@ -57,7 +57,19 @@ def unit_lower_inverse_blocked(b: GraphBuilder, n: Value, c: int, base: int, dty
     return b.concat([b.concat([r, b.constant(dtype, [1, heads, base, c - r.shape[3]], fill=0.0)], 3) if r.shape[3] < c else r for r in rows], 2)
 
 
-def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, beta: Value, state: Value, dtype: str, base: int, probes: dict | None = None):
+def forward_substitution(b: GraphBuilder, a: Value, rhs: Value, dtype: str) -> Value:
+    """X = (I + A)^-1 RHS for a strictly lower-triangular A [1,H,C,C] by substitution, row by row (what HF's for loop does): x_i = r_i - A[i, :] X (A[i, j >= i] = 0, so the rows
+    not computed yet only have to be finite). No powers of A, so nothing explodes for nearly parallel keys. C dependent steps of tiny matmuls."""
+    heads, c, width = a.shape[1], a.shape[2], rhs.shape[3]
+    rows = [b.slice(rhs, [0, 0, 0, 0], [1, heads, 1, width])]
+    for i in range(1, c):
+        x_full = b.concat(rows + [b.constant(dtype, [1, heads, c - i, width], fill=0.0, cache_key=("zeros", heads, c - i, width, dtype))], 2)
+        correction = b.matmul(b.slice(a, [0, 0, i, 0], [1, heads, 1, c]), x_full)
+        rows.append(b.sub(b.slice(rhs, [0, 0, i, 0], [1, heads, 1, width]), correction))
+    return b.concat(rows, 2)
+
+
+def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, beta: Value, state: Value, dtype: str, base: int, probes: dict | None = None, solve: str = "neumann"):
     """One sub-chunk of C tokens. q, k [1,H,C,dk] (normalised, q already scaled), v [1,H,C,dv], gc [1,H,C,1] = cumulative sum of the log decays inside the chunk,
     beta [1,H,C,1], state [1,H,dk,dv] -> (out [1,H,C,dv], new state)."""
     c = q.shape[2]
@@ -68,10 +80,16 @@ def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, 
     k_beta, v_beta = b.mul(k, beta), b.mul(v, beta)
     a = b.mul(b.mul(b.matmul(k_beta, k_t), decay), strict)                          # strictly lower part of (beta k) k^T * decay
     minus_one = b.scalar(-1.0, dtype, 4)
-    t = unit_lower_inverse_blocked(b, b.mul(a, minus_one), c, base, dtype)           # (I + A)^-1
     gate = b.exp(gc)
-    value = b.matmul(t, v_beta)
-    k_cumdecay = b.matmul(t, b.mul(k_beta, gate))
+    if solve == "substitution":
+        dv = v.shape[3]
+        solved = forward_substitution(b, a, b.concat([v_beta, b.mul(k_beta, gate)], 3), dtype)                  # (I + A)^-1 [beta v | beta k exp(gc)]
+        t = solved
+        value, k_cumdecay = b.slice(solved, [0, 0, 0, 0], [1, a.shape[1], c, dv]), b.slice(solved, [0, 0, 0, dv], [1, a.shape[1], c, k.shape[3]])
+    else:
+        t = unit_lower_inverse_blocked(b, b.mul(a, minus_one), c, base, dtype)       # (I + A)^-1
+        value = b.matmul(t, v_beta)
+        k_cumdecay = b.matmul(t, b.mul(k_beta, gate))
     v_new = b.sub(value, b.matmul(k_cumdecay, state))                              # the delta: what the state does not predict yet
     inter = b.matmul(b.mul(q, gate), state)
     intra = b.matmul(b.mul(b.matmul(q, k_t), decay), v_new)                         # decay is lower incl. the diagonal
@@ -84,7 +102,7 @@ def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, 
     return out, new_state
 
 
-def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, base: int = 16, probes: dict | None = None):
+def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, base: int = 16, probes: dict | None = None, solve: str = "neumann"):
     """T = n * sub tokens: q, k [1,H,T,dk], v [1,H,T,dv], g (log decay per token) and beta [1,H,T,1], state [1,H,dk,dv] -> (out [1,H,T,dv], state after the last token)."""
     heads, total = q.shape[1], q.shape[2]
     assert total % sub == 0, f"{total} tokens are not a multiple of the sub-chunk {sub}"
@@ -94,14 +112,15 @@ def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, 
         part = lambda x, width: b.slice(x, [0, 0, s * sub, 0], [1, heads, sub, width])
         gs = part(g, 1)
         gc = b.matmul(incl, gs)                                                     # cumulative sum inside the sub-chunk as a matmul with the triangular constant
-        out, state = gated_delta_chunk(b, part(q, q.shape[3]), part(k, k.shape[3]), part(v, v.shape[3]), gc, part(beta, 1), state, dtype, base, probes if s == 0 else None)
+        out, state = gated_delta_chunk(b, part(q, q.shape[3]), part(k, k.shape[3]), part(v, v.shape[3]), gc, part(beta, 1), state, dtype, base, probes if s == 0 else None, solve)
         outs.append(out)
     return (b.concat(outs, 2) if len(outs) > 1 else outs[0]), state
 
 
-def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False):
+def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    b = GraphBuilder(name or f"gdn_core_t{tokens}_c{sub}_b{min(base, sub)}_{dtype}{'_probe' if probe else ''}")
+    kind = f"b{min(base, sub)}" if solve == "neumann" else "subst"
+    b = GraphBuilder(name or f"gdn_core_t{tokens}_c{sub}_{kind}_{dtype}{'_probe' if probe else ''}")
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
     v = b.input("v", dtype, [1, heads, tokens, dv])
@@ -109,26 +128,30 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     beta = b.input("beta", dtype, [1, heads, tokens, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
     probes = {} if probe else None
-    out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes)
+    out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
     for key, value in (probes or {}).items():
         b.output(f"p_{key}", value)
-    b.graph.meta.update(sub=sub, base=min(base, sub))
+    b.graph.meta.update(sub=sub, base=min(base, sub), solve=solve)
     b.output("out", out)
     b.output("new_state", new_state)
     return b.build()
 
 
-def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", name: str | None = None, probe: bool = False):
-    """The decode step: one token, no chunk machinery."""
-    b = GraphBuilder(name or f"gdn_step_{dtype}{'_probe' if probe else ''}")
+def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", name: str | None = None, probe: bool = False, style: str = "A"):
+    """The decode step: one token, no chunk machinery. Styles (the same math; the NPU compiler returned wrong results for A when nothing else was an output):
+    A: decayed = S exp(g) feeds both the prediction and the new state;  B: the prediction scales the [1,dv] vector instead (decayed only feeds the new state);  C: like A with an explicit expand of exp(g)."""
+    b = GraphBuilder(name or f"gdn_step{'' if style == 'A' else style}_{dtype}{'_probe' if probe else ''}")
     q = b.input("q", dtype, [1, heads, 1, dk])
     k = b.input("k", dtype, [1, heads, 1, dk])
     v = b.input("v", dtype, [1, heads, 1, dv])
     g = b.input("g", dtype, [1, heads, 1, 1])
     beta = b.input("beta", dtype, [1, heads, 1, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
-    decayed = b.mul(state, b.exp(g))                                                # g [1,H,1,1] broadcasts over [dk, dv]
-    predicted = b.matmul(k, decayed)
+    e = b.exp(g)
+    if style == "C":
+        e = b.expand(e, [1, heads, dk, dv])
+    decayed = b.mul(state, e)                                                       # g [1,H,1,1] broadcasts over [dk, dv]
+    predicted = b.mul(b.matmul(k, state), b.exp(g)) if style == "B" else b.matmul(k, decayed)
     delta = b.mul(b.sub(v, predicted), beta)                                        # [1,H,1,dv]
     new_state = b.add(decayed, b.matmul(b.transpose(k, [0, 1, 3, 2]), delta))
     if probe:

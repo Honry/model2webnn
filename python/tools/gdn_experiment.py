@@ -85,6 +85,16 @@ def long_run(heads, calls, tokens, config, regime, seed):
         print(line)
 
 
+def matmul_shape_graphs(dtype):
+    """Which matmul shapes does the NPU accept? (the 8 x 8 blocks of the blocked inverse did not compile)"""
+    out = []
+    for batch, m, k, n in [(32, 8, 8, 8), (128, 8, 8, 8), (32, 4, 4, 4), (32, 16, 16, 16), (32, 1, 16, 256), (32, 16, 16, 256), (32, 1, 32, 256), (32, 32, 32, 256), (32, 8, 8, 256), (128, 16, 16, 16)]:
+        b = GraphBuilder(f"part_matmul_{batch}x{m}x{k}x{n}_{dtype}")
+        b.output("y", b.matmul(b.input("x", dtype, [1, batch, m, k]), b.constant(dtype, [1, batch, k, n], fill=0.01)))
+        out.append(b.build())
+    return out
+
+
 def part_graphs(heads, dtype):
     """Pieces of the blocked triangular inverse as graphs of their own: the NPU failed to create a session for the whole thing, which operator pattern is it?"""
     out = []
@@ -95,6 +105,7 @@ def part_graphs(heads, dtype):
         b.output("y", body(b, x))
         out.append(b.build())
 
+    out += matmul_shape_graphs(dtype)
     graph("diag_slices_c32", [1, heads, 32, 32], lambda b, x: b.concat([b.slice(x, [0, 0, i * 8, i * 8], [1, heads, 8, 8]) for i in range(4)], 1))
     graph("slice_heads", [1, 4 * heads, 8, 8], lambda b, x: b.slice(x, [0, heads, 0, 0], [1, heads, 8, 8]))
     graph("zero_concat", [1, heads, 8, 8], lambda b, x: b.concat([x, b.constant(dtype, [1, heads, 8, 24], fill=0.0)], 3))
@@ -112,12 +123,11 @@ def build_part_twin(name):
 
 
 def build_graph_like(graph, dtype):
-    """The float32 twin of a probe graph (same name pattern, parameters read back from its inputs)."""
+    """The float32 twin of a probe graph (parameters read back from its inputs and meta)."""
     heads, tokens = graph.inputs["q"].shape[1], graph.inputs["q"].shape[2]
     if tokens == 1:
-        return build_recurrent_graph(heads, DK, DV, dtype, probe=True)
-    sub, base = graph.meta.get("sub"), graph.meta.get("base")
-    return build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base, probe=True)
+        return build_recurrent_graph(heads, DK, DV, dtype, probe=True, style=graph.name[len("gdn_step")] if graph.name[len("gdn_step")] in "ABC" else "A")
+    return build_core_graph(heads, DK, DV, tokens, graph.meta["sub"], dtype, base=graph.meta["base"], probe=True, solve=graph.meta["solve"])
 
 
 def export(directory: Path, heads, tokens, subs, regimes, seed):
@@ -131,9 +141,9 @@ def export(directory: Path, heads, tokens, subs, regimes, seed):
         decode_inputs = tuple(x[:, :1] for x in inputs)
         out1, state1 = recurrent(*decode_inputs, state0)
         for dtype in ("float32", "float16"):
-            cases = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base), inputs, out_ref, state_ref) for sub, base in subs] + [(build_recurrent_graph(heads, DK, DV, dtype), decode_inputs, out1, state1)]
+            cases = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base), inputs, out_ref, state_ref) for sub, base in subs] + [(build_recurrent_graph(heads, DK, DV, dtype, style=style), decode_inputs, out1, state1) for style in "ABC"] + [(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="substitution"), inputs, out_ref, state_ref) for sub in (16, 32)]
             # probe graphs: the same graph with the intermediate results of the first sub-chunk as extra outputs; the expected values are the float32 interpreter's
-            probes = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base, probe=True), inputs, out_ref, state_ref) for sub, base in subs[:1] + subs[-1:]] + [(build_recurrent_graph(heads, DK, DV, dtype, probe=True), decode_inputs, out1, state1)]
+            probes = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base, probe=True), inputs, out_ref, state_ref) for sub, base in subs[:1] + subs[-1:]] + [(build_recurrent_graph(heads, DK, DV, dtype, probe=True, style=style), decode_inputs, out1, state1) for style in "AB"] + [(build_core_graph(heads, DK, DV, tokens, 16, dtype, probe=True, solve="substitution"), inputs, out_ref, state_ref)]
             parts = [(g, None, None, None) for g in part_graphs(heads, dtype)]
             for graph, ins, want_out, want_state in cases + probes + parts:
                 serialize.dump(graph, directory / f"{graph.name}.json")
