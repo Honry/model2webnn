@@ -1,0 +1,253 @@
+"""Executes the COMPILED Qwen3.5 graphs (HEAD / BLOCK per kind / TAIL / lm_head / flush) with the numpy interpreter and the packed weights, following the runtime protocol (staged KV for the
+full attention layers, a conv state and a recurrent state for the Gated DeltaNet layers, chunked prefill with a left-padded last chunk): the executable specification of how the browser runtime
+drives them. `Qwen35PackageReader.hf_state_dict()` gives the dequantized weights under the HF names, to feed the transformers model as the independent reference.
+
+BLOCK i = feed-forward half of layer i + attention half of layer i + 1 (the graph of ITS kind); HEAD = attention half of layer 0; TAIL = feed-forward half of the last layer + final norm.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+from ..frontends.hf_llm.arch import ModelSpec
+from ..frontends.hf_llm.builders import decoder as D
+from ..frontends.hf_llm.builders import qwen35 as Q
+from ..frontends.hf_llm.pack_qwen35 import rope_permutation
+from ..ir import serialize
+from ..ir.interpreter import run
+from . import protocol
+from .gemma4_package import Gemma4PackageReader
+
+
+class Qwen35PackageReader(Gemma4PackageReader):
+    """The generic part (raw tensors of a shard, the embedding table) comes from the Gemma reader; this adds the HF-named dequantized view with every package transformation undone."""
+
+    def _gamma(self, shard, name) -> np.ndarray:
+        return self.raw(shard, name).astype(np.float32).reshape(-1)
+
+    def hf_state_dict(self, prefix: str = "model.") -> dict:
+        spec = self.spec
+        d = spec.decoder_dims("full_attention")
+        out = {prefix + "embed_tokens.weight": self.embedding_rows(slice(0, spec.vocab)).astype(np.float32),
+               prefix + "norm.weight": self._gamma(self._role["final_norm"], "final_norm_gamma") - 1.0}
+        out["lm_head.weight"] = out[prefix + "embed_tokens.weight"]
+        for i in range(spec.num_layers):
+            shard, kind, p = self._layer[i], spec.layer_kind(i), f"{prefix}layers.{i}."
+            out[p + "input_layernorm.weight"] = self._gamma(shard, "input_layernorm_gamma") - 1.0
+            out[p + "post_attention_layernorm.weight"] = self._gamma(shard, "post_attention_layernorm_gamma") - 1.0
+            gate_up = self._dequant(shard, "gate_up_projection")
+            out[p + "mlp.gate_proj.weight"], out[p + "mlp.up_proj.weight"] = gate_up[:spec.ffn], gate_up[spec.ffn:]
+            out[p + "mlp.down_proj.weight"] = self._dequant(shard, "down_projection")
+            if kind == "linear_attention":
+                ld = Q.linear_dims(spec)
+                qkvz = self._dequant(shard, "qkvz_projection")
+                out[p + "linear_attn.in_proj_qkv.weight"], out[p + "linear_attn.in_proj_z.weight"] = qkvz[:ld["conv_width"]], qkvz[ld["conv_width"]:]
+                ba = self.raw(shard, "ba_weight").astype(np.float32)
+                out[p + "linear_attn.in_proj_b.weight"], out[p + "linear_attn.in_proj_a.weight"] = ba[:ld["v_heads"]], ba[ld["v_heads"]:]
+                out[p + "linear_attn.conv1d.weight"] = np.transpose(self.raw(shard, "conv_weight").astype(np.float32)[:, 0, :], (1, 0))[:, None, :]
+                out[p + "linear_attn.A_log"] = np.log(self.raw(shard, "decay_rate").astype(np.float32).reshape(-1))
+                out[p + "linear_attn.dt_bias"] = self.raw(shard, "dt_bias").astype(np.float32).reshape(-1)
+                out[p + "linear_attn.norm.weight"] = self.raw(shard, "norm_gamma").astype(np.float32).reshape(-1)
+                out[p + "linear_attn.out_proj.weight"] = self._dequant(shard, "output_projection")
+            else:
+                rot = int(d.head_dim * float(spec.rope["full_attention"].get("partial_rotary_factor", 1.0)))
+                inverse = np.argsort(rope_permutation(d.head_dim, rot))
+                aw, kw = d.attention_width, d.kv_width
+                merged = self._dequant(shard, "qkvg_projection")
+                query = merged[:aw].reshape(d.num_heads, d.head_dim, -1)[:, inverse]
+                gate = merged[aw:2 * aw].reshape(d.num_heads, d.head_dim, -1)
+                out[p + "self_attn.q_proj.weight"] = np.stack([query, gate], axis=1).reshape(d.num_heads * 2 * d.head_dim, -1)   # per head: [query | gate]
+                out[p + "self_attn.k_proj.weight"] = merged[2 * aw:2 * aw + kw].reshape(d.num_kv_heads, d.head_dim, -1)[:, inverse].reshape(kw, -1)
+                out[p + "self_attn.v_proj.weight"] = merged[2 * aw + kw:]
+                out[p + "self_attn.o_proj.weight"] = self._dequant(shard, "output_projection")
+                out[p + "self_attn.q_norm.weight"] = (self._gamma(shard, "query_norm_gamma") - 1.0)[inverse]
+                out[p + "self_attn.k_norm.weight"] = (self._gamma(shard, "key_norm_gamma") - 1.0)[inverse]
+        return out
+
+
+class Qwen35Runner:
+    def __init__(self, spec: ModelSpec, weights_dir, *, max_length: int = 128, chunk_sizes=(16,), staging_rows: int = 8, opt: Optional[D.GraphOptions] = None,
+                 graphs: Optional[dict] = None, prefill_fixed_tokens: int = 200):
+        self.spec = spec
+        self.opt = opt or D.GraphOptions(kv_style="staged", staging_rows=staging_rows)
+        self.R, self.P = self.opt.staging_rows, max_length - 1
+        self.sizes = sorted(set(chunk_sizes))
+        self.fixed_tokens = prefill_fixed_tokens
+        self.reader = Qwen35PackageReader(spec, weights_dir)
+        self.g = graphs or self._build_graphs()
+        self.kinds = [spec.layer_kind(i) for i in range(spec.num_layers)]
+        self.attention_names = {k: [n for n, _, _ in Q.attention_weight_specs(spec, k)] for k in Q.KINDS if k in spec.layer_types}
+        self.ffn_names = [n for n, _, _ in Q.feed_forward_weight_specs(spec)]
+        self.externals = self._lm_head_externals()
+        self.final_gamma = self.reader.raw(self.reader._role["final_norm"], "final_norm_gamma")
+        self.reset()
+
+    # ----------------------------------------------------------------------------------------------- graphs
+    def _build_graphs(self) -> dict:
+        s, opt, P = self.spec, self.opt, self.P
+        kinds = sorted(set(s.layer_kind(i) for i in range(1, s.num_layers)))
+        decode = {"head": Q.build_head_graph(s, opt, seq=1, past_len=P), "blocks": {k: Q.build_block_graph(s, opt, k, seq=1, past_len=P) for k in kinds}, "tail": Q.build_tail_graph(s, opt, seq=1),
+                  "flush": Q.build_flush_graph(s, staging_rows=self.R, past_len=P)}
+        prefill = {C: {"head": Q.build_head_graph(s, opt, seq=C, past_len=P), "tail": Q.build_tail_graph(s, opt, seq=C),
+                       "blocks": {k: Q.build_block_graph(s, opt, k, seq=C, past_len=P) for k in kinds}} for C in self.sizes}
+        return {"decode": decode, "prefill": prefill, "lm_head": Q.build_lm_head_graph(s, opt)}
+
+    @classmethod
+    def from_package(cls, package, spec: ModelSpec, *, variant: Optional[str] = None, max_length: int = 0, chunk_sizes=None, prefill_fixed_tokens: int = 200) -> "Qwen35Runner":
+        package = Path(package)
+        plan = json.loads((package / "plan.json").read_text(encoding="utf-8"))
+        info = next(v for v in plan["variants"] if v["id"] == (variant or plan["default_variant"]))
+        table = plan["graphs"][info["id"]]
+        L = max_length or min(plan["max_lengths"])
+        sizes = sorted(chunk_sizes or [min(int(c) for c in table["prefill"][str(L)])])
+        load = lambda path: serialize.load(package / path)   # noqa: E731
+        d = table["decode"][str(L)]
+        decode = {"head": load(d["head"]), "tail": load(d["tail"]), "blocks": {k: load(p) for k, p in d["blocks"].items()}, "flush": load(d["flush"])}
+        prefill = {}
+        for C in sizes:
+            f = table["prefill"][str(L)][str(C)]
+            prefill[C] = {"head": load(f["head"]), "tail": load(f["tail"]), "blocks": {k: load(p) for k, p in f["blocks"].items()}}
+        opt = D.GraphOptions(**{**{k: v for k, v in plan["profile"].items() if k in D.GraphOptions.__dataclass_fields__}, "compute_type": info["compute_type"], "kv_style": "staged",
+                                "staging_rows": info.get("staging_rows", 64)})
+        return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens,
+                   graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
+
+    def _lm_head_externals(self) -> dict:
+        weight, scale = self.reader.embedding_rows_raw()
+        out = {"lm_head_weight": weight, "lm_head_scale": scale}
+        parts = Q.lm_head_parts(self.spec, self.opt)
+        rows = self.spec.vocab_padded // parts
+        for i in range(parts if parts > 1 else 0):
+            out[f"lm_head_weight_{i}"], out[f"lm_head_scale_{i}"] = weight[i * rows:(i + 1) * rows], scale[i * rows:(i + 1) * rows]
+        return out
+
+    # ----------------------------------------------------------------------------------------------- weights / state
+    def _weights(self, layer: int, names) -> dict:
+        shard = self.reader._layer[layer]
+        return {n: self.reader.raw(shard, n) for n in names if self.reader.has(shard, n)}
+
+    def _embed(self, token: int) -> np.ndarray:
+        return (self.reader.embedding_rows(token) * np.float32(self.spec.embed_scale)).astype(np.float16)
+
+    def reset(self) -> None:
+        s = self.spec
+        d = s.decoder_dims("full_attention")
+        full = [i for i in range(s.num_layers) if s.layer_types[i] == "full_attention"]
+        zeros = lambda rows: np.zeros((1, d.num_kv_heads, rows, d.head_dim), np.float16)  # noqa: E731
+        self.k, self.v = {i: zeros(self.P) for i in full}, {i: zeros(self.P) for i in full}
+        self.sk, self.sv = {i: zeros(self.R) for i in full}, {i: zeros(self.R) for i in full}
+        self.conv, self.rec = {}, {}
+        if s.linear:
+            ld = Q.linear_dims(s)
+            for i in range(s.num_layers):
+                if s.layer_types[i] == "linear_attention":
+                    self.conv[i] = np.zeros((1, Q.CONV_TAPS - 1, ld["conv_width"]), np.float16)
+                    self.rec[i] = np.zeros((1, ld["v_heads"], ld["k_dim"], ld["v_dim"]), np.float16)
+        self.base = self.filled = self.position = 0
+
+    @property
+    def cache_full(self) -> bool:
+        return self.position >= self.P
+
+    # ----------------------------------------------------------------------------------------------- one forward pass
+    def _chain(self, graphs: dict, decode: bool, hidden, rope, masks, selectors, controls, last: bool):
+        s, N = self.spec, self.spec.num_layers
+
+        def feeds_for(layer: int) -> dict:
+            kind = self.kinds[layer]
+            weights = self._weights(layer, self.attention_names[kind])
+            if kind == "linear_attention":
+                return {"conv_state": self.conv[layer], "recurrent_state": self.rec[layer], **controls, **weights}
+            cos, sin = rope["full_attention"]
+            feeds = {"rope_cos": cos, "rope_sin": sin, "attention_mask": masks["full_attention"], "past_key": self.k[layer], "past_value": self.v[layer], **selectors, **weights}
+            if decode:
+                feeds.update(staging_key=self.sk[layer], staging_value=self.sv[layer])
+            return feeds
+
+        def store(layer: int, out: dict) -> None:
+            if self.kinds[layer] == "linear_attention":
+                self.conv[layer], self.rec[layer] = out["new_conv_state"], out["new_recurrent_state"]
+            elif decode:
+                self.sk[layer], self.sv[layer] = out["updated_key"], out["updated_value"]
+            else:
+                self.k[layer], self.v[layer] = out["updated_key"], out["updated_value"]
+
+        out = run(graphs["head"], {"hidden_states": hidden, **feeds_for(0)})
+        store(0, out)
+        residual, attention = out["residual"], out["attention_output"]
+        for i in range(N - 1):
+            out = run(graphs["blocks"][self.kinds[i + 1]], {"residual": residual, "attention_output": attention, **self._weights(i, self.ffn_names), **feeds_for(i + 1)})
+            store(i + 1, out)
+            residual, attention = out["next_residual"], out["next_attention_output"]
+        if not last:
+            return None
+        tail = run(graphs["tail"], {"residual": residual, "attention_output": attention, **self._weights(N - 1, self.ffn_names), "final_norm_gamma": self.final_gamma})
+        logits = run(self.g["lm_head"], {"final_hidden_states": tail["final_hidden_states"]}, externals=self.externals)["logits"]
+        return logits.reshape(-1)[: s.vocab].astype(np.float32)
+
+    # ----------------------------------------------------------------------------------------------- prefill / decode
+    def plan(self, token_count: int) -> list:
+        return protocol.plan_prefill(self.sizes, token_count, self.fixed_tokens)
+
+    def prefill(self, tokens: list, plan: Optional[list] = None) -> np.ndarray:
+        s, n, P = self.spec, len(tokens), self.P
+        plan = plan or self.plan(n)
+        if sum(plan) < n or sum(plan[:-1]) >= n:
+            raise ValueError(f"the chunk plan {plan} does not fit a prompt of {n} tokens")
+        if n >= P:
+            raise ValueError(f"the prompt ({n} tokens) does not fit into the {P}-row cache")
+        self.reset()
+        logits, start = None, 0
+        for index, C in enumerate(plan):
+            valid = min(C, n - start)
+            pad = C - valid
+            hidden = np.zeros((1, C, s.hidden), np.float16)
+            for i in range(valid):
+                hidden[0, pad + i] = self._embed(tokens[start + i])
+            rope = protocol.rope_tables(s, list(range(start, start + valid)), C, pad)
+            masks = protocol.prefill_masks(s, P, C, start, valid)
+            keep, selector = protocol.prefill_selectors(P, C, start, valid)
+            valid_mask, conv_perm = protocol.linear_prefill_controls(C, valid)
+            logits = self._chain(self.g["prefill"][C], False, hidden, rope, masks, {"rows_to_keep": keep, "row_selector": selector},
+                                 {"valid_mask": valid_mask, "conv_perm": conv_perm}, index == len(plan) - 1)
+            start += valid
+        self.base, self.filled, self.position = n, 0, n
+        return logits
+
+    def _flush(self) -> None:
+        keep, selector = protocol.flush_selectors(self.P, self.R, self.base)
+        for i in self.k:
+            out = run(self.g["decode"]["flush"], {"past_key": self.k[i], "past_value": self.v[i], "new_key": self.sk[i], "new_value": self.sv[i], "rows_to_keep": keep, "row_selector": selector})
+            self.k[i], self.v[i] = out["updated_key"], out["updated_value"]
+        self.base += self.R
+        self.filled = 0
+
+    def step(self, token: int) -> np.ndarray:
+        s, P, R = self.spec, self.P, self.R
+        if self.cache_full:
+            raise ValueError("the KV cache is full")
+        if self.filled == R:
+            self._flush()
+        pos = self.position
+        rope = protocol.rope_tables(s, [pos], 1, 0)
+        masks = protocol.decode_masks(s, P, R, pos, self.base, self.filled)
+        keep, selector = protocol.decode_selectors(R, self.filled)
+        logits = self._chain(self.g["decode"], True, self._embed(token).reshape(1, 1, -1), rope, masks, {"staging_rows_to_keep": keep, "staging_row_selector": selector}, {}, True)
+        self.filled += 1
+        self.position += 1
+        return logits
+
+    def generate(self, tokens: list, max_new_tokens: int, eos=()) -> tuple:
+        logits = self.prefill(tokens)
+        out, all_logits = [], [logits]
+        for _ in range(max_new_tokens):
+            token = int(np.argmax(logits))
+            out.append(token)
+            if token in eos or len(out) == max_new_tokens or self.cache_full:
+                break
+            logits = self.step(token)
+            all_logits.append(logits)
+        return out, all_logits

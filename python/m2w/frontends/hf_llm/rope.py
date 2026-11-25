@@ -49,10 +49,20 @@ def proportional_inv_freq(theta: float, dim: int, partial_rotary_factor: float) 
     return np.concatenate([rotated, np.zeros(dim // 2 - angles, np.float32)]).astype(np.float32)
 
 
+def partial_inv_freq(theta: float, dim: int, partial_rotary_factor: float) -> np.ndarray:
+    """Partial rotary embeddings (Qwen3.5): only the first `rot = partial * dim` dims rotate, in pairs (i, i + rot/2), with exponents over `rot`. The packed projections of such a model have their
+    head dims permuted so that the rotating pairs sit at (i, i + dim/2) for i < rot/2 (see pack_qwen35.rope_permutation): the graphs then rotate the whole head dim with these frequencies, the
+    others are 0 (cos 1, sin 0)."""
+    rot = int(dim * partial_rotary_factor)
+    return np.concatenate([default_inv_freq(theta, rot), np.zeros(dim // 2 - rot // 2, np.float32)]).astype(np.float32)
+
+
 def inv_freq_for(rope: dict, head_dim: int):
     """rope: a resolved entry of model.json ("type", "theta", ...) -> (inv_freq, attention_factor)."""
     kind, theta = rope["type"], float(rope["theta"])
     if kind == "default":
+        if float(rope.get("partial_rotary_factor", 1.0)) != 1.0:
+            return partial_inv_freq(theta, head_dim, float(rope["partial_rotary_factor"])), 1.0
         return default_inv_freq(theta, head_dim), 1.0
     if kind == "linear":
         return linear_inv_freq(theta, head_dim, float(rope["factor"])), 1.0

@@ -1,0 +1,35 @@
+{
+  "name": "qwen3.5",
+  "description": "Qwen3.5 text decoder (hybrid): 3 Gated DeltaNet (linear attention) layers per full attention layer, full attention with an output gate, partial rotary embeddings, every RMSNorm weight stored as w and used as (1 + w) except the gated norm inside the linear attention",
+  "architectures": ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
+  "builder": "qwen35",
+  "qk_norm": true,
+  "chat_template_kwargs": { "Qwen3_5ForConditionalGeneration": { "enable_thinking": false }, "Qwen3_5ForCausalLM": { "enable_thinking": false } },
+  "tensors": {
+    "embed": "model.language_model.embed_tokens.weight",
+    "final_norm": "model.language_model.norm.weight",
+    "lm_head": "lm_head.weight",
+    "layer": {
+      "input_layernorm": "model.language_model.layers.{i}.input_layernorm.weight",
+      "post_attention_layernorm": "model.language_model.layers.{i}.post_attention_layernorm.weight",
+      "gate_proj": "model.language_model.layers.{i}.mlp.gate_proj.weight",
+      "up_proj": "model.language_model.layers.{i}.mlp.up_proj.weight",
+      "down_proj": "model.language_model.layers.{i}.mlp.down_proj.weight",
+      "q_proj": "model.language_model.layers.{i}.self_attn.q_proj.weight",
+      "k_proj": "model.language_model.layers.{i}.self_attn.k_proj.weight",
+      "v_proj": "model.language_model.layers.{i}.self_attn.v_proj.weight",
+      "o_proj": "model.language_model.layers.{i}.self_attn.o_proj.weight",
+      "q_norm": "model.language_model.layers.{i}.self_attn.q_norm.weight",
+      "k_norm": "model.language_model.layers.{i}.self_attn.k_norm.weight",
+      "in_proj_qkv": "model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight",
+      "in_proj_z": "model.language_model.layers.{i}.linear_attn.in_proj_z.weight",
+      "in_proj_b": "model.language_model.layers.{i}.linear_attn.in_proj_b.weight",
+      "in_proj_a": "model.language_model.layers.{i}.linear_attn.in_proj_a.weight",
+      "conv1d": "model.language_model.layers.{i}.linear_attn.conv1d.weight",
+      "A_log": "model.language_model.layers.{i}.linear_attn.A_log",
+      "dt_bias": "model.language_model.layers.{i}.linear_attn.dt_bias",
+      "linear_norm": "model.language_model.layers.{i}.linear_attn.norm.weight",
+      "out_proj": "model.language_model.layers.{i}.linear_attn.out_proj.weight"
+    }
+  }
+}

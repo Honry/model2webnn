@@ -45,7 +45,7 @@ def prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int) -> di
     """layer type -> mask float16 [1,1,C,P+C] of the chunk that holds `valid` real tokens (positions start..start+valid-1)."""
     pad = C - valid
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((C, P + C), NEG, np.float16)
         for row in range(C):
             if row < pad:
@@ -76,7 +76,7 @@ def prefill_selectors(P: int, C: int, start: int, valid: int):
 def decode_masks(spec: ModelSpec, P: int, R: int, pos: int, base: int, filled: int) -> dict:
     """layer type -> mask float16 [1,1,1,P+R] for the token at position `pos` = base + filled."""
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((P + R,), NEG, np.float16)
         for j in range(base):
             if visible(spec, ltype, pos, j):
@@ -142,7 +142,7 @@ def plan_prefill(sizes, token_count: int, fixed_tokens: int = 200) -> list:
 def decode_masks_onehot(spec: ModelSpec, P: int, pos: int) -> dict:
     """layer type -> mask float16 [1,1,1,P+1]: cache rows 0..pos-1 (that the layer type sees) and the new token (column P)."""
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((P + 1,), NEG, np.float16)
         for j in range(pos):
             if visible(spec, ltype, pos, j):
@@ -173,7 +173,7 @@ def scatter_prefill_rope(spec: ModelSpec, C: int, start: int, pad: int) -> dict:
 def scatter_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, pad: int) -> dict:
     """layer type -> mask float16 [1,1,C,P] of the chunk that covers cache rows start..start+C-1: columns are cache rows; a pad row sees only itself."""
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((C, P), NEG, np.float16)
         for row in range(C):
             cache_row = start + row
@@ -191,7 +191,7 @@ def scatter_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, pad: int)
 def scatter_decode_masks(spec: ModelSpec, P: int, pos: int, pad: int) -> dict:
     """layer type -> mask float16 [1,1,1,P] for the token at position `pos` (cache row pad + pos, written by the graph before attention)."""
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((P,), NEG, np.float16)
         for j in range(pad, pad + pos + 1):
             if visible(spec, ltype, pos, j - pad):
@@ -208,7 +208,7 @@ def scatternd_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: 
     before attention); a pad row sees only the cache row it is parked in."""
     pad = C - valid
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((C, P), NEG, np.float16)
         for row in range(C):
             if row < pad:
@@ -235,7 +235,7 @@ def scatternd_prefill_indices(num_kv_heads: int, P: int, C: int, start: int, val
 def scatternd_decode_masks(spec: ModelSpec, P: int, pos: int) -> dict:
     """layer type -> mask float16 [1,1,1,P] for the token at position `pos` (cache row pos, written by the graph before attention)."""
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((P,), NEG, np.float16)
         for j in range(pos + 1):
             if visible(spec, ltype, pos, j):
@@ -260,7 +260,7 @@ def incache_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: in
     row 0 only (any visible column keeps the softmax finite; its output is never used)."""
     pad = C - valid
     masks = {}
-    for ltype in sorted(set(spec.layer_types)):
+    for ltype in spec.mask_types():
         mask = np.full((C, P), NEG, np.float16)
         for row in range(C):
             if row < pad:
@@ -272,3 +272,21 @@ def incache_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: in
                     mask[row, j] = 0
         masks[ltype] = mask[None, None]
     return masks
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Gated DeltaNet (linear attention) layers in a prefill chunk (Qwen3.5)
+# ---------------------------------------------------------------------------------------------------------------------
+def linear_prefill_controls(C: int, valid: int):
+    """(valid_mask [1,1,C,1], conv_perm [1,C+3,C+3]) float16 of a chunk of C rows that holds `valid` real rows (the pad rows are in front).
+    valid_mask: 1 for a real row, 0 for a pad row (the graph zeroes beta and g there: the pad rows do nothing to the recurrent state).
+    conv_perm: a permutation matrix applied to [3 conv-state rows | C chunk rows]: the pad rows move in front of the state rows, so that the causal conv of the first real row sees the
+    state rows and not the pad rows (row r of the result = row `source(r)` of the input); the identity when the chunk is full."""
+    pad = C - valid
+    mask = np.zeros((1, 1, C, 1), np.float16)
+    mask[0, 0, pad:, 0] = 1
+    perm = np.zeros((1, C + 3, C + 3), np.float16)
+    for r in range(C + 3):
+        source = 3 + r if r < pad else r - pad if r < pad + 3 else r
+        perm[0, r, source] = 1
+    return mask, perm

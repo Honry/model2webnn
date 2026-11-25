@@ -177,6 +177,16 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     return b.build()
 
 
+def gated_delta_step(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value):
+    """One token (decode). q, k [1,H,1,dk], v [1,H,1,dv], g, beta [1,H,1,1], state [1,H,dk,dv] -> (out [1,H,1,dv], new state).
+    The prediction scales the [1,dv] vector, not the state (style B of build_recurrent_graph): a `state * exp(g)` that feeds a matmul AND an add made the NPU return wrong results."""
+    decay = b.exp(g)
+    predicted = b.mul(b.matmul(k, state), decay)
+    delta = b.mul(b.sub(v, predicted), beta)
+    new_state = b.add(b.mul(state, decay), b.matmul(b.transpose(k, [0, 1, 3, 2]), delta))
+    return b.matmul(q, new_state), new_state
+
+
 def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", name: str | None = None, probe: bool = False, style: str = "A"):
     """The decode step: one token, no chunk machinery. The same math in several shapes, because the f16 execution of the OpenVINO GPU / NPU plugins returned wrong results for some of them
     (the graph is right: CPU and f32 are exact), see docs / notes:

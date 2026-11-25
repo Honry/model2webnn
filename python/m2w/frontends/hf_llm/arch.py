@@ -74,6 +74,8 @@ class ModelSpec:
     embed_scale: float = 1.0                                    # the embedding is multiplied by this (Gemma: sqrt(hidden))
     attention_scale: Optional[float] = None                     # None = 1 / sqrt(head_dim)
     logit_softcap: float = 0.0                                  # logits = cap * tanh(logits / cap) when > 0
+    linear: dict = field(default_factory=dict)                  # Gated DeltaNet layers (layer type "linear_attention", Qwen3.5): {"num_k_heads", "num_v_heads", "k_dim", "v_dim", "conv_kernel"}
+    attn_output_gate: bool = False                              # the full attention output is multiplied by sigmoid(gate), the gate comes out of q_proj next to the query (Qwen3.5)
 
     def decoder_dims(self, layer_type: Optional[str] = None) -> DecoderDims:
         """The dims of the attention of a layer of this type (the defaults for the types that do not override them)."""
@@ -83,13 +85,23 @@ class ModelSpec:
 
     def layer_kind(self, i: int) -> str:
         """The kind of the attention half of layer i: '<layer type>_own' | '<layer type>_shared' (shared = reads the K / V of another layer)."""
+        if self.builder == "qwen35":
+            return self.layer_types[i]   # linear_attention | full_attention: every layer with K / V has its own
         return f"{self.layer_types[i]}_{'shared' if self.kv_producer and self.kv_producer[i] >= 0 else 'own'}"
+
+    def mask_types(self) -> list:
+        """The layer types that attend over a KV cache (and so have masks and rope tables): the linear attention layers have neither."""
+        return sorted(t for t in set(self.layer_types) if t != "linear_attention")
 
     def layer_tensor_names(self, i: int) -> dict:
         return {role: name.format(i=i) for role, name in self.tensors["layer"].items()}
 
     def to_dict(self) -> dict:
-        return {"format": FORMAT, "version": VERSION, **asdict(self)}
+        d = asdict(self)
+        for key in ("linear", "attn_output_gate"):   # Qwen3.5 additions: absent from the model.json of every other model
+            if not d[key]:
+                del d[key]
+        return {"format": FORMAT, "version": VERSION, **d}
 
     @staticmethod
     def from_dict(d: dict) -> "ModelSpec":
@@ -110,16 +122,16 @@ def _resolve_rope(config: dict, layer_types: list) -> dict:
         params = {**scaling, "rope_type": scaling.get("rope_type") or scaling.get("type") or "default", "rope_theta": config.get("rope_theta", 10000.0)}
     per_type = params if any(k in ("full_attention", "sliding_attention") for k in params) else {t: params for t in set(layer_types)}
     out = {}
-    for layer_type in sorted(set(layer_types)):
+    for layer_type in sorted(set(layer_types) - {"linear_attention"}):   # Gated DeltaNet layers have no positions
         p = per_type[layer_type]
         kind = p.get("rope_type", "default")
         if kind not in ("default", "linear", "yarn", "proportional"):
             raise UnsupportedModel(f"rope type '{kind}' is not supported yet")
         partial = p.get("partial_rotary_factor", config.get("partial_rotary_factor", 1.0))
-        if partial != 1.0 and kind != "proportional":
-            raise UnsupportedModel("partial rotary embeddings are only supported for the proportional rope type")
+        if partial != 1.0 and kind not in ("proportional", "default"):
+            raise UnsupportedModel("partial rotary embeddings are only supported for the default and the proportional rope types")
         entry = {"type": kind, "theta": float(p["rope_theta"])}
-        if kind == "proportional":
+        if kind == "proportional" or partial != 1.0:
             entry["partial_rotary_factor"] = float(partial)
         for key in ("factor", "original_max_position_embeddings", "beta_fast", "beta_slow", "attention_factor", "mscale", "mscale_all_dim", "truncate"):
             if p.get(key) is not None:
@@ -176,11 +188,47 @@ def _gemma4_spec(config: dict, generation_config: Optional[dict], family: dict, 
     return spec
 
 
+def _qwen35_spec(config: dict, generation_config: Optional[dict], family: dict, architecture: str) -> ModelSpec:
+    t = config.get("text_config", config)
+    if t.get("num_experts") or t.get("moe_intermediate_size"):
+        raise UnsupportedModel("Qwen3.5 mixture-of-experts models are not supported (the dense models have no experts)")
+    if t.get("attention_bias") or t.get("mlp_only_layers"):
+        raise UnsupportedModel("attention biases / mlp_only_layers are not supported")
+    if t.get("hidden_act", "silu") != "silu":
+        raise UnsupportedModel(f"activation '{t.get('hidden_act')}' is not supported (only silu)")
+    heads, layers = t["num_attention_heads"], t["num_hidden_layers"]
+    layer_types = list(t["layer_types"])
+    if len(layer_types) != layers or not set(layer_types) <= {"full_attention", "linear_attention"}:
+        raise UnsupportedModel(f"unsupported layer_types: {sorted(set(layer_types))}")
+    generation_config = generation_config or {}
+    eos = generation_config.get("eos_token_id", config.get("eos_token_id", t.get("eos_token_id")))
+    eos = [] if eos is None else [eos] if isinstance(eos, int) else list(eos)
+    vocab = t["vocab_size"]
+    linear = {"num_k_heads": t["linear_num_key_heads"], "num_v_heads": t["linear_num_value_heads"], "k_dim": t["linear_key_head_dim"], "v_dim": t["linear_value_head_dim"],
+              "conv_kernel": t["linear_conv_kernel_dim"]} if "linear_attention" in layer_types else {}
+    if linear and (linear["k_dim"] != 128 or linear["v_dim"] != 128 or linear["num_v_heads"] % linear["num_k_heads"] or linear["conv_kernel"] != 4):
+        raise UnsupportedModel(f"unsupported Gated DeltaNet dims {linear} (head dims 128, kernel 4)")
+    spec = ModelSpec(
+        architecture=architecture, family=family["name"], hidden=t["hidden_size"], num_layers=layers, num_heads=heads, num_kv_heads=t["num_key_value_heads"],
+        head_dim=t.get("head_dim") or t["hidden_size"] // heads, ffn=t["intermediate_size"], vocab=vocab, vocab_padded=_round_up(vocab, VOCAB_ALIGNMENT),
+        eps=float(t["rms_norm_eps"]), qk_norm=True, tie_embeddings=bool(t.get("tie_word_embeddings", config.get("tie_word_embeddings", True))), activation="silu",
+        max_position_embeddings=t["max_position_embeddings"], layer_types=layer_types, sliding_window=None, rope=_resolve_rope(t, layer_types), eos_token_ids=eos,
+        bos_token_id=t.get("bos_token_id"), pad_token_id=t.get("pad_token_id"), tensors=family["tensors"], builder=family["builder"],
+        chat_template_kwargs=dict(family.get("chat_template_kwargs", {}).get(architecture, {})), linear=linear, attn_output_gate=bool(t.get("attn_output_gate", False)),
+    )
+    spec.decoder_dims("full_attention").check()
+    if spec.hidden % 128:
+        raise UnsupportedModel("the hidden size must be a multiple of the quantization group size")
+    return spec
+
+
 def spec_from_config(config: dict, generation_config: Optional[dict] = None) -> ModelSpec:
     architecture = (config.get("architectures") or [""])[0]
     family = family_for(architecture)
     if family.get("builder") == "gemma4":
         return _gemma4_spec(config, generation_config, family, architecture)
+    if family.get("builder") == "qwen35":
+        return _qwen35_spec(config, generation_config, family, architecture)
     if config.get("attention_bias") or config.get("mlp_bias"):
         raise UnsupportedModel("models with attention / MLP biases are not supported yet")
     activation = config.get("hidden_act", "silu")

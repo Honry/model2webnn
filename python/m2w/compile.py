@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import __version__
-from .frontends.hf_llm import arch, chat_format, hub, pack, pack_gemma4
+from .frontends.hf_llm import arch, chat_format, hub, pack, pack_gemma4, pack_qwen35
 from .frontends.hf_llm.builders import decoder as D
 from .frontends.hf_llm.builders import gemma4 as G
+from .frontends.hf_llm.builders import qwen35 as Q
 from .frontends.hf_llm.safetensors_io import TensorStore
 from .ir import check_tensor_limit, serialize
 
@@ -190,7 +191,95 @@ def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
     }
 
 
+def write_graphs_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks) -> dict:
+    """The graphs of a Qwen3.5-style hybrid model, per variant: head, one block per kind of attention half (linear_attention | full_attention) of layers 1.., tail, one flush (the full
+    attention layers' caches), lm_head."""
+    bad = [C for C in chunks if C % Q.SUB_CHUNK]
+    if bad:
+        raise ValueError(f"the prefill chunk sizes of a Gated DeltaNet model must be multiples of {Q.SUB_CHUNK} (got {bad})")
+    block_kinds = sorted({spec.layer_kind(i) for i in range(1, spec.num_layers)})
+    tables: dict = {}
+    for variant in variants:
+        vopt = D.with_options(opt, kv_style="staged", compute_type=variant["compute_type"], staging_rows=variant["staging_rows"])
+        gdir = out / "graphs" / variant["id"]
+        gdir.mkdir(parents=True, exist_ok=True)
+
+        def emit(graph) -> str:
+            check_tensor_limit(graph)
+            serialize.dump(graph, gdir / f"{graph.name}.json")
+            return f"graphs/{variant['id']}/{graph.name}.json"
+
+        table: dict = {"lm_head": emit(Q.build_lm_head_graph(spec, vopt)), "decode": {}, "prefill": {}}
+        for L in max_lengths:
+            past = L - 1
+            table["decode"][str(L)] = {
+                "head": emit(Q.build_head_graph(spec, vopt, seq=1, past_len=past, name=f"decode_head_L{L}")),
+                "blocks": {k: emit(Q.build_block_graph(spec, vopt, k, seq=1, past_len=past, name=f"decode_block_{k}_L{L}")) for k in block_kinds},
+                "tail": emit(Q.build_tail_graph(spec, vopt, seq=1, name="decode_tail")),
+                "flush": emit(Q.build_flush_graph(spec, staging_rows=vopt.staging_rows, past_len=past, name=f"kv_flush_L{L}"))}
+            table["prefill"][str(L)] = {}
+            for C in chunks:
+                if C > past:
+                    continue
+                table["prefill"][str(L)][str(C)] = {
+                    "head": emit(Q.build_head_graph(spec, vopt, seq=C, past_len=past, name=f"prefill_head_L{L}_C{C}")),
+                    "blocks": {k: emit(Q.build_block_graph(spec, vopt, k, seq=C, past_len=past, name=f"prefill_block_{k}_L{L}_C{C}")) for k in block_kinds},
+                    "tail": emit(Q.build_tail_graph(spec, vopt, seq=C, name=f"prefill_tail_C{C}"))}
+        tables[variant["id"]] = table
+    return tables
+
+
+def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks) -> dict:
+    kinds = sorted(set(spec.layer_types))
+    dims = Q.linear_dims(spec) if spec.linear else {}
+    return {
+        "format": "m2w-plan", "version": 0, "target": TARGET, "architecture_kind": "qwen35",
+        "weights": {
+            "description": "tensor names of the weights manifest: attention = by kind of the layer (linear_attention = Gated DeltaNet, full_attention), ffn = the feed-forward half of every layer",
+            "attention": {k: [n for n, _, _ in Q.attention_weight_specs(spec, k)] for k in kinds},
+            "ffn": [n for n, _, _ in Q.feed_forward_weight_specs(spec)],
+            "final_norm": ["final_norm_gamma"],
+            "embedding": [n for n, _, _ in Q.lm_head_weight_specs(spec)],
+        },
+        "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type", "value_layout")},
+        "variants": variants, "default_variant": variants[0]["id"],
+        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": [1], "prefill_blocks_per_graph": [1],
+        "graphs": graphs,
+        "chain": {
+            "description": "HEAD = attention half of layer 0; BLOCK i (i = 0 .. N-2) = feed-forward half of layer i + attention half of layer i + 1, the graph of its KIND (plan.graphs[..].blocks[kind]); "
+                           "TAIL = feed-forward half of layer N-1 + final norm; lm_head. The kind of layer i is model.json layer_types[i].",
+            "num_layers": spec.num_layers, "kinds": [spec.layer_kind(i) for i in range(spec.num_layers)],
+        },
+        "per_layer_type_inputs": {
+            "description": "full attention layers: rope_cos / rope_sin [1,1,S,head_dim] / attention_mask (partial rotary: the head dims are permuted at packing time, see model.json rope + pack_qwen35.py)",
+            "inputs": ["rope_cos", "rope_sin", "attention_mask"],
+        },
+        "state": {
+            "description": "linear attention (Gated DeltaNet) layers carry a state through the graphs instead of a KV cache: conv_state [1,3,conv_channels] and recurrent_state [1,v_heads,k_dim,v_dim] (float16) are "
+                           "inputs of the layer's attention half and come back as new_conv_state / new_recurrent_state (the runtime swaps a state tensor with its spare); zero at the start of a prompt. "
+                           "Prefill graphs (S > 1) take two controls: valid_mask [1,1,S,1] (0 for the pad rows of the left-padded last chunk: beta and g are zeroed, the pad rows do nothing to the state) and "
+                           "conv_perm [1,S+3,S+3] (a permutation matrix applied to [conv_state rows | chunk rows]: the pad rows move in front of the state rows; the identity for a full chunk). "
+                           "protocol.linear_prefill_controls() builds both.",
+            "conv_channels": dims.get("conv_width"), "v_heads": dims.get("v_heads"), "k_dim": dims.get("k_dim"), "v_dim": dims.get("v_dim"),
+            "layers": [i for i in range(spec.num_layers) if spec.layer_types[i] == "linear_attention"],
+        },
+        "kv_protocols": {
+            "description": "only the staged protocol, for the full attention layers (a Gated DeltaNet layer has no KV cache): prefill = chunks (the last one left-padded) updating the main caches; decode = the new row "
+                           "goes into a staging buffer, attention reads concat(main cache, staging), the flush graph moves the staging rows into the main cache every staging_rows steps.",
+        },
+        "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
+        "logits": {"padded_vocab": spec.vocab_padded, "vocab": spec.vocab, "note": "argmax / sampling over the first `vocab` entries only"},
+    }
+
+
 def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
+    if spec.builder == "qwen35":
+        if any(v["kv_style"] != "staged" for v in variants):
+            raise ValueError("Qwen3.5 packages support the staged KV protocol only")
+        if any(k > 1 for k in tuple(blocks_per_graph) + tuple(prefill_blocks_per_graph)):
+            raise ValueError("block groups are not available for Qwen3.5 packages yet")
+        graphs = write_graphs_qwen35(spec, opt, out, variants, max_lengths, chunks)
+        return graphs, build_plan_qwen35(spec, opt, variants, graphs, max_lengths, chunks)
     if spec.builder == "gemma4":
         if any(v["kv_style"] != "staged" for v in variants):
             raise ValueError("Gemma 4 packages support the staged KV protocol only")
@@ -252,7 +341,8 @@ def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, 
         "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"]
                                + (["tensorScatter"] if any(v["kv_style"] == "tensorScatter" for v in plan["variants"]) else [])
                                + (["scatterND"] if any(v["kv_style"] == "scatterND" for v in plan["variants"]) else [])
-                               + (["tanh"] if plan.get("architecture_kind") == "gemma4" else []),
+                               + (["tanh"] if plan.get("architecture_kind") == "gemma4" else [])
+                               + (["exp", "softplus", "reduceSum"] if plan.get("architecture_kind") == "qwen35" else []),
                                "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
         "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
         "summary": {"layers": spec.num_layers, "max_lengths": plan["max_lengths"], "prefill_chunks": plan["prefill_chunks"], "variants": [v["id"] for v in plan["variants"]],
@@ -292,13 +382,14 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
     spec = arch.spec_from_config(config, generation_config)
     _check_lengths(spec, max_lengths, progress)
-    opt = D.GraphOptions(merge_projections=merge_projections or spec.builder == "gemma4", lm_head_format="int8-sym" if spec.builder == "gemma4" else lm_head_format)
+    hybrid = spec.builder in ("gemma4", "qwen35")
+    opt = D.GraphOptions(merge_projections=merge_projections or hybrid, lm_head_format="int8-sym" if hybrid else lm_head_format)
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     progress(f"{spec.architecture}: {spec.num_layers} layers, hidden {spec.hidden}, {spec.num_heads}/{spec.num_kv_heads} heads, vocab {spec.vocab} (padded {spec.vocab_padded}), "
              f"layer types {sorted(set(spec.layer_types))}")
 
     store = TensorStore.open(source)
-    packer = pack_gemma4 if spec.builder == "gemma4" else pack
+    packer = {"gemma4": pack_gemma4, "qwen35": pack_qwen35}.get(spec.builder, pack)
     manifest = packer.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress)
     graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
