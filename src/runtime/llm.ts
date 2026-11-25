@@ -178,15 +178,16 @@ export class LLM {
     const part = async (name: string) => {
       const file = byRole('embedding').find((f) => f.tensors[0].name === name);
       if (!file) throw new Error(`the package has no embedding tensor '${name}' (plan.weights.embedding: ${plan.weights.embedding.join(', ')})`);
-      return prefetch.get(ordered.indexOf(file));
+      const tensor = file.tensors.find((t) => t.name === name) as (typeof file.tensors)[number];
+      return new Uint8Array(await prefetch.get(ordered.indexOf(file)), tensor.offset, tensor.bytes);   // a view of the tensor inside its .safetensors shard (no copy)
     };
     // the tied embedding / lm_head table: int8 per-row symmetric (scale only) or uint8 per-row asymmetric (scale + zero point); the plan lists which tensors exist
     const hasZeroPoint = plan.weights.embedding.includes('lm_head_zero_point');
-    const weightBytes = new Uint8Array(await part('lm_head_weight')), scaleBytes = await part('lm_head_scale');
-    const zeroPoint = hasZeroPoint ? new Uint8Array(await part('lm_head_zero_point')) : null;
+    const weightBytes = await part('lm_head_weight'), scaleBytes = (await part('lm_head_scale')).slice();   // the scales are copied: Float16Array needs an aligned ArrayBuffer of its own
+    const zeroPoint = hasZeroPoint ? await part('lm_head_zero_point') : null;
     const signed = byRole('embedding').find((f) => f.tensors[0].name === 'lm_head_weight')?.tensors[0].dtype === 'int8';
-    this.embed = { weight: signed ? new Int8Array(weightBytes.buffer, weightBytes.byteOffset, weightBytes.byteLength) : weightBytes, zeroPoint, scale: new (globalThis as any).Float16Array(scaleBytes) };
-    this.embedBytes = { weight: weightBytes, scale: new Uint8Array(scaleBytes), zeroPoint };
+    this.embed = { weight: signed ? new Int8Array(weightBytes.buffer, weightBytes.byteOffset, weightBytes.byteLength) : weightBytes, zeroPoint, scale: new (globalThis as any).Float16Array(scaleBytes.buffer) };
+    this.embedBytes = { weight: weightBytes, scale: scaleBytes, zeroPoint };
 
     // graphs (compiled while the layers download)
     await this.buildGraphs(progress);

@@ -29,6 +29,13 @@ def cmd_rebuild_graphs(args) -> int:
     return 0
 
 
+def cmd_repack(args) -> int:
+    from .compile import repack_package
+
+    repack_package(args.package)
+    return 0
+
+
 def cmd_inspect(args) -> int:
     from .frontends.hf_llm import arch, hub
 
@@ -124,6 +131,10 @@ def main(argv=None) -> int:
     rb.add_argument("package")
     graph_options(rb, defaults=False)
     rb.set_defaults(func=cmd_rebuild_graphs)
+
+    rp = sub.add_parser("repack", help="convert the weight shards of an older package (*.bin) to .safetensors files (no quantization)")
+    rp.add_argument("package")
+    rp.set_defaults(func=cmd_repack)
 
     i = sub.add_parser("inspect", help="what would be built for this model (downloads only config files)")
     i.add_argument("model")

@@ -76,3 +76,70 @@ def test_pack_model_writes_graph_named_shards_that_dequantize_to_the_original(tm
     sc2 = read_tensor(out2, by2["lm_head_scale"][0], "lm_head_scale")
     assert w2.dtype == np.uint8 and not dequantize_u8_rowwise(w2, zp2, sc2)[300:].any() and (sc2.astype(np.float32) > 0).all()
     assert np.abs(dequantize_u8_rowwise(w2, zp2, sc2)[:300] - table).max() < 0.02
+
+
+def test_shards_are_standard_safetensors_files_and_the_manifest_offsets_point_into_them(tmp_path):
+    """Any safetensors reader opens a shard (int4 as U8 with the last axis halved); the manifest's absolute offsets give the same bytes as the header."""
+    import struct
+
+    from safetensors import safe_open
+
+    write_tiny_model(tmp_path / "hf", dtype="F32")
+    spec = spec_from_config(CONFIG)
+    out = tmp_path / "pkg"
+    manifest = pack.pack_model(spec, TensorStore.open(tmp_path / "hf"), out, workers=2)
+    assert manifest["container"] == "safetensors" and not list(out.glob("*.bin"))
+    layer = next(f for f in manifest["files"] if f["role"] == "layer" and f["layer"] == 1)
+    assert layer["file"] == "layer_001.safetensors" and layer["bytes"] == (out / layer["file"]).stat().st_size
+    raw = (out / layer["file"]).read_bytes()
+    (header_size,) = struct.unpack("<Q", raw[:8])
+    header = json.loads(raw[8: 8 + header_size])
+    assert header_size % 8 == 0
+    meta = header.pop("__metadata__")
+    assert meta["format"] == "m2w" and json.loads(meta["dtypes"])["qkv_projection_weight"] == "int4"
+    with safe_open(str(out / layer["file"]), framework="np") as f:
+        assert set(f.keys()) == {t["name"] for t in layer["tensors"]}
+        for t in layer["tensors"]:
+            info = header[t["name"]]
+            assert t["offset"] == 8 + header_size + info["data_offsets"][0] and t["bytes"] == info["data_offsets"][1] - info["data_offsets"][0]
+            stored = f.get_tensor(t["name"])
+            assert stored.tobytes() == raw[t["offset"]: t["offset"] + t["bytes"]]
+            if t["dtype"] == "int4":
+                assert info["dtype"] == "U8" and list(stored.shape) == t["shape"][:-1] + [t["shape"][-1] // 2]
+            else:
+                assert list(stored.shape) == t["shape"]
+
+
+def test_repack_converts_an_older_bin_package_without_changing_a_tensor(tmp_path):
+    """`m2w repack`: *.bin shards (concatenated tensors) -> .safetensors; every tensor dequantizes to the same values as before."""
+    import hashlib
+
+    from m2w import compile as C
+
+    write_tiny_model(tmp_path / "hf", dtype="BF16")
+    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(64,), chunks=(8,), staging_rows=(4,), workers=2, progress=lambda m: None)
+    weights = out / "weights"
+    new = json.loads((weights / "manifest.json").read_text())
+    before = {(f["file"], t["name"]): read_tensor(weights, f, t["name"]).tobytes() for f in new["files"] for t in f["tensors"]}
+    # make an "older" package: the same tensors as concatenated raw shards
+    old_files = []
+    for f in new["files"]:
+        blob = b"".join(read_raw := [(weights / f["file"]).read_bytes()[t["offset"]: t["offset"] + t["bytes"]] for t in f["tensors"]])
+        name = f["file"].replace(".safetensors", ".bin")
+        (weights / name).write_bytes(blob)
+        (weights / f["file"]).unlink()
+        at, tensors = 0, []
+        for t, raw in zip(f["tensors"], read_raw):
+            tensors.append({**t, "offset": at})
+            at += len(raw)
+        old_files.append({**f, "file": name, "bytes": len(blob), "sha256": hashlib.sha256(blob).hexdigest(), "tensors": tensors})
+    legacy = {k: v for k, v in new.items() if k != "container"}
+    (weights / "manifest.json").write_text(json.dumps({**legacy, "files": old_files}))
+    C.repack_package(out, progress=lambda m: None)
+    repacked = json.loads((weights / "manifest.json").read_text())
+    assert repacked["container"] == "safetensors" and not list(weights.glob("*.bin"))
+    after = {(f["file"], t["name"]): read_tensor(weights, f, t["name"]).tobytes() for f in repacked["files"] for t in f["tensors"]}
+    assert after == before
+    index = json.loads((out / "m2w.json").read_text())
+    assert {f["path"] for f in index["files"] if f["path"].startswith("weights/")} == {"weights/manifest.json", *(f"weights/{f['file']}" for f in repacked["files"])}
+    assert C.repack_package(out, progress=lambda m: None) == out   # idempotent

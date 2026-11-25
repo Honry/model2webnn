@@ -54,9 +54,12 @@ async function timeGraph(ctx, name, graph, inputSpecs, outputSpecs, extra) {
 // lmVariants=1: the lm_head graph of the package with (a) synthetic data (b) the package's real embedding table (c) the real table with the scale of zero-scale rows set to 1e-3
 async function lmHeadVariants(ctx, pkg) {
     const plan = pkg.plan, doc = JSON.parse(await pkg.source.text(plan.graphs[param("variant", plan.default_variant)].lm_head));
-    const fileOf = (name) => pkg.manifest.files.find((f) => f.role === "embedding" && f.tensors[0].name === name).file;
+    const fileOf = (name) => pkg.manifest.files.find((f) => f.role === "embedding" && f.tensors[0].name === name);
     const real = {};
-    for (const name of plan.weights.embedding) real[name] = new Uint8Array(await pkg.source.bytes(`weights/${fileOf(name)}`));   // int8-sym tables have no zero point
+    for (const name of plan.weights.embedding) {   // int8-sym tables have no zero point; the tensor sits inside its .safetensors shard
+        const file = fileOf(name), tensor = file.tensors[0];
+        real[name] = new Uint8Array(await pkg.source.bytes(`weights/${file.file}`), tensor.offset, tensor.bytes).slice();
+    }
     const scale = new Float16Array(real.lm_head_scale.buffer.slice(0));
     let zeroScaleRows = 0, smallest = Infinity, largest = 0;   // (no Math.min(...array): 200k arguments overflow the stack)
     for (const v of scale) { if (v === 0) zeroScaleRows++; else if (v < smallest) smallest = v; if (v > largest) largest = v; }

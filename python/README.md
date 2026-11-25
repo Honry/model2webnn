@@ -19,7 +19,7 @@ Useful `compile` options (the graphs are static, so what a runtime can choose be
 - `--blocks-per-graph 1 5` / `--prefill-blocks-per-graph 1 5`: also build graphs with 5 blocks each (fewer dispatches, longer compile; hybrid models such as sliding + full attention get a mask and RoPE table per block as graph inputs).
 - `--lm-head-format int8-sym|uint8-asym` (default int8-sym: same accuracy as the OpenVINO-style uint8 table, compiles faster on the NPU).
 
-`m2w rebuild-graphs <package> --kv-style ...` rewrites the graphs and plan of an existing package with other variants (no quantization); `m2w verify <package> --variant all --chunk 64 128` runs the graph files of
+`m2w repack <package>` converts the weight shards of a package made by an older compiler (raw `*.bin`) to `.safetensors` without quantizing again; `m2w rebuild-graphs <package> --kv-style ...` rewrites the graphs and plan of an existing package with other variants (no quantization); `m2w verify <package> --variant all --chunk 64 128` runs the graph files of
 every variant on the CPU (the runtime protocol) against an independent reference.
 
 Behind a network that cannot reach huggingface.co: `--endpoint https://hf-mirror.com` (or `HF_ENDPOINT`). Downloads resume after interruptions and retry on rate limits.
@@ -32,7 +32,7 @@ plan.json           graph variants (KV protocol x compute type x staging rows) a
                     how weights and per-layer-type inputs are bound; the KV protocols
 chat_format.json    prompt pieces derived from the chat template (the runtime does not run jinja)
 graphs/<variant>/*.json   m2w-graph documents
-weights/            manifest.json + layer_000.bin ... (int4 g128 symmetric, group-major) + the tied embedding / lm_head table
+weights/            manifest.json + layer_000.safetensors ... (standard safetensors files: int4 g128 symmetric, group-major, stored as U8 with the last axis halved) + the tied embedding / lm_head table
                     (int8 per row symmetric by default, or uint8 asymmetric; vocabulary padded to 128)
 tokenizer/          tokenizer.json, tokenizer_config.json, generation_config.json, ...
 ```

@@ -446,39 +446,39 @@
    "sha256": "639d4c9009c73da5b64e6673e726b841e2c455fd5cdd957eadc7fc254151fcf2"
   },
   {
-   "path": "weights/embed.bin",
-   "bytes": 98304,
-   "sha256": "deba2b59af0531122dd71354d56d364889b73ece5ce76f27c571eda11098af19"
+   "path": "weights/embed.safetensors",
+   "bytes": 98512,
+   "sha256": "fe13384c7ca48eeea46082d5cc8816a5391700f8a1025fc6fa45afbb1b27ebad"
   },
   {
-   "path": "weights/embed_scale.bin",
-   "bytes": 768,
-   "sha256": "f1c09129e62268711199acdd53717e63ac6a89ce24cdd2d7b4dd70299df6aa5a"
+   "path": "weights/embed_scale.safetensors",
+   "bytes": 968,
+   "sha256": "ebd70135ee98794b8f66f41b25869e101ce76eda448e54c27eb94ed4a0be77e2"
   },
   {
-   "path": "weights/final_norm.bin",
-   "bytes": 512,
-   "sha256": "1bd39950417c0f12988022f7bf2ae65e2ce3c8cb81aae8a11f365e635a121590"
+   "path": "weights/final_norm.safetensors",
+   "bytes": 728,
+   "sha256": "221973090130e186fee23b7751e28ba9be0d09ca2099b123a61ef1944c503f38"
   },
   {
-   "path": "weights/layer_000.bin",
-   "bytes": 204032,
-   "sha256": "2e6d6df7cc8e828ae2cc4b95e5ef96479521261923da1c518ce5f0019681ec70"
+   "path": "weights/layer_000.safetensors",
+   "bytes": 206136,
+   "sha256": "3ac342ac7a639fe95fce027b2bb76ac8d6f382d93bd561e4333a6c0a521370ee"
   },
   {
-   "path": "weights/layer_001.bin",
-   "bytes": 204032,
-   "sha256": "684a5d5ae489851bbd5492419c96c8577d60365f89f73092918cdebf24c10e28"
+   "path": "weights/layer_001.safetensors",
+   "bytes": 206136,
+   "sha256": "c0c819c0a9c1be479ee43952dc407bc090ee610a7b6522d248994a728bd35792"
   },
   {
-   "path": "weights/layer_002.bin",
-   "bytes": 204032,
-   "sha256": "b3e32d6d7ac277ff9e81769bb12c11bcc12857b8a00dc505669587258d9ffb99"
+   "path": "weights/layer_002.safetensors",
+   "bytes": 206136,
+   "sha256": "b33c552548343f515c065cbc3edc4d1a4d8d5af6b68b6c9e9cac21add3cdb552"
   },
   {
    "path": "weights/manifest.json",
-   "bytes": 8613,
-   "sha256": "9150e4ca146bf49f99976f4e3ab2cc52b439fcc31e4878bb3c4fe949dcc01817"
+   "bytes": 8708,
+   "sha256": "571d09096f32fb47d69eb5309d036319e3e2406be886d4ed3f48d74286a7b8c6"
   }
  ],
  "summary": {
@@ -498,6 +498,6 @@
    "tensorScatter-float32",
    "tensorScatter-float16"
   ],
-  "weights_bytes": 711680
+  "weights_bytes": 718616
  }
 }

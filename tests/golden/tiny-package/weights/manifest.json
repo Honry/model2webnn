@@ -1,6 +1,7 @@
 {
  "format": "m2w-weights",
  "version": 0,
+ "container": "safetensors",
  "quant": {
   "bits": 4,
   "group_size": 128,
@@ -20,9 +21,9 @@
  },
  "files": [
   {
-   "file": "layer_000.bin",
-   "bytes": 204032,
-   "sha256": "2e6d6df7cc8e828ae2cc4b95e5ef96479521261923da1c518ce5f0019681ec70",
+   "file": "layer_000.safetensors",
+   "bytes": 206136,
+   "sha256": "3ac342ac7a639fe95fce027b2bb76ac8d6f382d93bd561e4333a6c0a521370ee",
    "tensors": [
     {
      "name": "input_layernorm_gamma",
@@ -32,7 +33,7 @@
       1,
       256
      ],
-     "offset": 0,
+     "offset": 2104,
      "bytes": 512
     },
     {
@@ -43,7 +44,7 @@
       512,
       128
      ],
-     "offset": 512,
+     "offset": 2616,
      "bytes": 65536
     },
     {
@@ -54,7 +55,7 @@
       512,
       1
      ],
-     "offset": 66048,
+     "offset": 68152,
      "bytes": 2048
     },
     {
@@ -66,7 +67,7 @@
       1,
       64
      ],
-     "offset": 68096,
+     "offset": 70200,
      "bytes": 128
     },
     {
@@ -78,7 +79,7 @@
       1,
       64
      ],
-     "offset": 68224,
+     "offset": 70328,
      "bytes": 128
     },
     {
@@ -89,7 +90,7 @@
       256,
       128
      ],
-     "offset": 68352,
+     "offset": 70456,
      "bytes": 32768
     },
     {
@@ -100,7 +101,7 @@
       256,
       1
      ],
-     "offset": 101120,
+     "offset": 103224,
      "bytes": 1024
     },
     {
@@ -111,7 +112,7 @@
       1,
       256
      ],
-     "offset": 102144,
+     "offset": 104248,
      "bytes": 512
     },
     {
@@ -122,7 +123,7 @@
       512,
       128
      ],
-     "offset": 102656,
+     "offset": 104760,
      "bytes": 65536
     },
     {
@@ -133,7 +134,7 @@
       512,
       1
      ],
-     "offset": 168192,
+     "offset": 170296,
      "bytes": 2048
     },
     {
@@ -144,7 +145,7 @@
       256,
       128
      ],
-     "offset": 170240,
+     "offset": 172344,
      "bytes": 32768
     },
     {
@@ -155,7 +156,7 @@
       256,
       1
      ],
-     "offset": 203008,
+     "offset": 205112,
      "bytes": 1024
     }
    ],
@@ -169,9 +170,9 @@
    }
   },
   {
-   "file": "layer_001.bin",
-   "bytes": 204032,
-   "sha256": "684a5d5ae489851bbd5492419c96c8577d60365f89f73092918cdebf24c10e28",
+   "file": "layer_001.safetensors",
+   "bytes": 206136,
+   "sha256": "c0c819c0a9c1be479ee43952dc407bc090ee610a7b6522d248994a728bd35792",
    "tensors": [
     {
      "name": "input_layernorm_gamma",
@@ -181,7 +182,7 @@
       1,
       256
      ],
-     "offset": 0,
+     "offset": 2104,
      "bytes": 512
     },
     {
@@ -192,7 +193,7 @@
       512,
       128
      ],
-     "offset": 512,
+     "offset": 2616,
      "bytes": 65536
     },
     {
@@ -203,7 +204,7 @@
       512,
       1
      ],
-     "offset": 66048,
+     "offset": 68152,
      "bytes": 2048
     },
     {
@@ -215,7 +216,7 @@
       1,
       64
      ],
-     "offset": 68096,
+     "offset": 70200,
      "bytes": 128
     },
     {
@@ -227,7 +228,7 @@
       1,
       64
      ],
-     "offset": 68224,
+     "offset": 70328,
      "bytes": 128
     },
     {
@@ -238,7 +239,7 @@
       256,
       128
      ],
-     "offset": 68352,
+     "offset": 70456,
      "bytes": 32768
     },
     {
@@ -249,7 +250,7 @@
       256,
       1
      ],
-     "offset": 101120,
+     "offset": 103224,
      "bytes": 1024
     },
     {
@@ -260,7 +261,7 @@
       1,
       256
      ],
-     "offset": 102144,
+     "offset": 104248,
      "bytes": 512
     },
     {
@@ -271,7 +272,7 @@
       512,
       128
      ],
-     "offset": 102656,
+     "offset": 104760,
      "bytes": 65536
     },
     {
@@ -282,7 +283,7 @@
       512,
       1
      ],
-     "offset": 168192,
+     "offset": 170296,
      "bytes": 2048
     },
     {
@@ -293,7 +294,7 @@
       256,
       128
      ],
-     "offset": 170240,
+     "offset": 172344,
      "bytes": 32768
     },
     {
@@ -304,7 +305,7 @@
       256,
       1
      ],
-     "offset": 203008,
+     "offset": 205112,
      "bytes": 1024
     }
    ],
@@ -318,9 +319,9 @@
    }
   },
   {
-   "file": "layer_002.bin",
-   "bytes": 204032,
-   "sha256": "b3e32d6d7ac277ff9e81769bb12c11bcc12857b8a00dc505669587258d9ffb99",
+   "file": "layer_002.safetensors",
+   "bytes": 206136,
+   "sha256": "b33c552548343f515c065cbc3edc4d1a4d8d5af6b68b6c9e9cac21add3cdb552",
    "tensors": [
     {
      "name": "input_layernorm_gamma",
@@ -330,7 +331,7 @@
       1,
       256
      ],
-     "offset": 0,
+     "offset": 2104,
      "bytes": 512
     },
     {
@@ -341,7 +342,7 @@
       512,
       128
      ],
-     "offset": 512,
+     "offset": 2616,
      "bytes": 65536
     },
     {
@@ -352,7 +353,7 @@
       512,
       1
      ],
-     "offset": 66048,
+     "offset": 68152,
      "bytes": 2048
     },
     {
@@ -364,7 +365,7 @@
       1,
       64
      ],
-     "offset": 68096,
+     "offset": 70200,
      "bytes": 128
     },
     {
@@ -376,7 +377,7 @@
       1,
       64
      ],
-     "offset": 68224,
+     "offset": 70328,
      "bytes": 128
     },
     {
@@ -387,7 +388,7 @@
       256,
       128
      ],
-     "offset": 68352,
+     "offset": 70456,
      "bytes": 32768
     },
     {
@@ -398,7 +399,7 @@
       256,
       1
      ],
-     "offset": 101120,
+     "offset": 103224,
      "bytes": 1024
     },
     {
@@ -409,7 +410,7 @@
       1,
       256
      ],
-     "offset": 102144,
+     "offset": 104248,
      "bytes": 512
     },
     {
@@ -420,7 +421,7 @@
       512,
       128
      ],
-     "offset": 102656,
+     "offset": 104760,
      "bytes": 65536
     },
     {
@@ -431,7 +432,7 @@
       512,
       1
      ],
-     "offset": 168192,
+     "offset": 170296,
      "bytes": 2048
     },
     {
@@ -442,7 +443,7 @@
       256,
       128
      ],
-     "offset": 170240,
+     "offset": 172344,
      "bytes": 32768
     },
     {
@@ -453,7 +454,7 @@
       256,
       1
      ],
-     "offset": 203008,
+     "offset": 205112,
      "bytes": 1024
     }
    ],
@@ -467,9 +468,9 @@
    }
   },
   {
-   "file": "final_norm.bin",
-   "bytes": 512,
-   "sha256": "1bd39950417c0f12988022f7bf2ae65e2ce3c8cb81aae8a11f365e635a121590",
+   "file": "final_norm.safetensors",
+   "bytes": 728,
+   "sha256": "221973090130e186fee23b7751e28ba9be0d09ca2099b123a61ef1944c503f38",
    "tensors": [
     {
      "name": "final_norm_gamma",
@@ -479,16 +480,16 @@
       1,
       256
      ],
-     "offset": 0,
+     "offset": 216,
      "bytes": 512
     }
    ],
    "role": "final_norm"
   },
   {
-   "file": "embed.bin",
-   "bytes": 98304,
-   "sha256": "deba2b59af0531122dd71354d56d364889b73ece5ce76f27c571eda11098af19",
+   "file": "embed.safetensors",
+   "bytes": 98512,
+   "sha256": "fe13384c7ca48eeea46082d5cc8816a5391700f8a1025fc6fa45afbb1b27ebad",
    "tensors": [
     {
      "name": "lm_head_weight",
@@ -497,16 +498,16 @@
       384,
       256
      ],
-     "offset": 0,
+     "offset": 208,
      "bytes": 98304
     }
    ],
    "role": "embedding"
   },
   {
-   "file": "embed_scale.bin",
-   "bytes": 768,
-   "sha256": "f1c09129e62268711199acdd53717e63ac6a89ce24cdd2d7b4dd70299df6aa5a",
+   "file": "embed_scale.safetensors",
+   "bytes": 968,
+   "sha256": "ebd70135ee98794b8f66f41b25869e101ce76eda448e54c27eb94ed4a0be77e2",
    "tensors": [
     {
      "name": "lm_head_scale",
@@ -515,7 +516,7 @@
       384,
       1
      ],
-     "offset": 0,
+     "offset": 200,
      "bytes": 768
     }
    ],

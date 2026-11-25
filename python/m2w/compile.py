@@ -238,3 +238,15 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), tokenizer_files)
     progress(f"rewrote the graphs of {out}: variants {', '.join(index['summary']['variants'])}")
     return out
+
+
+def repack_package(package_dir, progress: Callable[[str], None] = print) -> Path:
+    """Convert the weight shards of an existing package to .safetensors (no quantization) and refresh the file index m2w.json."""
+    out = Path(package_dir)
+    manifest = pack.repack_to_safetensors(out / "weights")
+    index_old = json.loads((out / "m2w.json").read_text(encoding="utf-8"))
+    spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text(encoding="utf-8")))
+    plan = json.loads((out / "plan.json").read_text(encoding="utf-8"))
+    index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), [Path(f).name for f in index_old.get("tokenizer", [])])
+    progress(f"{out}: {len(manifest['files'])} weight shards are .safetensors files now ({index['summary']['weights_bytes'] / 2**20:.0f} MB)")
+    return out

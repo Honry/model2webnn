@@ -8,6 +8,7 @@
   "properties": {
     "format": { "const": "m2w-weights" },
     "version": { "const": 0 },
+    "container": { "const": "safetensors", "description": "every shard is a .safetensors file (int4 stored as U8 with the last axis halved); offsets in this manifest are absolute file offsets. Absent in older packages: raw *.bin shards" },
     "quant": {
       "type": "object",
       "properties": {
