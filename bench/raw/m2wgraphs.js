@@ -1,6 +1,7 @@
 // Times every graph of a package ON ITS OWN (random inputs, N back-to-back dispatches of the same tensors, one readback): which graph of a model is slow?
 // URL: m2wgraphs.html?package=../packages/aion-2.3b-i8/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
 //      m2wgraphs.html?package=../packages/gemma4-e4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Gemma 4: one block graph per attention kind, and the sum over the layers = an estimate of a decode step)
+//      m2wgraphs.html?package=../packages/qwen35-4b-pkg/&chunk=64&only=prefill_head&inputs=zero_state,pad,hidden_pad   (inputs of a real prompt instead of constant data: found a crash that constant data does not show)
 //      m2wgraphs.html?package=../packages/qwen35-4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Qwen3.5: linear_attention / full_attention blocks; chunk=128&only=prefill_block for the prefill)
 //      m2wgraphs.html?package=../packages/gemma4-e4b-pkg/&only=decode_head,decode_group,decode_tail,lm_head   (a Gemma 4 package built with --blocks-per-graph K: every decode group graph `decode_group <kinds>` and one
 //                                                                                                           ESTIMATED line per K = head + tail + lm_head + the sum over the group schedule)
@@ -11,6 +12,7 @@ const query = new URLSearchParams(location.search);
 const param = (name, fallback) => query.get(name) ?? fallback;
 const packageUrl = new URL(param("package", "../packages/aion-2.3b-i8/"), location.href).href, deviceType = param("device", "npu"), chain = +param("chain", 20), iterations = +param("iters", 5);
 const only = (query.get("only") || "").split(",").filter(Boolean);
+const inputFlags = new Set((query.get("inputs") || "").split(",").filter(Boolean)), padRows = +param("padRows", 45);
 const byId = (id) => document.getElementById(id);
 const start = performance.now();
 const log = (message) => { byId("out").textContent += `[${((performance.now() - start) / 1000).toFixed(1).padStart(6)} s] ${message}\n`; console.log(message); fetch("/log", { method: "POST", body: JSON.stringify({ experiment: "m2wgraphs", message }) }).catch(() => {}); };
@@ -32,6 +34,11 @@ function dataFor(spec) {
     if (spec.name.endsWith("_scale")) half.fill(0.002); else if (spec.name.endsWith("_gamma") || spec.name.endsWith("layer_scalar") || spec.name === "decay_rate" || spec.name === "valid_mask") half.fill(1);
     else if (spec.name === "conv_perm") { const size = spec.shape[1]; for (let i = 0; i < size; i++) half[i * size + i] = 1; }   // a permutation matrix: the identity
     else if (spec.name === "dt_bias") half.fill(0); else if (spec.role === "weight") half.fill(0.02); else if (spec.role === "activation" || spec.role === "kv") half.fill(0.05);
+    // inputs=zero_state,pad,hidden_pad (Qwen3.5 prefill graphs): the situation of a real prompt = zero conv / recurrent states, the first padRows rows are padding (valid_mask 0, the real conv_perm, zero hidden rows)
+    if (inputFlags.has("zero_state") && (spec.name === "conv_state" || spec.name === "recurrent_state")) half.fill(0);
+    if (inputFlags.has("pad") && spec.name === "valid_mask") half.fill(0, 0, padRows);
+    if (inputFlags.has("pad") && spec.name === "conv_perm") { half.fill(0); const size = spec.shape[1]; for (let r = 0; r < size; r++) half[r * size + (r < padRows ? 3 + r : r < padRows + 3 ? r - padRows : r)] = 1; }
+    if (inputFlags.has("hidden_pad") && ["hidden_states", "residual", "attention_output"].includes(spec.name)) half.fill(0, 0, padRows * spec.shape[2]);
     return spec.dataType === "float32" ? Float32Array.from(half) : half;
 }
 
