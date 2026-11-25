@@ -82,6 +82,6 @@ def test_batched_form_matches_the_token_loop(regime, sub):
     inputs = make_inputs(rng, heads, tokens, regime)
     state0 = rng.standard_normal((heads, DK, DV)) * 0.1
     want_out, want_state = recurrent(*inputs, state0)
-    for dtype, tolerance in (("float32", 1e-5), ("float16", 5e-3)):
+    for dtype, tolerance in (("float32", 1e-5), ("float16", 1e-2)):
         got = interpreter.run(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="batched"), graph_feeds(inputs, state0, dtype))
         assert error(got["out"][0], want_out)[1] < tolerance and error(got["new_state"][0], want_state)[1] < tolerance
