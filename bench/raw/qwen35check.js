@@ -39,11 +39,12 @@ async function main() {
     for (const phase of ["prefill", "decode"]) {
         const got = result[phase], entries = trace.entries[phase];
         const rows = phase === "prefill" ? (got[0].length / hidden) : 1, pad = phase === "prefill" ? rows - trace.last_chunk_valid : 0;
+        const referenceRows = phase === "prefill" ? entries[0].shape[1] : 1, referencePad = referenceRows - (phase === "prefill" ? trace.last_chunk_valid : 1);   // the trace may come from another chunk size
         log(`--- ${phase} (${phase === "prefill" ? `last chunk of ${rows} rows, ${trace.last_chunk_valid} real` : "1 row"}); hidden state entering each layer, real rows only`);
         let first = -1;
         for (let l = 0; l < got.length; l++) {
             const want = reference(entries[l]), have = got[l];
-            const c = l === got.length - 1 ? compare(have, want) : compare(have.subarray(pad * hidden), want.subarray(pad * hidden));
+            const c = l === got.length - 1 ? compare(have, want) : compare(have.subarray(pad * hidden), want.subarray(referencePad * hidden));
             const name = l === got.length - 1 ? "final hidden (after the last layer + final norm)" : `layer ${String(l).padStart(2)} (${kinds[l] === "linear_attention" ? "linear" : "full  "})`;
             const flag = c.rel > threshold || c.bad ? "  <== DEVIATES" : "";
             if (flag && first < 0) first = l;

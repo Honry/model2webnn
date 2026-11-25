@@ -24,7 +24,8 @@ from .gemma4 import build_lm_head_graph, lm_head_parts, lm_head_weight_specs  # 
 KINDS = ("linear_attention", "full_attention")
 CONV_TAPS = 4
 SUB_CHUNK = 16        # the Gated DeltaNet sub-chunk of a prefill chunk (chunk sizes must be multiples of it)
-L2_EPS = 1e-6
+L2_EPS = 1e-4   # HF: 1e-6. That is a float16 SUBNORMAL (the smallest normal is 6.1e-5): the NPU flushes it to 0 and l2_normalize of an all-zero row (the pad rows of a left-padded chunk) became 0 * inf = NaN,
+#                 which poisoned the whole recurrent state. 1e-4 changes the normalization of a real row (sum of squares ~ 1) by 1e-4 relative.
 
 
 # ---------------------------------------------------------------------------------------------------------------------
