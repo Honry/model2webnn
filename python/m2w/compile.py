@@ -260,6 +260,15 @@ def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, 
     return index
 
 
+def _bos_token(source: Path) -> str:
+    """The text of the BOS token from tokenizer_config.json ('' when there is none): templates of models like Gemma start with it."""
+    try:
+        token = json.loads((source / "tokenizer_config.json").read_text(encoding="utf-8")).get("bos_token")
+    except (OSError, ValueError):
+        return ""
+    return token.get("content", "") if isinstance(token, dict) else token or ""
+
+
 def _check_lengths(spec: arch.ModelSpec, max_lengths, progress) -> None:
     for L in max_lengths:
         if L % 64:
@@ -295,7 +304,7 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
 
     chat_file = None
     try:
-        fmt = chat_format.derive_chat_format(chat_format.load_template(source), spec.chat_template_kwargs)
+        fmt = chat_format.derive_chat_format(chat_format.load_template(source), spec.chat_template_kwargs, _bos_token(source))
         (out / "chat_format.json").write_text(json.dumps(fmt, indent=1, ensure_ascii=False), encoding="utf-8", newline="\n")
         chat_file = "chat_format.json"
     except (chat_format.ChatTemplateError, OSError, KeyError) as e:

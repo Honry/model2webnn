@@ -54,7 +54,7 @@ def load_template(model_dir) -> str:
     return value
 
 
-def render(template: str, messages: list, add_generation_prompt: bool, **kwargs) -> str:
+def render(template: str, messages: list, add_generation_prompt: bool, bos_token: str = "", **kwargs) -> str:
     env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=[_GenerationTag, "jinja2.ext.loopcontrols"])
     env.filters["tojson"] = lambda x, indent=None: json.dumps(x, ensure_ascii=False, indent=indent)
 
@@ -62,7 +62,7 @@ def render(template: str, messages: list, add_generation_prompt: bool, **kwargs)
         raise ChatTemplateError(message)
 
     env.globals.update(raise_exception=raise_exception, strftime_now=lambda fmt: f"<<date:{fmt}>>")
-    return env.from_string(template).render(messages=messages, add_generation_prompt=add_generation_prompt, bos_token="", eos_token="", **kwargs)
+    return env.from_string(template).render(messages=messages, add_generation_prompt=add_generation_prompt, bos_token=bos_token, eos_token="", **kwargs)
 
 
 def _between(text: str, before: str, after: Optional[str]) -> str:
@@ -70,8 +70,9 @@ def _between(text: str, before: str, after: Optional[str]) -> str:
     return text[start:] if after is None else text[start:text.index(after, start)]
 
 
-def derive_chat_format(template: str, template_kwargs: Optional[dict] = None) -> dict:
-    kw = dict(template_kwargs or {})
+def derive_chat_format(template: str, template_kwargs: Optional[dict] = None, bos_token: str = "") -> dict:
+    """bos_token: the text of the BOS token for templates that start with it (Gemma): it becomes part of first_prefix and the runtime tokenizes it as the special token."""
+    kw = dict(template_kwargs or {}, bos_token=bos_token)
     user = lambda c: {"role": "user", "content": c}  # noqa: E731
     assistant = lambda c: {"role": "assistant", "content": c}  # noqa: E731
     r1 = render(template, [user(USER)], True, **kw)
@@ -93,13 +94,13 @@ def derive_chat_format(template: str, template_kwargs: Optional[dict] = None) ->
         raise ChatTemplateError("unsupported template shape: text after an assistant message differs between the last and an earlier turn")
     next_user_prefix = between_assistant_and_user[len(assistant_suffix):]
     fmt = {
-        "format": FORMAT, "version": VERSION, "template_kwargs": kw,
+        "format": FORMAT, "version": VERSION, "template_kwargs": {k: v for k, v in kw.items() if k != "bos_token"},
         "first_prefix": first_prefix, "first_prefix_with_system": first_prefix_with_system, "user_suffix_generation_prompt": suffix_generation,
         "assistant_suffix": assistant_suffix, "next_user_prefix": next_user_prefix,
         # history form of the text between a user message and the assistant's answer (differs from the generation prompt when the template adds e.g. an empty <think> block)
         "user_suffix_assistant_prefix": between_user_and_assistant,
     }
-    verify_chat_format(template, fmt)
+    verify_chat_format(template, fmt, bos_token)
     return fmt
 
 
@@ -115,8 +116,8 @@ def compose(fmt: dict, turns: list, system: Optional[str] = None) -> str:
     return out
 
 
-def verify_chat_format(template: str, fmt: dict) -> None:
-    kw = fmt["template_kwargs"]
+def verify_chat_format(template: str, fmt: dict, bos_token: str = "") -> None:
+    kw = dict(fmt["template_kwargs"], bos_token=bos_token)
     convo = [("Hello there", "Hi! How can I help?"), ("Tell me a joke", None)]
     for system in (None, "Be brief."):
         messages = ([{"role": "system", "content": system}] if system else []) + [

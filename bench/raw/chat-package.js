@@ -2,7 +2,7 @@
 // behind the same interface the page already uses for the hand-written Qwen3 graphs:  { getSession, currentSession, generate, sharedBuildMs, countPromptTokens }.
 // What a package offers is fixed when it is compiled (max lengths, prefill chunks, graph variants = KV protocol x compute type x staging rows, blocks per graph): the page offers exactly that,
 // and a change of any session option rebuilds the graphs of the loaded model (LLM.reconfigure) while the weights stay on the device.
-import { LLM, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
+import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
 
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 const packagesUrl = new URL("../packages/", import.meta.url);
@@ -96,7 +96,7 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         if (llm) await llm.reconfigure(session);
         else {
             const query = new URLSearchParams(location.search);   // ?parallelDownloads=4&downloadSegments=4: see download.html for good values
-            llm = await LLM.load(url, { device: deviceType, parallelDownloads: +query.get("parallelDownloads") || undefined, downloadSegments: +query.get("downloadSegments") || undefined, ...session });
+            llm = await loadModel(url, { device: deviceType, parallelDownloads: +query.get("parallelDownloads") || undefined, downloadSegments: +query.get("downloadSegments") || undefined, ...session });
         }
         const variant = llm.variant, sizes = llm.chunkSizes.join("+");
         byId("pastLengthLabel").textContent = String(maxLength - 1); byId("chunkSizeLabel").textContent = sizes;

@@ -1,7 +1,7 @@
 // Browser test page for the model2webnn runtime (src/runtime, built to lib/runtime by `npm run build:lib`): loads a package written by `m2w compile`, checks it against the tokens the
 // Python reference produced (verification.json), and chats. URL parameters pre-fill the form: ?package=..&device=npu&maxLength=1152&chunk=64&bpg=1&variant=onehot-float32&pbpg=1&auto=check|chat
 // (chunk may list several sizes: 64,128; empty variant / chunk = what verification.json was made with, else the package defaults)
-import { LLM, UrlSource, CachedSource, openPackage, chat, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
+import { loadModel, UrlSource, CachedSource, openPackage, chat, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
 
 const query = new URLSearchParams(location.search);
 const byId = (id) => document.getElementById(id);
@@ -36,7 +36,7 @@ async function load() {
         lastStage = p.stage;
     };
     log(`loading ${packageUrl()} on ${options.device}`);
-    llm = await LLM.load(packageUrl(), options);
+    llm = await loadModel(packageUrl(), options);
     const m = llm.pkg.model;
     log(`READY: ${m.architecture}, ${m.num_layers} layers, max length ${llm.maxLength}, chunks ${llm.chunkSizes.join('+')}, variant ${llm.variant.id}; load ${(llm.stats.loadMs / 1000).toFixed(1)} s, graph build ${(llm.stats.buildMs / 1000).toFixed(1)} s`);
     setStatus("ready");

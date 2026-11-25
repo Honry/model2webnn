@@ -27,6 +27,13 @@ def test_qwen3_format_with_thinking_disabled_matches_the_hard_coded_prompt_of_th
     assert C.compose(fmt, [("Hello", "Hi"), ("Bye", None)]).endswith("Hi<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")
 
 
+def test_gemma4_format_starts_with_the_bos_token():
+    fmt = C.derive_chat_format((FIXTURES / "gemma4_chat_template.jinja").read_text(), {}, "<bos>")
+    assert C.compose(fmt, [("Hello", None)]) == "<bos><|turn>user\nHello<turn|>\n<|turn>model\n"
+    assert C.compose(fmt, [("Hello", "Hi"), ("Bye", None)]) == "<bos><|turn>user\nHello<turn|>\n<|turn>model\nHi<turn|>\n<|turn>user\nBye<turn|>\n<|turn>model\n"
+    assert fmt["first_prefix_with_system"] == "<bos><|turn>system\n<<system>><turn|>\n<|turn>user\n"
+
+
 def test_unrenderable_template_is_reported():
     with pytest.raises(C.ChatTemplateError):
         C.derive_chat_format("{{ messages | length }}")
