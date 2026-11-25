@@ -117,9 +117,46 @@ def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, 
     return (b.concat(outs, 2) if len(outs) > 1 else outs[0]), state
 
 
+def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str):
+    """The same recurrence with the work that does NOT depend on the state done for all sub-chunks at once. Inside a sub-chunk the decay matrix, A, the triangular solve (value, k_cumdecay),
+    q.k^T and the decayed keys only need q, k, v, g, beta: they run with the n = T / sub sub-chunks as a batch dimension, so the solve costs `sub` dependent steps for the whole prefill chunk
+    instead of T. Only the state travels from sub-chunk to sub-chunk: ~10 dependent operators per sub-chunk."""
+    heads, total, dk, dv = q.shape[1], q.shape[2], q.shape[3], v.shape[3]
+    n = total // sub
+    assert total % sub == 0
+    fold = lambda x, width: b.reshape(x, [1, heads * n, sub, width])               # [1,H,T,w] -> [1,H*n,C,w]: sub-chunk s of head h is batch h * n + s
+    q4, k4, v4, g4, beta4 = fold(q, dk), fold(k, dk), fold(v, dv), fold(g, 1), fold(beta, 1)
+    incl, strict = _tri(b, sub, dtype, False), _tri(b, sub, dtype, True)
+    gc = b.matmul(incl, g4)
+    gc_row = b.transpose(gc, [0, 1, 3, 2])
+    decay = b.mul(b.exp(b.mul(b.sub(gc, gc_row), incl)), incl)
+    k_t = b.transpose(k4, [0, 1, 3, 2])
+    k_beta, v_beta = b.mul(k4, beta4), b.mul(v4, beta4)
+    a = b.mul(b.mul(b.matmul(k_beta, k_t), decay), strict)
+    gate = b.exp(gc)
+    solved = forward_substitution(b, a, b.concat([v_beta, b.mul(k_beta, gate)], 3), dtype)
+    value, k_cumdecay = b.slice(solved, [0, 0, 0, 0], [1, heads * n, sub, dv]), b.slice(solved, [0, 0, 0, dv], [1, heads * n, sub, dk])
+    q_gate = b.mul(q4, gate)
+    attn = b.mul(b.matmul(q4, k_t), decay)                                          # q k^T * decay, lower incl. the diagonal
+    g_last = b.slice(gc, [0, 0, sub - 1, 0], [1, heads * n, 1, 1])
+    k_decayed_t = b.transpose(b.mul(k4, b.exp(b.sub(g_last, gc))), [0, 1, 3, 2])    # [1,H*n,dk,C]
+    decay_total = b.exp(g_last)
+    split = lambda x: b.reshape(x, [1, heads, n] + list(x.shape[2:]))              # [1,H*n,r,c] -> [1,H,n,r,c]
+    value5, kcd5, qg5, attn5, kdt5, total5 = split(value), split(k_cumdecay), split(q_gate), split(attn), split(k_decayed_t), split(decay_total)
+    pick = lambda x, s: b.slice(x, [0, 0, s, 0, 0], [1, heads, 1] + list(x.shape[3:]))
+    state5 = b.reshape(state, [1, heads, 1, dk, dv])
+    outs = []
+    for s in range(n):
+        v_new = b.sub(pick(value5, s), b.matmul(pick(kcd5, s), state5))
+        outs.append(b.add(b.matmul(pick(qg5, s), state5), b.matmul(pick(attn5, s), v_new)))
+        state5 = b.add(b.mul(state5, pick(total5, s)), b.matmul(pick(kdt5, s), v_new))
+    out = b.concat(outs, 2) if n > 1 else outs[0]
+    return b.reshape(out, [1, heads, total, dv]), b.reshape(state5, [1, heads, dk, dv])
+
+
 def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    kind = f"b{min(base, sub)}" if solve == "neumann" else "subst"
+    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched"}[solve]
     b = GraphBuilder(name or f"gdn_core_t{tokens}_c{sub}_{kind}_{dtype}{'_probe' if probe else ''}")
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
@@ -128,7 +165,10 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     beta = b.input("beta", dtype, [1, heads, tokens, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
     probes = {} if probe else None
-    out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
+    if solve == "batched":
+        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype)
+    else:
+        out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
     for key, value in (probes or {}).items():
         b.output(f"p_{key}", value)
     b.graph.meta.update(sub=sub, base=min(base, sub), solve=solve)

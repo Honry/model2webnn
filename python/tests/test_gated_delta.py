@@ -72,3 +72,16 @@ def test_decode_step_styles_agree(style):
     want_out, want_state = recurrent(*inputs, state0)
     got = interpreter.run(build_recurrent_graph(4, DK, DV, "float32", style=style), graph_feeds(inputs, state0, "float32"))
     assert error(got["out"][0], want_out)[1] < 1e-5 and error(got["new_state"][0], want_state)[1] < 1e-5
+
+
+@pytest.mark.parametrize("regime", ["mixed", "mixed-corr"])
+@pytest.mark.parametrize("sub", [16, 32, 64])
+def test_batched_form_matches_the_token_loop(regime, sub):
+    rng = np.random.default_rng(17)
+    heads, tokens = 2, 128
+    inputs = make_inputs(rng, heads, tokens, regime)
+    state0 = rng.standard_normal((heads, DK, DV)) * 0.1
+    want_out, want_state = recurrent(*inputs, state0)
+    for dtype, tolerance in (("float32", 1e-5), ("float16", 5e-3)):
+        got = interpreter.run(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="batched"), graph_feeds(inputs, state0, dtype))
+        assert error(got["out"][0], want_out)[1] < tolerance and error(got["new_state"][0], want_state)[1] < tolerance
