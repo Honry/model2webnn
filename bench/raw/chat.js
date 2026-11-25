@@ -23,7 +23,7 @@
 // URL parameters (long name | legacy alias; the session options kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, prefillChunkSizes, computeType can also be picked on the page):
 //   device=npu|gpu     maxLength = 1152 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = 64     layers|L = 36
 //   prompt=...         autoRun|auto = 1 (load immediately, generate once, finish; otherwise the page waits for the "Load model" button)
-//   fuseKvUpdate=0 (separate KV-update graphs instead of the default in-graph update)   kvStyle=staged (default: decode updates a small staging buffer, flushed into the main cache every stagingRows=64 steps) | onehot (whole-cache update) | scatterND (in-graph KV update as scatterND, value cache in natural layout)   kvInPlace=1 (KV update writes into the tensor it reads, no second cache)   tag=<label for the result file>     parallelDownloads=6 (weight files downloaded at the same time into the OPFS cache)
+//   kvStyle=staged (default: decode updates a small staging buffer, flushed into the main cache every stagingRows=64 steps) | onehot (whole-cache update) | scatterND (in-graph KV update as scatterND, value cache in natural layout)   kvInPlace=1 (KV update writes into the tensor it reads, no second cache)   tag=<label for the result file>     parallelDownloads=6 (weight files downloaded at the same time into the OPFS cache)
 //   matmulStyle|mm = gemm|matmul    zeroPoint|zp = const|none    dequantStyle|deq = dequantizeLinear|castMultiply|scaleAfterMatmul
 //   computeType|dt = float32 (default) | float16 (no f32 inside the graphs; the RMSNorm x^2 can overflow where it is not fused, e.g. on a GPU)
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
@@ -56,9 +56,8 @@ const profileEnabled = param("profile", null, "0") === "1";
 // scatterIndexType=int32|int64: the data type of the write index of kvStyle=tensorScatter (the op follows ONNX TensorScatter, whose write_indices are int64)
 const scatterIndexType = param("scatterIndexType", null, "int32") === "int64" ? "int64" : "int32";
 const writeIndexData = (row) => (scatterIndexType === "int64" ? BigInt64Array.of(BigInt(row)) : Int32Array.of(row));
-// fuseKvUpdate (default 1): the head/block graphs update the KV cache themselves (extra inputs/outputs), there is no separate KV-update dispatch
-const fuseKvUpdate = param("fuseKvUpdate", null, "1") !== "0";
-// kvStyle=scatterND (experiment, needs fuseKvUpdate): the in-graph KV update is a scatterND of the new rows (kv_indices input) instead of the one-hot
+// the head / block graphs update the KV cache themselves (extra inputs / outputs): there is no separate KV-update dispatch (only the flush of the staged KV cache)
+// kvStyle=scatterND (experiment): the in-graph KV update is a scatterND of the new rows (kv_indices input) instead of the one-hot
 // multiply-add; the value cache then has the natural layout [1,kvHeads,T,128] like the key cache. Combine with kvInPlace=1 for "same tensor in and out".
 // kvStyle: staged (DEFAULT, decode only; see below) | onehot (the whole-cache update: past*keep + selector@new) | broadcast (decode: selector*new, no matmul) | select (decode: where(selector>0, new, past))
 // attendInCache=1: attention reads the updated cache (length P) instead of concat(cache, new rows) (length P+S); always the case for scatterND
@@ -87,10 +86,10 @@ const parseChunkSizes = (text) => String(text ?? "").split(",").map(Number).filt
 // requested: { kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph (0 = same as blocksPerGraph), chunkSizes, computeType }
 function applySessionOptions(requested) {
     kvStyle = SESSION_KV_STYLES.includes(requested.kvStyle) ? requested.kvStyle : "staged";
-    scatterKv = fuseKvUpdate && kvStyle === "scatterND";
-    tensorScatterKv = fuseKvUpdate && kvStyle === "tensorScatter";   // MLGraphBuilder.tensorScatter(cache, rows, write_index, {axis: 2}): ONE start row per dispatch, the rows go in contiguously (see writePrefillChunkInputsTensorScatter)
-    attendInCache = fuseKvUpdate && (scatterKv || tensorScatterKv || param("attendInCache", null, "0") === "1");
-    stagedKv = fuseKvUpdate && kvStyle === "staged";
+    scatterKv = kvStyle === "scatterND";
+    tensorScatterKv = kvStyle === "tensorScatter";   // MLGraphBuilder.tensorScatter(cache, rows, write_index, {axis: 2}): ONE start row per dispatch, the rows go in contiguously (see writePrefillChunkInputsTensorScatter)
+    attendInCache = scatterKv || tensorScatterKv || param("attendInCache", null, "0") === "1";
+    stagedKv = kvStyle === "staged";
     stagingRows = requested.stagingRows;
     naturalValueLayout = stagedKv || scatterKv || tensorScatterKv || param("valueLayout", null, "transposed") === "natural";   // staged needs it: with the transposed value cache the NPU compiler returns NaN for concat(main, staging) along the last axis
     prefillGuard = !naturalValueLayout || param("prefillGuard", null, "0") === "1" ? "values" : null;
@@ -100,7 +99,7 @@ function applySessionOptions(requested) {
     computeType = requested.computeType === "float16" ? "float16" : "float32";
     graphOptions = {
         matmulStyle: param("matmulStyle", "mm", "gemm"), zeroPoint: param("zeroPoint", "zp", "const"),
-        dequantStyle: param("dequantStyle", "deq", "dequantizeLinear"), computeType, fuseKvUpdate, ...(kvStyle !== "onehot" ? { kvStyle } : {}), ...(attendInCache ? { attendInCache: true } : {}), ...(tensorScatterKv ? { scatterIndexType } : {}), ...(stagedKv ? { stagingRows } : {}), ...(naturalValueLayout ? { valueLayout: "natural" } : {}),
+        dequantStyle: param("dequantStyle", "deq", "dequantizeLinear"), computeType, fuseKvUpdate: true, ...(kvStyle !== "onehot" ? { kvStyle } : {}), ...(attendInCache ? { attendInCache: true } : {}), ...(tensorScatterKv ? { scatterIndexType } : {}), ...(stagedKv ? { stagingRows } : {}), ...(naturalValueLayout ? { valueLayout: "natural" } : {}),
     };
 }
 const sessionOptionKey = () => [kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, computeType].join("|");
@@ -134,7 +133,7 @@ function log(eventName, message, fields = {}) {
     byId("log").textContent += `[${elapsed} s] ${message}\n`;
     byId("log").scrollTop = byId("log").scrollHeight;
     if (eventName === "fatal") byId("log").closest("details")?.setAttribute("open", "");
-    const record = JSON.stringify({ experiment: "chat", tag: resultTag, device: deviceType, layers: layerCount, weight_format: weightFormat, kv_in_place: keyValueInPlace, fuse_kv_update: fuseKvUpdate, kv_style: kvStyle, value_layout: naturalValueLayout ? 'natural' : 'transposed', blocks_per_graph: blocksPerGraph, ...graphOptions, event: eventName, message, ...fields });
+    const record = JSON.stringify({ experiment: "chat", tag: resultTag, device: deviceType, layers: layerCount, weight_format: weightFormat, kv_in_place: keyValueInPlace, kv_style: kvStyle, value_layout: naturalValueLayout ? 'natural' : 'transposed', blocks_per_graph: blocksPerGraph, ...graphOptions, event: eventName, message, ...fields });
     console.log(record);
     fetch("/log", { method: "POST", body: record }).catch(() => {});
 }
@@ -215,7 +214,9 @@ const keyValueCacheMegabytes = (maxLength) => (layerCount * 2 /* key+value */ * 
 
 // Loads everything that does not depend on max length / chunk size and returns the functions the page needs.
 async function loadSharedModel() {
-    if (fuseKvUpdate) for (const id of ["prefill-kv_update", "decode-kv_update"]) byId(id).innerHTML = "KV UPDATE fused into HEAD / BLOCK (fuseKvUpdate=1): no separate dispatch";
+    document.querySelectorAll(".hiddenSize").forEach((e) => (e.textContent = hiddenSize));
+    document.querySelectorAll(".vocabSize").forEach((e) => (e.textContent = vocabularySize));
+    document.querySelectorAll(".cacheLayerCount").forEach((e) => (e.textContent = layerCount));
     document.querySelectorAll(".layerCount").forEach((e) => (e.textContent = layerCount));
     document.querySelectorAll(".layerCountMinusOne").forEach((e) => (e.textContent = layerCount - 1));
 
@@ -395,8 +396,6 @@ async function loadSharedModel() {
     log("weights_loaded", `Loaded weights of ${layerCount} layers (${seconds(performance.now() - stepStart)})` +
         (weightFormat === "float16" ? `; build-time int4 -> f16 dequantization ${seconds(dequantizeMs)} (${dequantizeOnHost ? "on the host" : "on the device"})` : ""),
         { dequantize_ms: Math.round(dequantizeMs), dequantize_on_host: dequantizeOnHost, tensor_copy_ms: Math.round(mergeCopyMs), tensor_create_and_upload_ms: Math.round(mergeUploadMs), tensor_create_ms: Math.round(mergeCreateMs) });
-    if (weightFormat === "float16") setCell("sum-dequantize", seconds(dequantizeMs), `${dequantizeOnHost ? "on the host" : "on the device, output kept as MLTensors"}; included in "Load weights"`);
-    else setCell("sum-dequantize", "not used", "int4 weights stay int4 and are dequantized inside the graphs");
     const pickWeights = (layer, specs) => Object.fromEntries(specs.map(([name]) => [name, layerWeights[layer][name]]));
     const attentionWeights = (layer) => pickWeights(layer, attentionWeightSpecs());
     const feedForwardWeights = (layer) => pickWeights(layer, feedForwardWeightSpecs());
@@ -414,8 +413,7 @@ async function loadSharedModel() {
         for (let layer = 0; layer < layerCount; layer++) {
             state.residuals.push(await createTensor("float16", [1, sequenceLength, hiddenSize], { readable: profileEnabled }));
             state.attentionOutputs.push(await createTensor("float16", [1, sequenceLength, attentionWidth]));
-            state.presentRows.push(fuseKvUpdate ? {} : { present_key: await createTensor("float16", [1, numKeyValueHeads, sequenceLength, headDim]),
-                                     present_value: await createTensor("float16", naturalValueLayout ? [1, numKeyValueHeads, sequenceLength, headDim] : [1, numKeyValueHeads, headDim, sequenceLength]) });
+            state.presentRows.push({});
         }
         state.finalHiddenStates = await createTensor("float16", [1, 1, hiddenSize], { readable: profileEnabled });
         if (tensorScatterKv) state.kvWriteIndex = await createWritableTensor(scatterIndexType, [1]);   // first cache row this dispatch writes
@@ -473,13 +471,9 @@ async function loadSharedModel() {
                 const built = await buildGraph(label(`${phase}_${name}`, size), (b) => createGraph(b, settings), `time-${phase}-${name}`);
                 graphs[name] = built.graph; sessionBuildMs += built.buildMs;
             }
-            if (!fuseKvUpdate) {   // fused: the head/block graphs do the update themselves
-                const kvUpdate = await buildGraph(label(`${phase}_kv_update`, size), (b) => buildKvUpdateGraph(b, { sequenceLength: settings.sequenceLength, pastLength }), `time-${phase}-kv_update`);
-                graphs.kvUpdate = kvUpdate.graph; sessionBuildMs += kvUpdate.buildMs;
-            }
         }
         if (stagedKv) {   // flush graph: main cache <- the staging rows (same math as the prefill chunk update with S = stagingRows)
-            const flush = await buildGraph(label("kv_flush"), (b) => buildKvUpdateGraph(b, { sequenceLength: stagingRows, pastLength, valueLayout: naturalValueLayout ? "natural" : "transposed" }), "time-decode-kv_update");
+            const flush = await buildGraph(label("kv_flush"), (b) => buildKvUpdateGraph(b, { sequenceLength: stagingRows, pastLength, valueLayout: naturalValueLayout ? "natural" : "transposed" }), "time-decode-kv_flush");
             session.flushGraph = flush.graph; sessionBuildMs += flush.buildMs;
         }
         session.buildMs = sessionBuildMs;
@@ -588,17 +582,9 @@ async function loadSharedModel() {
         const stagedDecode = stagedKv && !isPrefill;   // decode with a staging buffer: the fused update writes the STAGING buffer, the main cache is only read
         const updatedCaches = stagedDecode ? session.stagingSpare : session.keyValueCacheSpare, currentCaches = stagedDecode ? session.stagingCache : session.keyValueCache;
         const stagingOfLayer = (layer) => (stagedDecode ? { staging_key: session.stagingCache[layer].key, staging_value: session.stagingCache[layer].value } : {});
-        const fusedInputs = !fuseKvUpdate ? {} : stagedDecode ? { staging_rows_to_keep: session.stagingSelectors.rowsToKeep, staging_row_selector: session.stagingSelectors.rowSelector } : tensorScatterKv ? { kv_write_index: state.kvWriteIndex } : scatterKv ? { kv_indices: state.kvIndices } : { ...(kvStyle === "select" && !isPrefill ? {} : { rows_to_keep: selectors.rowsToKeep }), row_selector: selectors.rowSelector };   // decode "select" graphs have no rows_to_keep input
-        const fusedOutputs = (layer) => (fuseKvUpdate ? { updated_key: updatedCaches[layer].key, updated_value: updatedCaches[layer].value } : {});
-        const updateKeyValueCache = (layer) => {
-            if (fuseKvUpdate) { [currentCaches[layer], updatedCaches[layer]] = [updatedCaches[layer], currentCaches[layer]]; return; }
-            dispatch(graphs.kvUpdate, {
-                past_key: session.keyValueCache[layer].key, past_value: session.keyValueCache[layer].value,
-                new_key: state.presentRows[layer].present_key, new_value: state.presentRows[layer].present_value,
-                rows_to_keep: selectors.rowsToKeep, row_selector: selectors.rowSelector,
-            }, { updated_key: session.keyValueCacheSpare[layer].key, updated_value: session.keyValueCacheSpare[layer].value });
-            [session.keyValueCache[layer], session.keyValueCacheSpare[layer]] = [session.keyValueCacheSpare[layer], session.keyValueCache[layer]];
-        };
+        const fusedInputs = stagedDecode ? { staging_rows_to_keep: session.stagingSelectors.rowsToKeep, staging_row_selector: session.stagingSelectors.rowSelector } : tensorScatterKv ? { kv_write_index: state.kvWriteIndex } : scatterKv ? { kv_indices: state.kvIndices } : { ...(kvStyle === "select" && !isPrefill ? {} : { rows_to_keep: selectors.rowsToKeep }), row_selector: selectors.rowSelector };   // decode "select" graphs have no rows_to_keep input
+        const fusedOutputs = (layer) => ({ updated_key: updatedCaches[layer].key, updated_value: updatedCaches[layer].value });
+        const updateKeyValueCache = (layer) => { [currentCaches[layer], updatedCaches[layer]] = [updatedCaches[layer], currentCaches[layer]]; };   // the graph wrote the updated cache into the spare tensors: swap
         const pastOfLayer = (layer) => ({ past_key: session.keyValueCache[layer].key, past_value: session.keyValueCache[layer].value });
         const shared = { rope_cos: state.ropeCos, rope_sin: state.ropeSin, attention_mask: state.attentionMask };
         const guardOutput = state.attentionGuard ? { attention_guard: state.attentionGuard } : {};
@@ -616,9 +602,8 @@ async function loadSharedModel() {
                 for (let j = 0; j < count; j++) {   // block j of the group: feed-forward half of layer start+j, attention half of layer start+j+1
                     const layer = start + j, prefix = `b${j}_`, attentionLayer = layer + 1;
                     for (const [name, tensor] of Object.entries({ ...feedForwardWeights(layer), ...attentionWeights(attentionLayer), ...pastOfLayer(attentionLayer), ...stagingOfLayer(attentionLayer) })) inputs[prefix + name] = tensor;
-                    if (!fuseKvUpdate) { outputs[prefix + "present_key"] = state.presentRows[attentionLayer].present_key; outputs[prefix + "present_value"] = state.presentRows[attentionLayer].present_value; }
                     if (state.attentionGuards) outputs[prefix + "attention_guard"] = state.attentionGuards[j];
-                    if (fuseKvUpdate) { outputs[prefix + "updated_key"] = updatedCaches[attentionLayer].key; outputs[prefix + "updated_value"] = updatedCaches[attentionLayer].value; }
+                    outputs[prefix + "updated_key"] = updatedCaches[attentionLayer].key; outputs[prefix + "updated_value"] = updatedCaches[attentionLayer].value;
                 }
                 dispatch(graphs.blockGroups[count], inputs, outputs);
                 for (let j = 0; j < count; j++) updateKeyValueCache(start + j + 1);
@@ -648,7 +633,7 @@ async function loadSharedModel() {
         highlight("stage-embedding", "stage-inputs");
         writeHostInputs();
         timing.hostPrepareMs = performance.now() - t; t = performance.now();
-        highlight(`phase-${phase}`, `${phase}-head`, `${phase}-block`, `${phase}-tail`, `${phase}-lm_head`, `${phase}-kv_update`);
+        highlight(`phase-${phase}`, `${phase}-head`, `${phase}-block`, `${phase}-tail`, `${phase}-lm_head`);
         enqueueForwardPass(session, phase, lastChunk);
         timing.enqueueMs = performance.now() - t; t = performance.now();
         if (!lastChunk) return { token: null, timing };        // non-final chunk: keep queueing, the next chunk's inputs are ordered after this work
@@ -779,7 +764,7 @@ async function loadSharedModel() {
     // Generation
     // -------------------------------------------------------------------------------------------------------------------
     const blockDispatchCount = () => (blocksPerGraph > 1 ? Math.ceil((layerCount - 1) / blocksPerGraph) : layerCount - 1);
-    const dispatchCountPerStep = () => 1 + blockDispatchCount() + 1 + 1 + (fuseKvUpdate ? 0 : layerCount);   // head + blocks + tail + lm_head (+ KV updates)
+    const dispatchCountPerStep = () => 1 + blockDispatchCount() + 1 + 1 + 0;   // head + blocks + tail + lm_head
     // profile=1: where does a decode step go? Re-runs the step the next token would take (same inputs, results are discarded; the real generation is over) in two ways:
     //  (a) segment by segment, each followed by a readTensor sync: head | blocks | tail | lm_head  -> JS enqueue time and device wait of every segment
     //  (b) as one chain with a single sync at the end, exactly like a normal step
@@ -896,7 +881,7 @@ async function loadSharedModel() {
         byId("summaryLine").textContent = `max length ${session.maxLength} · prompt ${tokenIds.length} tokens · ${generated.length} generated · total inference ${seconds(inferenceMs)}`;
         fillTimingTable([
             ["Host: inputs", rounded(average("hostPrepareMs")), "JavaScript work before the dispatches: embedding lookup + writing the step inputs", "host"],
-            ["Enqueue", rounded(average("enqueueMs")), `${dispatchCountPerStep()} dispatches (head, ${blockDispatches} block graph(s)${blocksPerGraph > 1 ? ` of up to ${blocksPerGraph} blocks` : ""}, tail, lm_head${fuseKvUpdate ? ", KV update fused" : `, ${layerCount} KV updates`}); only queued here`, "enqueue"],
+            ["Enqueue", rounded(average("enqueueMs")), `${dispatchCountPerStep()} dispatches (head, ${blockDispatches} block graph(s)${blocksPerGraph > 1 ? ` of up to ${blocksPerGraph} blocks` : ""}, tail, lm_head); only queued here`, "enqueue"],
             ["Device wait", rounded(average("deviceWaitMs")), "read logits: time until the device finished the whole chain", "device"],
             ["Host: argmax", rounded(average("samplingMs")), "greedy sampling over 151936 logits", "sample"],
             ["Total = TPOT", rounded(timePerOutputTokenMs), "time per generated token", "total"],
@@ -981,9 +966,9 @@ async function run() {
     }
     const updateOptionControls = () => {
         if (packageMode) { packageControls.lock(); return; }
-        stagingRowsSelect.disabled = kvStyleSelect.value !== "staged" || !fuseKvUpdate; kvStyleSelect.disabled = !fuseKvUpdate;
+        stagingRowsSelect.disabled = kvStyleSelect.value !== "staged";
     };
-    byId("fixedOptions").textContent = packageMode ? `Package: ${packageEntry.url}  (the options come from the package plan; the built-in JS graphs offer the full option set: choose "Qwen3-4B · built-in JS graphs")` : `Fixed at page load (URL): profile=${profileEnabled ? 1 : 0}  weightFormat=${weightFormat}  mergeProjections=${mergeProjections ? 1 : 0}  fuseKvUpdate=${fuseKvUpdate ? 1 : 0}  matmulStyle=${graphOptions.matmulStyle}  zeroPoint=${graphOptions.zeroPoint}  dequantStyle=${graphOptions.dequantStyle}  layers=${layerCount}`;
+    byId("fixedOptions").textContent = packageMode ? `Package: ${packageEntry.url}  (the options come from the package plan; the built-in JS graphs offer the full option set: choose "Qwen3-4B · built-in JS graphs")` : `Fixed at page load (URL): profile=${profileEnabled ? 1 : 0}  weightFormat=${weightFormat}  mergeProjections=${mergeProjections ? 1 : 0}  matmulStyle=${graphOptions.matmulStyle}  zeroPoint=${graphOptions.zeroPoint}  dequantStyle=${graphOptions.dequantStyle}  layers=${layerCount}`;
     byId("maxNewTokensInput").value = defaultMaxNewTokens;
     setStatus("choose max length and prefill chunk size, then press \"Load model\"");
 
@@ -1033,6 +1018,8 @@ async function run() {
             if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded }, { url: packageEntry.url, deviceType })
                 : await loadSharedModel();             // first time: tokenizer, weights, lm_head graph
             const session = await model.getSession(maxLength, chunkSize, options);   // builds the max-length / chunk-size / session-option specific graphs + KV cache
+            const stagedNow = packageMode ? session.variant?.kv_style === "staged" : stagedKv;   // the flush box of the pipeline exists for the staged KV cache only
+            byId("flushRow").style.display = stagedNow ? "" : "none"; byId("stagingRowsLabel").textContent = packageMode ? session.variant?.staging_rows ?? "" : stagingRows;
             const startupMs = performance.now() - loadStart, reused = !firstLoad && session === previousSession;
             setCell("sum-build", seconds(model.sharedBuildMs + session.buildMs), `shared ${seconds(model.sharedBuildMs)} + max-length / chunk / option specific ${seconds(session.buildMs)}`);
             setCell("sum-startup", seconds(startupMs), firstLoad ? "tokenizer + load weights + build graphs" : reused ? "same settings: the session was already loaded" : "reload: weights were already loaded, only the session graphs were rebuilt");

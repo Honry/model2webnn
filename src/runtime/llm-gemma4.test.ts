@@ -135,3 +135,15 @@ describe('Gemma 4 runtime on a validating mock of WebNN', () => {
     await expect(async () => { for await (const _ of llm.generate(Array(127).fill(5))) void _; }).rejects.toThrow(/KV cache holds 127/);
   });
 });
+
+describe('Gemma 4 per-graph build times', () => {
+  it('lists every graph, one block graph per attention kind', async () => {
+    const { llm } = await loaded({ chunkSize: 16 });
+    const labels = llm.stats.graphBuilds.map((g) => g.label);
+    expect(labels.filter((l) => l.startsWith('decode block'))).toHaveLength(4);
+    expect(labels).toContain('decode block full_attention_shared');
+    expect(labels).toContain('kv flush sliding_attention');
+    expect(labels).toContain('prefill c16 tail');
+    expect(labels[0]).toBe('lm_head');
+  });
+});

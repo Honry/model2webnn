@@ -222,7 +222,7 @@ export class LLM {
 
   /** Build the graphs of the resolved session (variant, max length, chunk sizes, groups). */
   private async buildGraphs(progress: Progress) {
-    const t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength);
+    const builds: { label: string; ms: number }[] = [], t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength);
     const table = plan.graphs[this.variant.id], decode = table.decode[key];
     const bytes = this.embedBytes;
     const external = (c: { external?: string }) => {
@@ -236,7 +236,9 @@ export class LLM {
       const doc: GraphDoc = JSON.parse(await source.text(path));
       const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
       const { inputs, outputs } = loadGraph(builder, doc, provider);
+      const started = performance.now();
       const graph = await builder.build(outputs);
+      builds.push({ label, ms: performance.now() - started });
       this.builtGraphs.push(graph);
       return { name: doc.name, graph, inputs: Object.keys(inputs), outputs: Object.keys(outputs) };
     };
@@ -259,6 +261,7 @@ export class LLM {
       });
     }
     this.stats.buildMs = performance.now() - t;
+    this.stats.graphBuilds = builds;
   }
 
   /** Change the session options of a loaded model: graphs are rebuilt and the state reallocated, the weights stay on the device. */
@@ -554,7 +557,7 @@ export class LLM {
       let t = performance.now();
       let logits = await this.prefill(tokens);
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
-        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length };
+        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
       t = performance.now();
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();

@@ -278,3 +278,16 @@ describe('reconfigure: other session options on a loaded model', () => {
     expect((await run(llm, prompt.slice(0, 21), 3)).length).toBe(3);   // still usable
   });
 });
+
+describe('per-graph build times', () => {
+  it('the stats list every graph of the session with its build time, in build order', async () => {
+    const { llm } = await loaded({ chunkSizes: [8, 16] });
+    const labels = llm.stats.graphBuilds.map((g) => g.label);
+    expect(labels).toEqual(['lm_head', 'decode head', 'decode block', 'decode tail', 'kv flush', 'prefill c8 head', 'prefill c8 block', 'prefill c8 tail', 'prefill c16 head', 'prefill c16 block', 'prefill c16 tail']);
+    expect(llm.stats.graphBuilds.every((g) => g.ms >= 0)).toBe(true);
+    await run(llm, prompt.slice(0, 5), 1);
+    expect(llm.stats.graphBuilds.length).toBe(11);   // kept when a generation resets the other stats
+    await llm.reconfigure({ variant: 'onehot-float32', chunkSizes: [16] });
+    expect(llm.stats.graphBuilds.map((g) => g.label)).toEqual(['lm_head', 'decode head', 'decode block', 'decode tail', 'prefill c16 head', 'prefill c16 block', 'prefill c16 tail']);
+  });
+});

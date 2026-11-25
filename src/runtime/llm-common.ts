@@ -21,8 +21,9 @@ export interface StepTiming { hostMs: number; enqueueMs: number; waitMs: number;
 export interface Stats {
   loadMs: number; buildMs: number; weightsMs: number; prefillMs: number; prefillChunks: number; promptTokens: number; decodeSteps: number; decodeMs: number; tpotMs: number;
   stepMs: number[]; steps: StepTiming[]; flushes: number; prefillPlan: number[];
+  graphBuilds: { label: string; ms: number }[];   // builder.build() time of every graph of the current session ("decode head", "prefill c256 block", "lm_head", ...)
 }
-export const emptyStats = (): Stats => ({ loadMs: 0, buildMs: 0, weightsMs: 0, prefillMs: 0, prefillChunks: 0, promptTokens: 0, decodeSteps: 0, decodeMs: 0, tpotMs: 0, stepMs: [], steps: [], flushes: 0, prefillPlan: [] });
+export const emptyStats = (): Stats => ({ loadMs: 0, buildMs: 0, weightsMs: 0, prefillMs: 0, prefillChunks: 0, promptTokens: 0, decodeSteps: 0, decodeMs: 0, tpotMs: 0, stepMs: [], steps: [], flushes: 0, prefillPlan: [], graphBuilds: [] });
 
 
 /** Starts the downloads in order, at most `window` ahead of the consumer (so the whole model is never held in memory at once). */

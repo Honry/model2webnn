@@ -65,7 +65,6 @@
   #sum-build, #sum-startup { color: #c792ea; }
   #sum-decode { color: #ffb454; }
   #sum-inference { color: #5af78e; }
-  #sum-dequantize { color: #8b929a; }
   #timingTable td.num { font-weight: 700; font-size: 16px; width: 80px; }
   #timingTable td.share { width: 42%; text-align: left; }
   .bar { display: inline-block; vertical-align: middle; width: calc(100% - 46px); height: 10px; background: #232830; border-radius: 5px; overflow: hidden; }
@@ -179,8 +178,7 @@
     <div class="title">Summary</div>
     <table id="summaryTable">
       <tr><th>phase</th><th>time</th></tr>
-      <tr><td data-tip="fetch the embedding table + 36 layers of weights and upload them to device MLTensors (network / disk bound)"><span class="dotted">Load weights</span></td><td id="sum-load">…</td></tr>
-      <tr><td data-tip="only with weightFormat=float16: one dequantization graph per projection shape, run once per layer while loading"><span class="dotted">Build-time int4 → f16</span></td><td id="sum-dequantize">…</td></tr>
+      <tr><td data-tip="fetch the embedding table + all layers of weights and upload them to device MLTensors (network / disk bound)"><span class="dotted">Load weights</span></td><td id="sum-load">…</td></tr>
       <tr><td data-tip="builder.build of every subgraph (decode + prefill head / block / tail, flush, lm_head)"><span class="dotted">Build (compile) graphs</span></td><td id="sum-build">…</td></tr>
       <tr><td data-tip="tokenizer + load weights + build, until the page is ready"><span class="dotted">Startup total</span></td><td id="sum-startup">…</td></tr>
       <tr><td data-tip="prompt → first token: host prep + all prefill dispatches + logits readback"><span class="dotted">Prefill (TTFT)</span></td><td id="sum-prefill">…</td></tr>
@@ -205,7 +203,7 @@
 
   <div class="row" id="hostRow">
     <div class="box host" id="stage-tokenizer">1. Tokenizer<small>chat template → token ids</small></div><div class="arrow">→</div>
-    <div class="box host" id="stage-embedding">2. Embedding lookup<small>u8 row → f16 hidden [1,S,2560]</small></div><div class="arrow">→</div>
+    <div class="box host" id="stage-embedding">2. Embedding lookup<small>int8 row × scale → f16 hidden [1,S,<span class="hiddenSize">2560</span>]</small></div><div class="arrow">→</div>
     <div class="box host" id="stage-inputs">3. Per-step inputs<small>rope cos/sin · mask · selectors</small></div>
   </div>
 
@@ -215,10 +213,7 @@
       <div class="box device" id="prefill-head">HEAD<small>layer 0 attention half</small><span class="time" id="time-prefill-head"></span></div><div class="arrow">→</div>
       <div class="box device" id="prefill-block">BLOCK × <span class="layerCountMinusOne">35</span><small>FFN of layer i + attention of layer i+1<br>(one graph, weights rebound per call)</small><span class="time" id="time-prefill-block"></span></div><div class="arrow">→</div>
       <div class="box device" id="prefill-tail">TAIL (last chunk)<small>last FFN + final RMSNorm, last row</small><span class="time" id="time-prefill-tail"></span></div><div class="arrow">→</div>
-      <div class="box device" id="prefill-lm_head">LM HEAD (last chunk)<small>hidden [1,1,2560] → logits f16</small><span class="time" id="time-lm_head"></span></div>
-    </div>
-    <div class="row">
-      <div class="box helper" id="prefill-kv_update">KV UPDATE × <span class="layerCount">36</span> per chunk<small>cache = old × rows_to_keep + row_selector @ new rows</small><span class="time" id="time-prefill-kv_update"></span></div>
+      <div class="box device" id="prefill-lm_head">LM HEAD (last chunk)<small>hidden [1,1,<span class="hiddenSize">2560</span>] → logits f16</small><span class="time" id="time-lm_head"></span></div>
     </div>
   </div>
 
@@ -228,15 +223,15 @@
       <div class="box device" id="decode-head">HEAD<small>layer 0 attention half</small><span class="time" id="time-decode-head"></span></div><div class="arrow">→</div>
       <div class="box device" id="decode-block">BLOCK × <span class="layerCountMinusOne">35</span><small>FFN of layer i + attention of layer i+1</small><span class="time" id="time-decode-block"></span></div><div class="arrow">→</div>
       <div class="box device" id="decode-tail">TAIL<small>last FFN + final RMSNorm</small><span class="time" id="time-decode-tail"></span></div><div class="arrow">→</div>
-      <div class="box device" id="decode-lm_head">LM HEAD<small>→ logits f16 [1,1,151936]</small></div>
+      <div class="box device" id="decode-lm_head">LM HEAD<small>→ logits f16 [1,1,<span class="vocabSize">151936</span>]</small></div>
     </div>
-    <div class="row">
-      <div class="box helper" id="decode-kv_update">KV UPDATE × <span class="layerCount">36</span><small>appends the new token's key/value row to each layer's cache</small><span class="time" id="time-decode-kv_update"></span></div>
+    <div class="row" id="flushRow" style="display:none">
+      <div class="box helper" id="decode-kv_flush">KV FLUSH × <span class="cacheLayerCount">36</span><small>every <span id="stagingRowsLabel">64</span> steps: staging buffer → main cache</small><span class="time" id="time-decode-kv_flush"></span></div>
     </div>
   </div>
 
   <div class="row">
-    <div class="box host" id="stage-readback">4. Read back logits<small>151936 values per step</small></div><div class="arrow">→</div>
+    <div class="box host" id="stage-readback">4. Read back logits<small><span class="vocabSize">151936</span> values per step</small></div><div class="arrow">→</div>
     <div class="box host" id="stage-sampling">5. Greedy sampling<small>argmax → next token → step 2</small></div>
   </div>
 </details>

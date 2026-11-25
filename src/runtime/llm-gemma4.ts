@@ -164,7 +164,7 @@ export class Gemma4LLM {
   }
 
   private async buildGraphs(progress: Progress, lmHead: { weight: Uint8Array; scale: Uint8Array }) {
-    const t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength), table = plan.graphs[this.variant.id];
+    const builds: { label: string; ms: number }[] = [], t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength), table = plan.graphs[this.variant.id];
     const decode = table.decode[key] as unknown as GemmaDecodeTable;
     // the lm_head graph binds the table as row blocks lm_head_weight_<i> / lm_head_scale_<i> when it is too big for one WebNN tensor: contiguous views of the table
     const external = (c: { external?: string; shape?: number[] }) => {
@@ -179,7 +179,9 @@ export class Gemma4LLM {
       const doc: GraphDoc = JSON.parse(await source.text(path));
       const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
       const { inputs, outputs } = loadGraph(builder, doc, provider);
+      const started = performance.now();
       const graph = await builder.build(outputs);
+      builds.push({ label, ms: performance.now() - started });
       this.builtGraphs.push(graph);
       return { name: doc.name, graph, inputs: Object.keys(inputs), outputs: Object.keys(outputs) };
     };
@@ -199,6 +201,7 @@ export class Gemma4LLM {
       this.prefillSets.set(size, { head: await build(files.head, `${label} head`), blocks: await blocks(files.blocks, label), tail: await build(files.tail, `${label} tail`), act: null as any, sel: null as any });
     }
     this.stats.buildMs = performance.now() - t;
+    this.stats.graphBuilds = builds;
   }
 
   /** Change the session options of a loaded model: graphs are rebuilt and the state reallocated, the weights stay on the device. */
@@ -444,7 +447,7 @@ export class Gemma4LLM {
       let t = performance.now();
       let logits = await this.prefill(tokens);
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
-        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length };
+        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
       t = performance.now();
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();

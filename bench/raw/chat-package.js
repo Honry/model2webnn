@@ -87,6 +87,29 @@ export async function loadPackageModel(ui, { url, deviceType }) {
     const format = pkg.chatFormat, stop = new Set(pkg.model.eos_token_ids);
     const promptIds = (text) => tokenizer.encode(format ? buildPrompt(format, [{ user: text }]) : text);
     let llm = null, current = null;
+    const model = pkg.model, cacheLayers = model.kv_producer?.length ? model.kv_producer.filter((p) => p < 0).length : model.num_layers;
+    document.querySelectorAll(".layerCount").forEach((e) => (e.textContent = model.num_layers));
+    document.querySelectorAll(".layerCountMinusOne").forEach((e) => (e.textContent = model.num_layers - 1));
+    document.querySelectorAll(".cacheLayerCount").forEach((e) => (e.textContent = cacheLayers));
+    document.querySelectorAll(".hiddenSize").forEach((e) => (e.textContent = model.hidden));
+    document.querySelectorAll(".vocabSize").forEach((e) => (e.textContent = model.vocab_padded));
+
+    /** the "Build (compile) graphs" table and the build time of every box of the pipeline, from the runtime's per-graph timings of the current session */
+    function showBuildTimes(builds) {
+        const table = byId("buildTable");
+        for (let i = table.rows.length - 1; i >= 1; i--) table.deleteRow(i);
+        document.querySelectorAll("#phase-prefill .time, #phase-decode .time").forEach((e) => (e.textContent = ""));
+        const boxes = new Map();   // pipeline element id -> { ms, count }
+        for (const { label, ms } of builds) {
+            const row = table.insertRow(); row.insertCell().textContent = label; row.insertCell().textContent = Math.round(ms);
+            const phase = label.startsWith("prefill") ? "prefill" : "decode";
+            const id = label === "lm_head" ? "time-lm_head" : /flush/.test(label) ? "time-decode-kv_flush" : /\bhead\b/.test(label) ? `time-${phase}-head` : /\bblock\b/.test(label) ? `time-${phase}-block` : /\btail\b/.test(label) ? `time-${phase}-tail` : null;
+            if (!id) continue;
+            const entry = boxes.get(id) ?? { ms: 0, count: 0 };
+            entry.ms += ms; entry.count++; boxes.set(id, entry);
+        }
+        for (const [id, { ms, count }] of boxes) { const element = byId(id); if (element) element.textContent = ` built in ${ui.seconds(ms)}${count > 1 ? ` (${count} graphs)` : ""}`; }
+    }
 
     // a session = max length + prefill chunk sizes + graph variant (KV protocol, staging rows, compute type) + blocks per graph; the first one loads the model (weights go to the device once),
     // every other one is LLM.reconfigure(): graphs are rebuilt, the weights stay.
@@ -109,12 +132,12 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         }
         const variant = llm.variant, sizes = llm.chunkSizes.join("+");
         byId("pastLengthLabel").textContent = String(maxLength - 1); byId("chunkSizeLabel").textContent = sizes;
+        showBuildTimes(llm.stats.graphBuilds);
         const kvText = variant.kv_style === "staged" ? `kv staged (${variant.staging_rows} rows)` : `kv ${variant.kv_style}`;
         const loadMs = llm.stats.loadMs, weightsMs = llm.stats.weightsMs, buildMs = llm.stats.buildMs;
         current = { key, maxLength, chunkSize: llm.chunkSize, chunkSizes: llm.chunkSizes, blocksPerGraph, prefillBlocksPerGraph, buildMs, weightsMs, loadMs, variant,
             label: `${pkg.model.architecture}: max length ${maxLength}, chunk ${sizes}, ${kvText}, ${variant.compute_type}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== 1 ? `/${prefillBlocksPerGraph}` : ""}` };
         if (!reused) setCell("sum-load", seconds(weightsMs), "download (or OPFS cache) + upload of the weights to the device");
-        setCell("sum-dequantize", "not used", "int4 weights stay int4 and are dequantized inside the graphs");
         log("session_ready", `Session ready: ${current.label}; ${reused ? "reconfigure" : "load"} ${seconds(reused ? buildMs : loadMs)} (weights ${seconds(weightsMs)}, graph build ${seconds(buildMs)})`,
             { max_length: maxLength, prefill_chunk_sizes: llm.chunkSizes, blocks_per_graph: blocksPerGraph, prefill_blocks_per_graph: prefillBlocksPerGraph, variant: variant.id, build_ms: Math.round(buildMs),
               weights_ms: Math.round(weightsMs), load_ms: Math.round(loadMs), reconfigured: reused, package: url });
