@@ -29,41 +29,222 @@
   ]
  },
  "profile": {
-  "compute_type": "float32",
   "zero_point": "const",
   "merge_projections": true,
-  "kv_style": "staged",
-  "staging_rows": 8,
-  "scatter_index_type": "int32",
   "lm_head_format": "int8-sym"
  },
+ "variants": [
+  {
+   "id": "staged-r8-float32",
+   "kv_style": "staged",
+   "compute_type": "float32",
+   "staging_rows": 8
+  },
+  {
+   "id": "staged-r8-float16",
+   "kv_style": "staged",
+   "compute_type": "float16",
+   "staging_rows": 8
+  },
+  {
+   "id": "onehot-float32",
+   "kv_style": "onehot",
+   "compute_type": "float32"
+  },
+  {
+   "id": "onehot-float16",
+   "kv_style": "onehot",
+   "compute_type": "float16"
+  },
+  {
+   "id": "tensorScatter-float32",
+   "kv_style": "tensorScatter",
+   "compute_type": "float32",
+   "scatter_index_type": "int32"
+  },
+  {
+   "id": "tensorScatter-float16",
+   "kv_style": "tensorScatter",
+   "compute_type": "float16",
+   "scatter_index_type": "int32"
+  }
+ ],
+ "default_variant": "staged-r8-float32",
  "max_lengths": [
   128
  ],
  "prefill_chunks": [
-  16
+  16,
+  8
  ],
- "staging_rows": 8,
  "blocks_per_graph": [
   1
  ],
+ "prefill_blocks_per_graph": [
+  1
+ ],
  "graphs": {
-  "lm_head": "graphs/lm_head.json",
-  "decode": {
-   "128": {
-    "head": "graphs/decode_head_L128.json",
-    "block": "graphs/decode_block_L128.json",
-    "tail": "graphs/decode_tail.json",
-    "flush": "graphs/kv_flush_L128.json",
-    "block_groups": {}
+  "staged-r8-float32": {
+   "lm_head": "graphs/staged-r8-float32/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/staged-r8-float32/decode_head_L128.json",
+     "block": "graphs/staged-r8-float32/decode_block_L128.json",
+     "tail": "graphs/staged-r8-float32/decode_tail.json",
+     "block_groups": {},
+     "flush": "graphs/staged-r8-float32/kv_flush_L128.json"
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/staged-r8-float32/prefill_head_L128_C16.json",
+      "block": "graphs/staged-r8-float32/prefill_block_L128_C16.json",
+      "tail": "graphs/staged-r8-float32/prefill_tail_C16.json",
+      "block_groups": {}
+     },
+     "8": {
+      "head": "graphs/staged-r8-float32/prefill_head_L128_C8.json",
+      "block": "graphs/staged-r8-float32/prefill_block_L128_C8.json",
+      "tail": "graphs/staged-r8-float32/prefill_tail_C8.json",
+      "block_groups": {}
+     }
+    }
    }
   },
-  "prefill": {
-   "128": {
-    "16": {
-     "head": "graphs/prefill_head_L128_C16.json",
-     "block": "graphs/prefill_block_L128_C16.json",
-     "tail": "graphs/prefill_tail_C16.json"
+  "staged-r8-float16": {
+   "lm_head": "graphs/staged-r8-float16/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/staged-r8-float16/decode_head_L128.json",
+     "block": "graphs/staged-r8-float16/decode_block_L128.json",
+     "tail": "graphs/staged-r8-float16/decode_tail.json",
+     "block_groups": {},
+     "flush": "graphs/staged-r8-float16/kv_flush_L128.json"
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/staged-r8-float16/prefill_head_L128_C16.json",
+      "block": "graphs/staged-r8-float16/prefill_block_L128_C16.json",
+      "tail": "graphs/staged-r8-float16/prefill_tail_C16.json",
+      "block_groups": {}
+     },
+     "8": {
+      "head": "graphs/staged-r8-float16/prefill_head_L128_C8.json",
+      "block": "graphs/staged-r8-float16/prefill_block_L128_C8.json",
+      "tail": "graphs/staged-r8-float16/prefill_tail_C8.json",
+      "block_groups": {}
+     }
+    }
+   }
+  },
+  "onehot-float32": {
+   "lm_head": "graphs/onehot-float32/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/onehot-float32/decode_head_L128.json",
+     "block": "graphs/onehot-float32/decode_block_L128.json",
+     "tail": "graphs/onehot-float32/decode_tail.json",
+     "block_groups": {}
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/onehot-float32/prefill_head_L128_C16.json",
+      "block": "graphs/onehot-float32/prefill_block_L128_C16.json",
+      "tail": "graphs/onehot-float32/prefill_tail_C16.json",
+      "block_groups": {}
+     },
+     "8": {
+      "head": "graphs/onehot-float32/prefill_head_L128_C8.json",
+      "block": "graphs/onehot-float32/prefill_block_L128_C8.json",
+      "tail": "graphs/onehot-float32/prefill_tail_C8.json",
+      "block_groups": {}
+     }
+    }
+   }
+  },
+  "onehot-float16": {
+   "lm_head": "graphs/onehot-float16/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/onehot-float16/decode_head_L128.json",
+     "block": "graphs/onehot-float16/decode_block_L128.json",
+     "tail": "graphs/onehot-float16/decode_tail.json",
+     "block_groups": {}
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/onehot-float16/prefill_head_L128_C16.json",
+      "block": "graphs/onehot-float16/prefill_block_L128_C16.json",
+      "tail": "graphs/onehot-float16/prefill_tail_C16.json",
+      "block_groups": {}
+     },
+     "8": {
+      "head": "graphs/onehot-float16/prefill_head_L128_C8.json",
+      "block": "graphs/onehot-float16/prefill_block_L128_C8.json",
+      "tail": "graphs/onehot-float16/prefill_tail_C8.json",
+      "block_groups": {}
+     }
+    }
+   }
+  },
+  "tensorScatter-float32": {
+   "lm_head": "graphs/tensorScatter-float32/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/tensorScatter-float32/decode_head_L128.json",
+     "block": "graphs/tensorScatter-float32/decode_block_L128.json",
+     "tail": "graphs/tensorScatter-float32/decode_tail.json",
+     "block_groups": {}
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/tensorScatter-float32/prefill_head_L128_C16.json",
+      "block": "graphs/tensorScatter-float32/prefill_block_L128_C16.json",
+      "tail": "graphs/tensorScatter-float32/prefill_tail_C16.json",
+      "block_groups": {}
+     },
+     "8": {
+      "head": "graphs/tensorScatter-float32/prefill_head_L128_C8.json",
+      "block": "graphs/tensorScatter-float32/prefill_block_L128_C8.json",
+      "tail": "graphs/tensorScatter-float32/prefill_tail_C8.json",
+      "block_groups": {}
+     }
+    }
+   }
+  },
+  "tensorScatter-float16": {
+   "lm_head": "graphs/tensorScatter-float16/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/tensorScatter-float16/decode_head_L128.json",
+     "block": "graphs/tensorScatter-float16/decode_block_L128.json",
+     "tail": "graphs/tensorScatter-float16/decode_tail.json",
+     "block_groups": {}
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/tensorScatter-float16/prefill_head_L128_C16.json",
+      "block": "graphs/tensorScatter-float16/prefill_block_L128_C16.json",
+      "tail": "graphs/tensorScatter-float16/prefill_tail_C16.json",
+      "block_groups": {}
+     },
+     "8": {
+      "head": "graphs/tensorScatter-float16/prefill_head_L128_C8.json",
+      "block": "graphs/tensorScatter-float16/prefill_block_L128_C8.json",
+      "tail": "graphs/tensorScatter-float16/prefill_tail_C8.json",
+      "block_groups": {}
+     }
     }
    }
   }
@@ -90,14 +271,13 @@
    "attention_mask"
   ]
  },
- "kv": {
-  "style": "staged",
-  "value_layout": "natural",
-  "main_cache_rows": "max_length - 1",
-  "staging_rows": 8,
-  "prefill": "chunks of the chunk size, the last chunk is left-padded; one-hot row selectors write the real rows",
-  "decode": "the new row goes into a staging buffer; attention reads concat(main cache, staging); flush graph moves the staging rows into the main cache every staging_rows steps"
+ "kv_protocols": {
+  "description": "how the KV cache is written and attended, by the kv_style of a variant (cache rows P = max_length - 1; row j holds position j; protocol.py / protocol.ts)",
+  "staged": "prefill: chunks of the chunk size, the last chunk is left-padded, one-hot row selectors write the real rows; decode: the new row goes into a staging buffer (staging_rows rows), attention reads concat(main cache, staging), the flush graph moves the staging rows into the main cache every staging_rows steps",
+  "onehot": "prefill as staged; decode: the graph writes the new row into the main cache with one-hot selectors (rows_to_keep / row_selector), attention reads concat(cache, new row)",
+  "tensorScatter": "prefill and decode: tensorScatter(cache, new rows, kv_write_index, axis 2), attention reads the updated cache; every chunk is full, the prompt padding is in FRONT of the prompt (cache rows 0..pad-1)"
  },
+ "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
  "logits": {
   "padded_vocab": 384,
   "vocab": 300,

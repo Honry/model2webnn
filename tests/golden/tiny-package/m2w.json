@@ -22,7 +22,8 @@
     "reduceMean",
     "transpose",
     "reshape",
-    "cast"
+    "cast",
+    "tensorScatter"
    ],
    "dataTypes": [
     "float16",
@@ -35,44 +36,314 @@
  },
  "files": [
   {
-   "path": "graphs/decode_block_L128.json",
-   "bytes": 12834,
-   "sha256": "def529411af889db0d4840052b269df7cd1881fd5bc3b2a69053bc19fc7cdbb9"
+   "path": "graphs/onehot-float16/decode_block_L128.json",
+   "bytes": 10837,
+   "sha256": "858169060fc7430c284f4c922e7bdb6256dedd1b81d69508071c02b4f5b70e67"
   },
   {
-   "path": "graphs/decode_head_L128.json",
-   "bytes": 9025,
-   "sha256": "e1c2672c271f1fd784bb7aad01e62ae920f554a96e5e4d1e6549d6200b5801ad"
+   "path": "graphs/onehot-float16/decode_head_L128.json",
+   "bytes": 7566,
+   "sha256": "842606e851a736503ab4d4d3971b196e5f3c48a8245fd119080a2889091b3085"
   },
   {
-   "path": "graphs/decode_tail.json",
+   "path": "graphs/onehot-float16/decode_tail.json",
+   "bytes": 4397,
+   "sha256": "4456ea8bd646179541c4073326b17a9dfb9bcc5f84d4003e630c27086941aa60"
+  },
+  {
+   "path": "graphs/onehot-float16/lm_head.json",
+   "bytes": 837,
+   "sha256": "4107cf14972ae693c90e35d15b4ea833f7be9338566fefffce92aedaf2376abb"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_block_L128_C16.json",
+   "bytes": 10871,
+   "sha256": "9796d639df7fd0d96298bb5e1120ba0e2353140d7a2ebf4b1b1d08a0a8f0f583"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_block_L128_C8.json",
+   "bytes": 10841,
+   "sha256": "f4e7c5871e48a94c8ad80a579050a71a7461019a4ae42056f2d042d4ded6ceb8"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_head_L128_C16.json",
+   "bytes": 7592,
+   "sha256": "3b33d2bdb176ee3f0e3944ba9402528e8aaa5552af94f7b4b9e3cd836161d0ef"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_head_L128_C8.json",
+   "bytes": 7570,
+   "sha256": "d36b12c509ad3db6dc9c23dd5522d0a7ac069fd380210129c8210bee92cdbf0d"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_tail_C16.json",
+   "bytes": 4510,
+   "sha256": "f716b156af4908715ead0386ffcb8f9a1afc4e72ba2e389c634bb4ccb73546d0"
+  },
+  {
+   "path": "graphs/onehot-float16/prefill_tail_C8.json",
+   "bytes": 4498,
+   "sha256": "d35dd8c33fc3374421d3be76b7d381cb441a64f4e3654714df3ef4ff0bc724e8"
+  },
+  {
+   "path": "graphs/onehot-float32/decode_block_L128.json",
+   "bytes": 12480,
+   "sha256": "4bd6758d0ec0f1944dc412e29fb9afbdfe077af173dcba3b68b3ebf783448084"
+  },
+  {
+   "path": "graphs/onehot-float32/decode_head_L128.json",
+   "bytes": 8675,
+   "sha256": "d297e1381c2e311683597802637119d463efc0f1dd703b529f9dea6acb315c19"
+  },
+  {
+   "path": "graphs/onehot-float32/decode_tail.json",
    "bytes": 5008,
    "sha256": "5c058454ba659fc0683b237e12961772788a23e5f60a045cc4ca0fd7974a53e0"
   },
   {
-   "path": "graphs/kv_flush_L128.json",
-   "bytes": 1125,
-   "sha256": "dbf339affefc40002d5cf086a4cf074f8540adb57e9431a81814ed2757e99914"
-  },
-  {
-   "path": "graphs/lm_head.json",
+   "path": "graphs/onehot-float32/lm_head.json",
    "bytes": 1059,
    "sha256": "7ccfd02f15048777ad2495041f35810cfb334ca90b437a071a507d302efc67db"
   },
   {
-   "path": "graphs/prefill_block_L128_C16.json",
+   "path": "graphs/onehot-float32/prefill_block_L128_C16.json",
    "bytes": 12514,
    "sha256": "8df95f803e8f190b7db9e7b484df48efbe4001dd6d6823b1379f6276b5a3fe8c"
   },
   {
-   "path": "graphs/prefill_head_L128_C16.json",
+   "path": "graphs/onehot-float32/prefill_block_L128_C8.json",
+   "bytes": 12484,
+   "sha256": "b58ca90d88bd6f92c2a703a066e7bd0fc8f49ab7d3a692fe7b1858bf49480a59"
+  },
+  {
+   "path": "graphs/onehot-float32/prefill_head_L128_C16.json",
    "bytes": 8700,
    "sha256": "d2d340b89b3416929add27d21a0c0a228db6d6ca748b97b2ca90a40821175ef3"
   },
   {
-   "path": "graphs/prefill_tail_C16.json",
+   "path": "graphs/onehot-float32/prefill_head_L128_C8.json",
+   "bytes": 8679,
+   "sha256": "d7119492063f8ab26a9f62cb1975012549ca6cb1eab6880d937bebf73786b9f0"
+  },
+  {
+   "path": "graphs/onehot-float32/prefill_tail_C16.json",
    "bytes": 5121,
    "sha256": "4e40e4e3529e7c8ef881c4b6fac702d0770e56a6961369f5f69ea9e42d4de0f8"
+  },
+  {
+   "path": "graphs/onehot-float32/prefill_tail_C8.json",
+   "bytes": 5109,
+   "sha256": "693031d2454b67c0ae03b474c1f25b1cf6a356cdcb105d525d51dd1dee9ea5e1"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_block_L128.json",
+   "bytes": 11035,
+   "sha256": "7ec6b296e0206b9dd8247a9e8e845a08c49bbfc020dedbdcc9e4c403b2ec79bf"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_head_L128.json",
+   "bytes": 7764,
+   "sha256": "ada6e92f46d9119531e99caec3a99014aae2c4e5bf526f26c554ca6d15f338de"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_tail.json",
+   "bytes": 4397,
+   "sha256": "4456ea8bd646179541c4073326b17a9dfb9bcc5f84d4003e630c27086941aa60"
+  },
+  {
+   "path": "graphs/staged-r8-float16/kv_flush_L128.json",
+   "bytes": 1125,
+   "sha256": "dbf339affefc40002d5cf086a4cf074f8540adb57e9431a81814ed2757e99914"
+  },
+  {
+   "path": "graphs/staged-r8-float16/lm_head.json",
+   "bytes": 837,
+   "sha256": "4107cf14972ae693c90e35d15b4ea833f7be9338566fefffce92aedaf2376abb"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_block_L128_C16.json",
+   "bytes": 10871,
+   "sha256": "9796d639df7fd0d96298bb5e1120ba0e2353140d7a2ebf4b1b1d08a0a8f0f583"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_block_L128_C8.json",
+   "bytes": 10841,
+   "sha256": "f4e7c5871e48a94c8ad80a579050a71a7461019a4ae42056f2d042d4ded6ceb8"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_head_L128_C16.json",
+   "bytes": 7592,
+   "sha256": "3b33d2bdb176ee3f0e3944ba9402528e8aaa5552af94f7b4b9e3cd836161d0ef"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_head_L128_C8.json",
+   "bytes": 7570,
+   "sha256": "d36b12c509ad3db6dc9c23dd5522d0a7ac069fd380210129c8210bee92cdbf0d"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_tail_C16.json",
+   "bytes": 4510,
+   "sha256": "f716b156af4908715ead0386ffcb8f9a1afc4e72ba2e389c634bb4ccb73546d0"
+  },
+  {
+   "path": "graphs/staged-r8-float16/prefill_tail_C8.json",
+   "bytes": 4498,
+   "sha256": "d35dd8c33fc3374421d3be76b7d381cb441a64f4e3654714df3ef4ff0bc724e8"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_block_L128.json",
+   "bytes": 12834,
+   "sha256": "def529411af889db0d4840052b269df7cd1881fd5bc3b2a69053bc19fc7cdbb9"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_head_L128.json",
+   "bytes": 9025,
+   "sha256": "e1c2672c271f1fd784bb7aad01e62ae920f554a96e5e4d1e6549d6200b5801ad"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_tail.json",
+   "bytes": 5008,
+   "sha256": "5c058454ba659fc0683b237e12961772788a23e5f60a045cc4ca0fd7974a53e0"
+  },
+  {
+   "path": "graphs/staged-r8-float32/kv_flush_L128.json",
+   "bytes": 1125,
+   "sha256": "dbf339affefc40002d5cf086a4cf074f8540adb57e9431a81814ed2757e99914"
+  },
+  {
+   "path": "graphs/staged-r8-float32/lm_head.json",
+   "bytes": 1059,
+   "sha256": "7ccfd02f15048777ad2495041f35810cfb334ca90b437a071a507d302efc67db"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_block_L128_C16.json",
+   "bytes": 12514,
+   "sha256": "8df95f803e8f190b7db9e7b484df48efbe4001dd6d6823b1379f6276b5a3fe8c"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_block_L128_C8.json",
+   "bytes": 12484,
+   "sha256": "b58ca90d88bd6f92c2a703a066e7bd0fc8f49ab7d3a692fe7b1858bf49480a59"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_head_L128_C16.json",
+   "bytes": 8700,
+   "sha256": "d2d340b89b3416929add27d21a0c0a228db6d6ca748b97b2ca90a40821175ef3"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_head_L128_C8.json",
+   "bytes": 8679,
+   "sha256": "d7119492063f8ab26a9f62cb1975012549ca6cb1eab6880d937bebf73786b9f0"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_tail_C16.json",
+   "bytes": 5121,
+   "sha256": "4e40e4e3529e7c8ef881c4b6fac702d0770e56a6961369f5f69ea9e42d4de0f8"
+  },
+  {
+   "path": "graphs/staged-r8-float32/prefill_tail_C8.json",
+   "bytes": 5109,
+   "sha256": "693031d2454b67c0ae03b474c1f25b1cf6a356cdcb105d525d51dd1dee9ea5e1"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/decode_block_L128.json",
+   "bytes": 10405,
+   "sha256": "6d833fba2468aa95a97049a2940a56720e0d634e9c2ca3dc061180654cb6e96e"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/decode_head_L128.json",
+   "bytes": 7146,
+   "sha256": "e9cac32039058e197695d62dd43be1c7ba35027ac601c0ef09bdf413cb8487b6"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/decode_tail.json",
+   "bytes": 4397,
+   "sha256": "4456ea8bd646179541c4073326b17a9dfb9bcc5f84d4003e630c27086941aa60"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/lm_head.json",
+   "bytes": 837,
+   "sha256": "4107cf14972ae693c90e35d15b4ea833f7be9338566fefffce92aedaf2376abb"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_block_L128_C16.json",
+   "bytes": 10438,
+   "sha256": "7bf9775a36219abcc54708a79cdb7d109b7aecff35c5e2dc1c6434546f02984e"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_block_L128_C8.json",
+   "bytes": 10409,
+   "sha256": "c98dda2a75da92676110286744094ec05c0b1be873707298826fb8ed58d9c660"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_head_L128_C16.json",
+   "bytes": 7171,
+   "sha256": "a8908526bd91c40971bd898d925d70dce03c43119930284b2908f79128a2db34"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_head_L128_C8.json",
+   "bytes": 7150,
+   "sha256": "4ee4c2279d117ff468a5507f6ebf5357a1377f7f81679e74957daf2250174301"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_tail_C16.json",
+   "bytes": 4510,
+   "sha256": "f716b156af4908715ead0386ffcb8f9a1afc4e72ba2e389c634bb4ccb73546d0"
+  },
+  {
+   "path": "graphs/tensorScatter-float16/prefill_tail_C8.json",
+   "bytes": 4498,
+   "sha256": "d35dd8c33fc3374421d3be76b7d381cb441a64f4e3654714df3ef4ff0bc724e8"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/decode_block_L128.json",
+   "bytes": 12048,
+   "sha256": "e568d2ce69ead275caf556bba6df14bf294f13f1a25b219a01598c9ea200ff71"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/decode_head_L128.json",
+   "bytes": 8255,
+   "sha256": "ba8a432cf02fbd5f823119484eb9f0d13e6e6dc0580463b3eb0e001d53efe441"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/decode_tail.json",
+   "bytes": 5008,
+   "sha256": "5c058454ba659fc0683b237e12961772788a23e5f60a045cc4ca0fd7974a53e0"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/lm_head.json",
+   "bytes": 1059,
+   "sha256": "7ccfd02f15048777ad2495041f35810cfb334ca90b437a071a507d302efc67db"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_block_L128_C16.json",
+   "bytes": 12081,
+   "sha256": "79f3b5ab0e77a283a65de1da3659d040a52a0e42d0e2923fe2eb1ce1e005a035"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_block_L128_C8.json",
+   "bytes": 12052,
+   "sha256": "ea8b0527c2fd7eff806db32e17dc1075dbd44f7317781da9e46d798b76f3e047"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_head_L128_C16.json",
+   "bytes": 8279,
+   "sha256": "584fdfdf5078ded29cf5f22b168ae08e033816c16df55ddeb73aa10368d44ce0"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_head_L128_C8.json",
+   "bytes": 8259,
+   "sha256": "dc369cfbe3516f75639ff3c879ff139e2605dfffdc47a4185a3b130b8b37452d"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_tail_C16.json",
+   "bytes": 5121,
+   "sha256": "4e40e4e3529e7c8ef881c4b6fac702d0770e56a6961369f5f69ea9e42d4de0f8"
+  },
+  {
+   "path": "graphs/tensorScatter-float32/prefill_tail_C8.json",
+   "bytes": 5109,
+   "sha256": "693031d2454b67c0ae03b474c1f25b1cf6a356cdcb105d525d51dd1dee9ea5e1"
   },
   {
    "path": "model.json",
@@ -81,8 +352,8 @@
   },
   {
    "path": "plan.json",
-   "bytes": 2872,
-   "sha256": "8569bb776f5f616add877cb18cb33822bde1169f1ef8095062865fa8abf1ee64"
+   "bytes": 9113,
+   "sha256": "35564c1d2de03fbecdbe05bebb21750742e403c16358f3ac882301803169aad3"
   },
   {
    "path": "weights/embed.bin",
@@ -126,7 +397,16 @@
    128
   ],
   "prefill_chunks": [
-   16
+   16,
+   8
+  ],
+  "variants": [
+   "staged-r8-float32",
+   "staged-r8-float16",
+   "onehot-float32",
+   "onehot-float16",
+   "tensorScatter-float32",
+   "tensorScatter-float16"
   ],
   "weights_bytes": 711680
  }

@@ -1,12 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { cosSin, invFreqFor } from './rope.js';
-import { decodeMasks, decodeSelectors, flushSelectors, prefillMasks, prefillSelectors, ropeTables, type LayoutSpec } from './protocol.js';
+import {
+  decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, planPrefill, prefillMasks, prefillSelectors, ropeTables, scatterDecodeMasks, scatterPrefillMasks,
+  scatterPrefillRope, type LayoutSpec,
+} from './protocol.js';
 
 // vectors written by python/tests/test_protocol_golden.py from the Python reference
 const g = JSON.parse(readFileSync(new URL('../../tests/golden/protocol_vectors.json', import.meta.url), 'utf8'));
 const spec: LayoutSpec = g.spec;
-const { P, C, R } = g;
+const { P, C, R, PS } = g;
 const visibleColumns = (mask: ArrayLike<number>, rows: number) => {
   const columns = (mask.length / rows) | 0;
   return Array.from({ length: rows }, (_, r) => Array.from({ length: columns }, (_, c) => c).filter((c) => mask[r * columns + c] === 0));
@@ -65,5 +68,25 @@ describe('protocol', () => {
       expect(Array.from(rowsToKeep as ArrayLike<number>)).toEqual(v.rows_to_keep);
       expect(onesOf(rowSelector, R)).toEqual(v.row_selector_ones);
     }
+  });
+  it('onehot KV: decode masks and selectors', () => {
+    const v = g.onehot_decode, masks = decodeMasksOnehot(spec, P, v.pos);
+    for (const type of Object.keys(v.masks)) expect(visibleColumns(masks[type], 1)).toEqual(v.masks[type]);
+    const s = decodeSelectorsOnehot(P, v.pos);
+    expect(Array.from(s.rowsToKeep as ArrayLike<number>)).toEqual(g.onehot_decode_selectors.rows_to_keep);
+    expect(onesOf(s.rowSelector, 1)).toEqual(g.onehot_decode_selectors.row_selector_ones);
+  });
+  it('tensorScatter KV: prefill masks and RoPE with the padding in front, decode masks', () => {
+    for (const [key, ropeKey] of [['scatter_prefill_pad_chunk', 'scatter_prefill_rope_pad'], ['scatter_prefill_later_chunk', 'scatter_prefill_rope_later']]) {
+      const v = g[key], masks = scatterPrefillMasks(spec, PS, C, v.start, v.pad);
+      for (const type of Object.keys(v.masks)) expect(visibleColumns(masks[type], C)).toEqual(v.masks[type]);
+      const r = g[ropeKey], tables = scatterPrefillRope(spec, C, r.start, r.pad);
+      for (const type of Object.keys(tables)) { close(Array.from(tables[type].cos as ArrayLike<number>), r[type].cos, 2e-3); close(Array.from(tables[type].sin as ArrayLike<number>), r[type].sin, 2e-3); }
+    }
+    const d = g.scatter_decode, masks = scatterDecodeMasks(spec, PS, d.pos, d.pad);
+    for (const type of Object.keys(d.masks)) expect(visibleColumns(masks[type], 1)).toEqual(d.masks[type]);
+  });
+  it('prefill planning picks the same chunk sequences as the reference', () => {
+    for (const v of g.plans) expect(planPrefill(v.sizes, v.tokens, v.fixed)).toEqual(v.plan);
   });
 });

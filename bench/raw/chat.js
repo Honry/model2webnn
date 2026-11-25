@@ -29,7 +29,7 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=1";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=2";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -971,10 +971,11 @@ async function run() {
     let packageControls = null;
     if (packageMode) {   // the options of a package are what it was compiled with: fill the selects from its plan and lock the rest
         const peek = await peekPackage(packageEntry.url);
-        packageControls = setupPackageControls(peek, { maxLengthSelect, chunkSizeSelect, blocksSelect, prefillBlocksSelect, kvStyleSelect, stagingRowsSelect, computeTypeSelect, chunkSizesInput });
+        packageControls = setupPackageControls(peek, { maxLengthSelect, chunkSizeSelect, blocksSelect, prefillBlocksSelect, kvStyleSelect, stagingRowsSelect, computeTypeSelect, chunkSizesInput },
+            { kvStyle: query.get("kvStyle"), computeType: query.get("computeType") ?? query.get("dt"), stagingRows: query.get("stagingRows"), blocksPerGraph: query.get("blocksPerGraph") ?? query.get("bpg"), prefillBlocksPerGraph: query.get("prefillBlocksPerGraph") ?? query.get("pbpg") });
         const want = (select, value) => { if (value && [...select.options].some((option) => option.value === String(value))) select.value = value; };
         want(maxLengthSelect, query.get("maxLength")); maxLengthSelect.dispatchEvent(new Event("change"));
-        want(chunkSizeSelect, query.get("prefillChunkSize")); want(blocksSelect, query.get("blocksPerGraph"));
+        want(chunkSizeSelect, query.get("prefillChunkSize") ?? query.get("chunk"));
         document.querySelector("header h1").childNodes[0].textContent = `${packageEntry.label} on WebNN `;
         document.querySelector("header h1 small").textContent = `model package · compiled by m2w (${peek.index.compiler}) · target ${peek.index.target}`;
     }

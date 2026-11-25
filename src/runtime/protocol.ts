@@ -4,7 +4,10 @@
 //  * masks are additive float16 (0 visible, -65504 hidden): one mask and one rope table per LAYER TYPE (sliding vs full attention);
 //  * prefill chunk of C rows, the last chunk is LEFT-padded [pad rows | real rows]; pad rows only see themselves, their RoPE position is the first real position;
 //    prefill mask columns = [cache rows 0..P-1 | chunk rows 0..C-1];
-//  * decode (staged KV): mask columns = [main cache rows 0..P-1 | staging rows 0..R-1]; the new token goes into staging row `filled` = position base + filled.
+//  * decode (staged KV): mask columns = [main cache rows 0..P-1 | staging rows 0..R-1]; the new token goes into staging row `filled` = position base + filled;
+//  * decode (onehot KV): no staging buffer, the graph writes the new token into cache row `pos`; mask columns = [cache rows 0..P-1 | the new row];
+//  * tensorScatter KV (prefill and decode): the graph scatters the new rows into the cache at kv_write_index and attends over the updated cache (mask columns = cache rows 0..P-1);
+//    every prefill chunk is full, the padding of the prompt is in FRONT of it (`pad` rows), token i is in cache row pad + i, the decode step of position pos writes row pad + pos.
 import { cosSin, invFreqFor, type RopeEntry } from './rope.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -101,4 +104,80 @@ export function flushSelectors(P: number, R: number, base: number): { rowsToKeep
   const rowsToKeep = newHalf(P).fill(1), rowSelector = newHalf(P * R);
   for (let i = 0; i < R && base + i < P; i++) { rowsToKeep[base + i] = 0; rowSelector[(base + i) * R + i] = 1; }
   return { rowsToKeep, rowSelector };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------- prefill planning
+/** The chunk sizes for a prompt of `tokenCount` tokens: every chunk but the last is full, the last is left-padded (tensorScatter: the first holds the padding). A dispatch costs
+ *  fixedTokens + size units; minimises the sum; ties: fewer chunks, bigger chunks first. */
+export function planPrefill(sizes: number[], tokenCount: number, fixedTokens = 200): number[] {
+  const ordered = [...sizes].sort((a, b) => b - a), memo = new Map<number, { cost: number; plan: number[] }>();
+  const best = (remaining: number): { cost: number; plan: number[] } => {
+    const known = memo.get(remaining);
+    if (known) return known;
+    let result: { cost: number; plan: number[] } | null = null;
+    for (const size of ordered) {
+      const cost = fixedTokens + size;
+      let candidate: { cost: number; plan: number[] };
+      if (size >= remaining) candidate = { cost, plan: [size] };
+      else { const rest = best(remaining - size); candidate = { cost: cost + rest.cost, plan: [size, ...rest.plan] }; }
+      if (!result || candidate.cost < result.cost || (candidate.cost === result.cost && candidate.plan.length < result.plan.length)) result = candidate;
+    }
+    memo.set(remaining, result as { cost: number; plan: number[] });
+    return result as { cost: number; plan: number[] };
+  };
+  return best(tokenCount).plan;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------- onehot KV
+/** layer type -> mask float16 [P + 1]: cache rows 0..pos-1 that the layer type sees, and the new token (column P) */
+export function decodeMasksOnehot(spec: LayoutSpec, P: number, pos: number): Record<string, Half> {
+  const out: Record<string, Half> = {};
+  for (const type of layerTypesOf(spec)) {
+    const mask = newHalf(P + 1).fill(HIDDEN), lowest = firstVisible(spec, type, pos);
+    if (lowest < pos) mask.fill(0, lowest, pos);
+    mask[P] = 0;
+    out[type] = mask;
+  }
+  return out;
+}
+
+/** rowsToKeep [P], rowSelector [P]: the new token goes to cache row `pos` */
+export function decodeSelectorsOnehot(P: number, pos: number): { rowsToKeep: Half; rowSelector: Half } {
+  const rowsToKeep = newHalf(P).fill(1), rowSelector = newHalf(P);
+  rowsToKeep[pos] = 0; rowSelector[pos] = 1;
+  return { rowsToKeep, rowSelector };
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------- tensorScatter KV
+/** RoPE tables of the chunk that covers cache rows start .. start+C-1 (token i is in row pad + i): the pad rows reuse the first real position */
+export function scatterPrefillRope(spec: LayoutSpec, C: number, start: number, pad: number): Record<string, { cos: Half; sin: Half }> {
+  const firstReal = Math.max(0, pad - start), firstToken = Math.max(0, start - pad);
+  return ropeTables(spec, Array.from({ length: C - firstReal }, (_, i) => firstToken + i), C, firstReal);
+}
+
+/** layer type -> mask float16 [C * P] of the chunk that covers cache rows start .. start+C-1: columns are cache rows; a pad row sees only itself */
+export function scatterPrefillMasks(spec: LayoutSpec, P: number, C: number, start: number, pad: number): Record<string, Half> {
+  const out: Record<string, Half> = {};
+  for (const type of layerTypesOf(spec)) {
+    const mask = newHalf(C * P).fill(HIDDEN);
+    for (let row = 0; row < C; row++) {
+      const cacheRow = start + row, token = cacheRow - pad, base = row * P;
+      if (token < 0) { mask[base + cacheRow] = 0; continue; }
+      const first = pad + firstVisible(spec, type, token);                                  // cache row of the first token this layer type sees
+      mask.fill(0, base + first, base + cacheRow + 1);
+    }
+    out[type] = mask;
+  }
+  return out;
+}
+
+/** layer type -> mask float16 [P] for the token at position pos (cache row pad + pos, written by the graph before attention) */
+export function scatterDecodeMasks(spec: LayoutSpec, P: number, pos: number, pad: number): Record<string, Half> {
+  const out: Record<string, Half> = {};
+  for (const type of layerTypesOf(spec)) {
+    const mask = newHalf(P).fill(HIDDEN);
+    mask.fill(0, pad + firstVisible(spec, type, pos), pad + pos + 1);
+    out[type] = mask;
+  }
+  return out;
 }

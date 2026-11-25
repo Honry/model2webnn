@@ -15,12 +15,14 @@
   <label>package URL <input id="pkg" type="text" value="../packages/aion-2.3b/"></label>
   <label>device <select id="device"><option>npu</option><option>gpu</option><option>cpu</option></select></label>
   <label>max length <input id="maxLength" type="text" size="5" value=""></label>
-  <label>chunk <input id="chunk" type="text" size="4" value=""></label>
+  <label>chunk(s) <input id="chunk" type="text" size="8" value="" placeholder="64 or 64,128"></label>
+  <label>variant <input id="variant" type="text" size="22" value="" placeholder="e.g. onehot-float32"></label>
   <label>blocks/graph <input id="bpg" type="text" size="3" value="1"></label>
+  <label>prefill blocks/graph <input id="pbpg" type="text" size="3" value="0"></label>
 </div>
 <div class="row"><button id="load">Load</button> <button id="check" disabled>Check against verification.json</button> <button id="bench" disabled>Bench (2 x N tokens)</button> <button id="clear">Clear cache</button></div>
 <div class="row"><textarea id="prompt">What is the capital of France?</textarea></div>
 <div class="row"><button id="send" disabled>Send</button> <label>max new tokens <input id="maxNew" type="text" size="4" value="128"></label></div>
 <pre id="answer"></pre>
 <pre id="out"></pre>
-<script type="module" src="m2wllm.js?v=2"></script>
+<script type="module" src="m2wllm.js?v=3"></script>

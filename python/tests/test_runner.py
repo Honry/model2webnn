@@ -99,3 +99,61 @@ def test_runner_with_the_uint8_asymmetric_lm_head(tmp_path):
     got = PackageRunner(spec, tmp_path / "pkg", max_length=64, chunk_size=8, opt=opt).prefill(tokens)
     expected = ReferenceModel(spec, PackageReader(spec, tmp_path / "pkg").read).logits(tokens)[-1]
     assert cosine(got, expected) > 0.9999
+
+
+# ------------------------------------------------------------------------------------------------------------- option variants (KV protocol, chunk plans, groups)
+@pytest.mark.parametrize("style", ["staged", "onehot", "tensorScatter"])
+@pytest.mark.parametrize("chunks", [(8,), (4, 8)])
+def test_every_kv_protocol_matches_the_reference_in_prefill_and_decode(tiny, style, chunks):
+    """Prefill + single-token decode steps with each KV protocol and a single / several chunk sizes: logits = the independent reference on the dequantized weights."""
+    spec, _, pkg = tiny
+    quantized = ReferenceModel(spec, PackageReader(spec, pkg).read)
+    tokens = [int(t) for t in np.random.default_rng(3).integers(3, spec.vocab, 27)]   # beyond the 16-token sliding window; padded last chunk / front padding
+    runner = PackageRunner(spec, pkg, max_length=64, chunk_sizes=chunks, staging_rows=4, kv_style=style, prefill_fixed_tokens=2)
+    got = runner.prefill(tokens[:21])
+    assert cosine(got, quantized.logits(tokens[:21])[-1]) > 0.9999, (style, chunks, runner.plan(21))
+    for i in range(21, 27):   # decode steps; staged: crosses a flush of the 4-row staging buffer
+        got = runner.step(tokens[i])
+        assert cosine(got, quantized.logits(tokens[: i + 1])[-1]) > 0.9999, (style, i)
+
+
+def test_tensor_scatter_pads_the_front_and_stops_when_the_cache_is_full(tiny):
+    spec, _, pkg = tiny
+    runner = PackageRunner(spec, pkg, max_length=24, chunk_sizes=(8,), kv_style="tensorScatter")   # 23 cache rows
+    tokens = [int(t) for t in np.random.default_rng(4).integers(3, spec.vocab, 13)]               # 2 chunks = 16 rows, 3 pad rows in front
+    runner.prefill(tokens)
+    assert runner.pad == 3 and not runner.cache_full
+    out, _ = runner.generate(tokens, 50)
+    assert len(out) == 23 - 3 - 13 + 1       # rows left for decode steps + the token the last prefill logits gave
+
+
+def test_float16_compute_agrees_with_float32(tiny):
+    spec, _, pkg = tiny
+    tokens = [int(t) for t in np.random.default_rng(5).integers(3, spec.vocab, 19)]
+    expected = PackageRunner(spec, pkg, max_length=64, chunk_size=8, staging_rows=4).prefill(tokens)
+    f16 = PackageRunner(spec, pkg, max_length=64, chunk_size=8, staging_rows=4, compute_type="float16").prefill(tokens)
+    assert cosine(f16, expected) > 0.999
+
+
+@pytest.mark.parametrize("style", ["staged", "onehot", "tensorScatter"])
+def test_block_groups_equal_single_blocks_for_a_single_layer_type_model(tiny, style):
+    """Blocks of a group share one mask / RoPE table, so the graphs are only valid for a model with ONE layer type (here: the tiny model with full attention everywhere)."""
+    import dataclasses
+
+    spec, _, pkg = tiny
+    spec = dataclasses.replace(spec, layer_types=["full_attention"] * spec.num_layers)
+    tokens = [int(t) for t in np.random.default_rng(6).integers(3, spec.vocab, 19)]
+    make = lambda **kw: PackageRunner(spec, pkg, max_length=64, chunk_size=8, staging_rows=4, kv_style=style, **kw)   # noqa: E731
+    single, grouped = make(), make(decode_group=2, prefill_group=2)
+    assert cosine(grouped.prefill(tokens), single.prefill(tokens)) > 0.99999
+    for t in (5, 9, 4, 7, 3, 11):
+        assert cosine(grouped.step(t), single.step(t)) > 0.99999
+
+
+def test_plan_prefill_picks_the_cheapest_chunk_sequence():
+    from m2w.reference.protocol import plan_prefill
+
+    assert plan_prefill([64], 20) == [64] and plan_prefill([64], 130) == [64, 64, 64]
+    assert plan_prefill([64, 256], 20, 200) == [64]            # one small dispatch is cheapest
+    assert plan_prefill([64, 256], 300, 200) == [256, 64]      # bigger chunks first, the padded one is the small one
+    assert plan_prefill([64, 256], 200, 200) == [256]          # 1 x (200+256) < 4 x (200+64)

@@ -38,40 +38,76 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, max_lengths, chunks, blocks_per_graph) -> dict:
-    """Write every graph variant and return the plan's 'graphs' table (names relative to the package root)."""
+def _sequence(value) -> tuple:
+    return tuple(value) if isinstance(value, (list, tuple)) else (value,)
+
+
+def variant_id(kv_style: str, staging_rows: int, compute_type: str) -> str:
+    return f"staged-r{staging_rows}-{compute_type}" if kv_style == "staged" else f"{kv_style}-{compute_type}"
+
+
+def expand_variants(kv_styles, staging_rows, compute_types) -> list:
+    """The graph variants of a package: kv style x staging rows (staged only) x compute type. Weights are shared by all of them."""
+    variants = []
+    for kv in _sequence(kv_styles):
+        if kv not in ("staged", "onehot", "tensorScatter"):
+            raise ValueError(f"unknown kv style '{kv}' (staged | onehot | tensorScatter)")
+        for ct in _sequence(compute_types):
+            for rows in (_sequence(staging_rows) if kv == "staged" else (_sequence(staging_rows)[0],)):
+                v = {"id": variant_id(kv, rows, ct), "kv_style": kv, "compute_type": ct}
+                if kv == "staged":
+                    v["staging_rows"] = int(rows)
+                if kv == "tensorScatter":
+                    v["scatter_index_type"] = "int32"
+                variants.append(v)
+    return variants
+
+
+def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph=(1,)) -> dict:
+    """Write the graphs of every variant (graphs/<variant id>/) and return the plan's 'graphs' table: variant id -> lm_head / decode / prefill (names relative to the package root)."""
     dims = spec.decoder_dims()
-    gdir = out / "graphs"
-    gdir.mkdir(parents=True, exist_ok=True)
+    counts = lambda k: sorted({k, (spec.num_layers - 1) % k} - {0})   # noqa: E731
+    tables: dict = {}
+    for variant in variants:
+        vopt = D.with_options(opt, kv_style=variant["kv_style"], compute_type=variant["compute_type"], staging_rows=variant.get("staging_rows", opt.staging_rows))
+        gdir = out / "graphs" / variant["id"]
+        gdir.mkdir(parents=True, exist_ok=True)
 
-    def emit(graph) -> str:
-        serialize.dump(graph, gdir / f"{graph.name}.json")
-        return f"graphs/{graph.name}.json"
+        def emit(graph) -> str:
+            serialize.dump(graph, gdir / f"{graph.name}.json")
+            return f"graphs/{variant['id']}/{graph.name}.json"
 
-    table: dict = {"lm_head": emit(D.build_lm_head_graph(dims, opt)), "decode": {}, "prefill": {}}
-    for L in max_lengths:
-        past = L - 1
-        decode = {"head": emit(D.build_head_graph(dims, opt, seq=1, past_len=past, name=f"decode_head_L{L}")),
-                  "block": emit(D.build_block_graph(dims, opt, seq=1, past_len=past, name=f"decode_block_L{L}")),
-                  "tail": emit(D.build_tail_graph(dims, opt, seq=1, name="decode_tail")),
-                  "flush": emit(D.build_kv_update_graph(dims, seq=opt.staging_rows, past_len=past, name=f"kv_flush_L{L}")), "block_groups": {}}
-        for k in blocks_per_graph:
-            if k > 1:
-                for count in sorted({k, (spec.num_layers - 1) % k} - {0}):
-                    decode["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, opt, block_count=count, seq=1, past_len=past, name=f"decode_block_x{count}_L{L}"))
-        table["decode"][str(L)] = decode
-        table["prefill"][str(L)] = {}
-        for C in chunks:
-            if C > past:
-                continue
-            table["prefill"][str(L)][str(C)] = {
-                "head": emit(D.build_head_graph(dims, opt, seq=C, past_len=past, name=f"prefill_head_L{L}_C{C}")),
-                "block": emit(D.build_block_graph(dims, opt, seq=C, past_len=past, name=f"prefill_block_L{L}_C{C}")),
-                "tail": emit(D.build_tail_graph(dims, opt, seq=C, name=f"prefill_tail_C{C}"))}
-    return table
+        table: dict = {"lm_head": emit(D.build_lm_head_graph(dims, vopt)), "decode": {}, "prefill": {}}
+        for L in max_lengths:
+            past = L - 1
+            decode = {"head": emit(D.build_head_graph(dims, vopt, seq=1, past_len=past, name=f"decode_head_L{L}")),
+                      "block": emit(D.build_block_graph(dims, vopt, seq=1, past_len=past, name=f"decode_block_L{L}")),
+                      "tail": emit(D.build_tail_graph(dims, vopt, seq=1, name="decode_tail")), "block_groups": {}}
+            if vopt.kv_style == "staged":
+                decode["flush"] = emit(D.build_kv_update_graph(dims, seq=vopt.staging_rows, past_len=past, name=f"kv_flush_L{L}"))
+            for k in blocks_per_graph:
+                if k > 1:
+                    for count in counts(k):
+                        decode["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, vopt, block_count=count, seq=1, past_len=past, name=f"decode_block_x{count}_L{L}"))
+            table["decode"][str(L)] = decode
+            table["prefill"][str(L)] = {}
+            for C in chunks:
+                if C > past:
+                    continue
+                prefill = {"head": emit(D.build_head_graph(dims, vopt, seq=C, past_len=past, name=f"prefill_head_L{L}_C{C}")),
+                           "block": emit(D.build_block_graph(dims, vopt, seq=C, past_len=past, name=f"prefill_block_L{L}_C{C}")),
+                           "tail": emit(D.build_tail_graph(dims, vopt, seq=C, name=f"prefill_tail_C{C}")), "block_groups": {}}
+                for k in prefill_blocks_per_graph:
+                    if k > 1:
+                        for count in counts(k):
+                            prefill["block_groups"][str(count)] = emit(D.build_block_group_graph(dims, vopt, block_count=count, seq=C, past_len=past,
+                                                                                                name=f"prefill_block_x{count}_L{L}_C{C}"))
+                table["prefill"][str(L)][str(C)] = prefill
+        tables[variant["id"]] = table
+    return tables
 
 
-def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, graphs: dict, max_lengths, chunks, blocks_per_graph) -> dict:
+def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph=(1,)) -> dict:
     dims = spec.decoder_dims()
     return {
         "format": "m2w-plan", "version": 0, "target": TARGET,
@@ -82,8 +118,9 @@ def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, graphs: dict, max_leng
             "final_norm": ["final_norm_gamma"],
             "embedding": [n for n, _, _ in D.lm_head_weight_specs(dims, opt)],
         },
-        "profile": asdict(opt),
-        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "staging_rows": opt.staging_rows, "blocks_per_graph": list(blocks_per_graph),
+        "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type")},
+        "variants": variants, "default_variant": variants[0]["id"],
+        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": list(prefill_blocks_per_graph),
         "graphs": graphs,
         "chain": {
             "description": "HEAD = attention half of layer 0; BLOCK i (i = 0 .. N-2) = feed-forward half of layer i + attention half of layer i+1; TAIL = feed-forward half of layer N-1 "
@@ -95,16 +132,48 @@ def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, graphs: dict, max_leng
             "description": "rope_cos / rope_sin / attention_mask of an attention half are bound with the tables of the layer type of ITS layer (see model.json: layer_types, rope, sliding_window)",
             "inputs": ["rope_cos", "rope_sin", "attention_mask"],
         },
-        "kv": {"style": opt.kv_style, "value_layout": "natural", "main_cache_rows": "max_length - 1", "staging_rows": opt.staging_rows,
-               "prefill": "chunks of the chunk size, the last chunk is left-padded; one-hot row selectors write the real rows",
-               "decode": "the new row goes into a staging buffer; attention reads concat(main cache, staging); flush graph moves the staging rows into the main cache every staging_rows steps"},
+        "kv_protocols": {
+            "description": "how the KV cache is written and attended, by the kv_style of a variant (cache rows P = max_length - 1; row j holds position j; protocol.py / protocol.ts)",
+            "staged": "prefill: chunks of the chunk size, the last chunk is left-padded, one-hot row selectors write the real rows; decode: the new row goes into a staging buffer "
+                      "(staging_rows rows), attention reads concat(main cache, staging), the flush graph moves the staging rows into the main cache every staging_rows steps",
+            "onehot": "prefill as staged; decode: the graph writes the new row into the main cache with one-hot selectors (rows_to_keep / row_selector), attention reads concat(cache, new row)",
+            "tensorScatter": "prefill and decode: tensorScatter(cache, new rows, kv_write_index, axis 2), attention reads the updated cache; every chunk is full, the prompt padding is in FRONT "
+                             "of the prompt (cache rows 0..pad-1)",
+        },
+        "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
         "logits": {"padded_vocab": spec.vocab_padded, "vocab": spec.vocab, "note": "argmax / sampling over the first `vocab` entries only"},
     }
 
 
-def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), staging_rows: int = 64, blocks_per_graph=(1,), compute_type: str = "float32",
-                  merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4, endpoint: Optional[str] = None, cache_dir=None,
-                  progress: Callable[[str], None] = print) -> Path:
+def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, manifest: dict, chat_file, tokenizer_files) -> dict:
+    files = sorted(p for p in out.rglob("*") if p.is_file() and p.name not in ("m2w.json", "verification.json"))   # verification.json is the output of `m2w verify`, not part of the package
+    index = {
+        "format": PACKAGE_FORMAT, "version": PACKAGE_VERSION, "compiler": f"m2w {__version__}", "target": TARGET, "source": source_name,
+        "model": "model.json", "plan": "plan.json", "chat_format": chat_file, "weights_manifest": "weights/manifest.json",
+        "tokenizer": [f"tokenizer/{n}" for n in tokenizer_files],
+        "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"]
+                               + (["tensorScatter"] if any(v["kv_style"] == "tensorScatter" for v in plan["variants"]) else []),
+                               "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
+        "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
+        "summary": {"layers": spec.num_layers, "max_lengths": plan["max_lengths"], "prefill_chunks": plan["prefill_chunks"], "variants": [v["id"] for v in plan["variants"]],
+                    "weights_bytes": sum(f["bytes"] for f in manifest["files"])},
+    }
+    (out / "m2w.json").write_text(json.dumps(index, indent=1), encoding="utf-8", newline="\n")
+    return index
+
+
+def _check_lengths(spec: arch.ModelSpec, max_lengths, progress) -> None:
+    for L in max_lengths:
+        if L % 64:
+            progress(f"warning: max length {L} is not a multiple of 64 (the NPU compiler returned NaN for some attention lengths that are not)")
+        if L > spec.max_position_embeddings:
+            raise ValueError(f"max length {L} exceeds the model's max_position_embeddings {spec.max_position_embeddings}")
+
+
+def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=(1,),
+                  prefill_blocks_per_graph=(1,), merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4,
+                  endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print) -> Path:
+    """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for owned in ("graphs", "weights", "tokenizer"):   # directories the compiler owns: files of an earlier compile (another format, fewer layers ...) must not linger in the package
@@ -113,19 +182,16 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), sta
     config = json.loads((source / "config.json").read_text(encoding="utf-8"))
     generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
     spec = arch.spec_from_config(config, generation_config)
-    for L in max_lengths:
-        if L % 64:
-            progress(f"warning: max length {L} is not a multiple of 64 (the NPU compiler returned NaN for some attention lengths that are not)")
-        if L > spec.max_position_embeddings:
-            raise ValueError(f"max length {L} exceeds the model's max_position_embeddings {spec.max_position_embeddings}")
-    opt = D.GraphOptions(compute_type=compute_type, merge_projections=merge_projections, kv_style="staged", staging_rows=staging_rows, lm_head_format=lm_head_format)
+    _check_lengths(spec, max_lengths, progress)
+    opt = D.GraphOptions(merge_projections=merge_projections, lm_head_format=lm_head_format)
+    variants = expand_variants(kv_styles, staging_rows, compute_types)
     progress(f"{spec.architecture}: {spec.num_layers} layers, hidden {spec.hidden}, {spec.num_heads}/{spec.num_kv_heads} heads, vocab {spec.vocab} (padded {spec.vocab_padded}), "
              f"layer types {sorted(set(spec.layer_types))}")
 
     store = TensorStore.open(source)
     manifest = pack.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress)
-    graphs = write_graphs(spec, opt, out, max_lengths, chunks, blocks_per_graph)
-    plan = build_plan(spec, opt, graphs, max_lengths, chunks, blocks_per_graph)
+    graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    plan = build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
     (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
 
@@ -139,17 +205,30 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), sta
     (out / "tokenizer").mkdir(exist_ok=True)
     tokenizer_files = [n for n in TOKENIZER_FILES if (source / n).exists() and not shutil.copy2(source / n, out / "tokenizer" / n)]
 
-    files = sorted(p for p in out.rglob("*") if p.is_file() and p.name not in ("m2w.json", "verification.json"))   # verification.json is the output of `m2w verify`, not part of the package
     source_name = Path(model).name if Path(model).is_dir() else model   # a local folder is recorded by its name, never by its absolute path
-    index = {
-        "format": PACKAGE_FORMAT, "version": PACKAGE_VERSION, "compiler": f"m2w {__version__}", "target": TARGET, "source": source_name,
-        "model": "model.json", "plan": "plan.json", "chat_format": chat_file, "weights_manifest": "weights/manifest.json",
-        "tokenizer": [f"tokenizer/{n}" for n in tokenizer_files],
-        "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"],
-                               "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
-        "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
-        "summary": {"layers": spec.num_layers, "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "weights_bytes": sum(f["bytes"] for f in manifest["files"])},
-    }
-    (out / "m2w.json").write_text(json.dumps(index, indent=1), encoding="utf-8", newline="\n")
-    progress(f"wrote {out} ({index['summary']['weights_bytes'] / 2**20:.0f} MB of weights, {len(files)} files)")
+    index = _write_index(out, spec, source_name, plan, manifest, chat_file, tokenizer_files)
+    progress(f"wrote {out} ({index['summary']['weights_bytes'] / 2**20:.0f} MB of weights, {len(index['files'])} files, variants: {', '.join(index['summary']['variants'])})")
+    return out
+
+
+def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=(1,),
+                   prefill_blocks_per_graph=(1,), progress: Callable[[str], None] = print) -> Path:
+    """Rewrite graphs/, plan.json and the file index of an existing package with other graph variants; the weights, tokenizer and model.json stay (no quantization).
+    max_lengths / chunks default to those of the package."""
+    out = Path(package_dir)
+    old = json.loads((out / "plan.json").read_text(encoding="utf-8"))
+    index_old = json.loads((out / "m2w.json").read_text(encoding="utf-8"))
+    spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text(encoding="utf-8")))
+    manifest = json.loads((out / "weights" / "manifest.json").read_text(encoding="utf-8"))
+    max_lengths, chunks = tuple(max_lengths or old["max_lengths"]), tuple(chunks or old["prefill_chunks"])
+    _check_lengths(spec, max_lengths, progress)
+    opt = D.GraphOptions(**{k: v for k, v in old["profile"].items() if k in D.GraphOptions.__dataclass_fields__})
+    variants = expand_variants(kv_styles, staging_rows, compute_types)
+    shutil.rmtree(out / "graphs", ignore_errors=True)
+    graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    plan = build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
+    tokenizer_files = [Path(f).name for f in index_old.get("tokenizer", [])]
+    index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), tokenizer_files)
+    progress(f"rewrote the graphs of {out}: variants {', '.join(index['summary']['variants'])}")
     return out

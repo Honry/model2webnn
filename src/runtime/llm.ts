@@ -1,22 +1,36 @@
-// LLM runtime for the packages written by `m2w compile`: loads the weights into MLTensors, builds the graphs of the plan, and runs chunked prefill and staged-KV
-// decode on a WebNN context (the NPUW-style split: HEAD / BLOCK x (N-1) / TAIL / lm_head). A port of a hand-written scheduler, driven by the
+// LLM runtime for the packages written by `m2w compile`: loads the weights into MLTensors, builds the graphs of one variant of the plan, and runs chunked prefill and decode
+// with one of the KV protocols on a WebNN context (the NPUW-style split: HEAD / BLOCK x (N-1) / TAIL / lm_head). A port of a hand-written scheduler, driven by the
 // package (model.json, plan.json), with per-layer-type masks and RoPE tables so that hybrid (sliding / full attention) models run on the same BLOCK graph.
 // The protocol itself (what is written into the inputs) is in protocol.ts and checked against the Python reference.
+//
+// Session options (variant = KV protocol x compute type x staging rows, chunk sizes, blocks per graph, max length) can be changed with reconfigure(): the weights stay
+// on the device, the graphs are rebuilt and the state (KV cache, activations) is reallocated.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
-import { openPackage, type ModelPackage, type PackageSource, type Progress } from './package.js';
+import { openPackage, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
-  decodeMasks, decodeSelectors, flushSelectors, layerTypesOf, newHalf, prefillMasks, prefillSelectors, ropeTables, type Half,
+  decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables,
+  scatterDecodeMasks, scatterPrefillMasks, scatterPrefillRope, type Half,
 } from './protocol.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type ML = any;
 
-export interface LoadOptions {
+/** What can change between sessions of one loaded model (each one is applied by reconfigure()). */
+export interface SessionOptions {
+  maxLength?: number;              // KV cache capacity (one of the package's max_lengths); default: the smallest
+  variant?: string;                // id of a graph variant of the package; or pick one with kvStyle / computeType / stagingRows (default: the package's default variant)
+  kvStyle?: 'staged' | 'onehot' | 'tensorScatter';
+  computeType?: 'float32' | 'float16';
+  stagingRows?: number;            // staged only
+  chunkSizes?: number[];           // prefill chunk sizes (the package's prefill chunks); several: the chunk sequence of a prompt is planned (planPrefill); default: the smallest
+  chunkSize?: number;              // shorthand for chunkSizes: [chunkSize]
+  prefillFixedTokens?: number;     // planning cost of one prefill dispatch in tokens (default 200: the int4 weights are dequantized again by every dispatch)
+  blocksPerGraph?: number;         // decode: K consecutive blocks per dispatch (needs a package built with --blocks-per-graph K and a single layer type)
+  prefillBlocksPerGraph?: number;  // the same for the prefill graphs (default 1)
+}
+export interface LoadOptions extends SessionOptions {
   device?: 'npu' | 'gpu' | 'cpu';
   context?: ML;                    // an existing MLContext instead of navigator.ml.createContext({ deviceType: device })
-  maxLength?: number;              // KV cache capacity (must be one of the package's max_lengths); default: the smallest
-  chunkSize?: number;              // prefill chunk (one of the package's prefill chunks); default: the smallest
-  blocksPerGraph?: number;         // decode: K consecutive blocks per dispatch (needs a package built with --blocks-per-graph K and a single layer type)
   cache?: boolean;                 // OPFS cache of the downloaded files (default true)
   parallelDownloads?: number;      // default 4
   onProgress?: Progress;
@@ -32,46 +46,70 @@ export interface GenerateOptions {
 export interface StepTiming { hostMs: number; enqueueMs: number; waitMs: number; samplingMs: number; totalMs: number }
 export interface Stats {
   loadMs: number; buildMs: number; weightsMs: number; prefillMs: number; prefillChunks: number; promptTokens: number; decodeSteps: number; decodeMs: number; tpotMs: number;
-  stepMs: number[]; steps: StepTiming[]; flushes: number;
+  stepMs: number[]; steps: StepTiming[]; flushes: number; prefillPlan: number[];
 }
-const emptyStats = (): Stats => ({ loadMs: 0, buildMs: 0, weightsMs: 0, prefillMs: 0, prefillChunks: 0, promptTokens: 0, decodeSteps: 0, decodeMs: 0, tpotMs: 0, stepMs: [], steps: [], flushes: 0 });
+const emptyStats = (): Stats => ({ loadMs: 0, buildMs: 0, weightsMs: 0, prefillMs: 0, prefillChunks: 0, promptTokens: 0, decodeSteps: 0, decodeMs: 0, tpotMs: 0, stepMs: [], steps: [], flushes: 0, prefillPlan: [] });
 
 interface Built { name: string; graph: ML; inputs: string[]; outputs: string[] }
 interface Activations {
   hidden: ML; ropeCos: Record<string, ML>; ropeSin: Record<string, ML>; mask: Record<string, ML>;
   residuals: ML[]; attentionOutputs: ML[]; finalHidden: ML;
 }
+interface Selectors { keep: ML; select: ML }
+interface PrefillSet { head: Built; block: Built; tail: Built; groups: Map<number, Built>; act: Activations; sel: Selectors | null }
+interface DecodeSet { head: Built; block: Built; tail: Built; flush: Built | null; groups: Map<number, Built> }
+
+/** The variant of the package that matches the options (the default variant when none is asked for). */
+export function resolveVariant(plan: ModelPackage['plan'], o: SessionOptions): Variant {
+  if (o.variant) {
+    const found = plan.variants.find((v) => v.id === o.variant);
+    if (!found) throw new Error(`the package has no variant '${o.variant}' (it has ${plan.variants.map((v) => v.id).join(', ')})`);
+    return found;
+  }
+  const base = plan.variants.find((v) => v.id === plan.default_variant) as Variant;
+  const kv = o.kvStyle ?? base.kv_style, compute = o.computeType ?? base.compute_type;
+  const rows = o.stagingRows ?? (kv === base.kv_style ? base.staging_rows : plan.variants.find((v) => v.kv_style === kv)?.staging_rows);
+  const found = plan.variants.find((v) => v.kv_style === kv && v.compute_type === compute && (kv !== 'staged' || v.staging_rows === rows));
+  if (!found) throw new Error(`the package has no graphs for kv style ${kv}${kv === 'staged' ? `, ${rows} staging rows` : ''}, compute type ${compute} (variants: ${plan.variants.map((v) => v.id).join(', ')})`);
+  return found;
+}
 
 export class LLM {
   readonly pkg: ModelPackage;
-  readonly maxLength: number;
-  readonly chunkSize: number;
+  maxLength = 0;
+  variant!: Variant;
+  chunkSizes: number[] = [];
   stats: Stats = emptyStats();
 
   private ctx!: ML;
-  private P: number; private R: number; private C: number; private N: number;
+  private P = 0; private R = 0; private N: number;
+  private style: Variant['kv_style'] = 'staged';
   private types: string[];
-  private groupSize = 1;
+  private groupSize = 1; private prefillGroupSize = 1; private fixedTokens = 200;
   private embed!: { weight: Uint8Array | Int8Array; zeroPoint: Uint8Array | null; scale: Half };   // int8-sym tables have no zero point
+  private embedBytes!: { weight: Uint8Array; scale: Uint8Array; zeroPoint: Uint8Array | null };
   private weights: Record<string, ML>[] = [];
   private finalGamma!: ML;
-  private graphs!: {
-    lmHead: Built; decode: { head: Built; block: Built; tail: Built; flush: Built; groups: Map<number, Built> }; prefill: { head: Built; block: Built; tail: Built };
-  };
+  private lmHead!: Built;
+  private decodeSet!: DecodeSet;
+  private prefillSets = new Map<number, PrefillSet>();
   private kv: { key: ML; value: ML }[] = []; private kvSpare: { key: ML; value: ML }[] = [];
   private stg: { key: ML; value: ML }[] = []; private stgSpare: { key: ML; value: ML }[] = [];
-  private pre!: Activations; private dec!: Activations;
-  private sel!: { prefill: { keep: ML; select: ML }; decode: { keep: ML; select: ML }; flush: { keep: ML; select: ML } };
+  private dec!: Activations;
+  private decodeSel: Selectors | null = null; private flushSel: Selectors | null = null;
+  private writeIndexTensor: ML = null;   // tensorScatter: the first cache row of the dispatch (prefill chunk / decode step)
   private logitsTensor!: ML; private logits!: Half;
-  private tensors: ML[] = []; private builtGraphs: ML[] = [];
-  private base = 0; private filled = 0; private position = 0;
+  private weightTensors: ML[] = []; private stateTensors: ML[] = []; private builtGraphs: ML[] = [];
+  private base = 0; private filled = 0; private position = 0; private pad = 0;
   private busy = false;
   private lastStep = { hostMs: 0, enqueueMs: 0, waitMs: 0 };
 
-  private constructor(pkg: ModelPackage, maxLength: number, chunkSize: number) {
-    this.pkg = pkg; this.maxLength = maxLength; this.chunkSize = chunkSize;
-    const spec = pkg.model;
-    this.P = maxLength - 1; this.R = pkg.plan.staging_rows; this.C = chunkSize; this.N = spec.num_layers; this.types = layerTypesOf(spec);
+  /** the first (smallest) chunk size, for callers that think in one chunk size */
+  get chunkSize(): number { return this.chunkSizes[0]; }
+
+  private constructor(pkg: ModelPackage) {
+    this.pkg = pkg;
+    this.N = pkg.model.num_layers; this.types = layerTypesOf(pkg.model);
   }
 
   // ------------------------------------------------------------------------------------------------------------------------------- loading
@@ -80,22 +118,42 @@ export class LLM {
     const progress = options.onProgress ?? (() => {});
     progress({ stage: 'package', message: 'reading the package index' });
     const pkg = await openPackage(src, options.cache ?? true);
-    const plan = pkg.plan, key = String(options.maxLength ?? Math.min(...plan.max_lengths));
-    if (!plan.graphs.decode[key]) throw new Error(`the package has no graphs for max length ${key} (it has ${plan.max_lengths.join(', ')})`);
-    const chunks = Object.keys(plan.graphs.prefill[key]).map(Number).sort((a, b) => a - b);
-    const chunk = options.chunkSize ?? chunks[0];
-    if (!chunks.includes(chunk)) throw new Error(`the package has no prefill graphs for chunk ${chunk} at max length ${key} (it has ${chunks.join(', ')})`);
-    const llm = new LLM(pkg, +key, chunk);
-    llm.groupSize = options.blocksPerGraph ?? 1;
-    if (llm.groupSize > 1 && llm.types.length > 1) throw new Error('blocksPerGraph > 1 needs a model with one layer type (blocks of a group share one mask and one RoPE table)');
+    const llm = new LLM(pkg);
+    llm.adopt(llm.resolve(options));   // fails early (before anything is downloaded) when the package lacks what is asked for
     await llm.init(options, progress);
     llm.stats.loadMs = performance.now() - t0;
     return llm;
   }
 
-  private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}) {
+  /** Check the session options against the plan (no side effects); returns what to adopt. */
+  private resolve(o: SessionOptions) {
+    const plan = this.pkg.plan, key = String(o.maxLength ?? Math.min(...plan.max_lengths));
+    const variant = resolveVariant(plan, o), table = plan.graphs[variant.id];
+    if (!table.decode[key]) throw new Error(`the package has no graphs for max length ${key} (it has ${plan.max_lengths.join(', ')})`);
+    const available = Object.keys(table.prefill[key]).map(Number).sort((a, b) => a - b);
+    const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
+    for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
+    const group = o.blocksPerGraph ?? 1, prefillGroup = o.prefillBlocksPerGraph || group;
+    if ((group > 1 || prefillGroup > 1) && this.types.length > 1) throw new Error('blocksPerGraph > 1 needs a model with one layer type (blocks of a group share one mask and one RoPE table)');
+    const groupsOf = (t: GraphTable) => Object.keys(t.block_groups ?? {}).map(Number);
+    if (group > 1 && !groupsOf(table.decode[key]).includes(group)) throw new Error(`the package has no decode graph with ${group} blocks (it has ${groupsOf(table.decode[key]).join(', ') || 'none'})`);
+    for (const size of sizes) {
+      if (prefillGroup > 1 && !groupsOf(table.prefill[key][String(size)]).includes(prefillGroup)) {
+        throw new Error(`the package has no prefill graph with ${prefillGroup} blocks at chunk ${size} (it has ${groupsOf(table.prefill[key][String(size)]).join(', ') || 'none'})`);
+      }
+    }
+    return { maxLength: +key, variant, sizes, group, prefillGroup, fixedTokens: o.prefillFixedTokens ?? 200 };
+  }
+
+  private adopt(c: ReturnType<LLM['resolve']>) {
+    this.maxLength = c.maxLength; this.variant = c.variant; this.style = c.variant.kv_style; this.chunkSizes = c.sizes;
+    this.P = this.maxLength - 1; this.R = c.variant.staging_rows ?? 0;
+    this.groupSize = c.group; this.prefillGroupSize = c.prefillGroup; this.fixedTokens = c.fixedTokens;
+  }
+
+  private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
     const tensor = await this.ctx.createTensor({ dataType, shape, writable: flags.writable ?? false, readable: flags.readable ?? false });
-    this.tensors.push(tensor);
+    into.push(tensor);
     return tensor;
   }
   private writable = (dataType: string, shape: number[]) => this.createTensor(dataType, shape, { writable: true });
@@ -126,44 +184,17 @@ export class LLM {
     const zeroPoint = hasZeroPoint ? new Uint8Array(await part('lm_head_zero_point')) : null;
     const signed = byRole('embedding').find((f) => f.tensors[0].name === 'lm_head_weight')?.tensors[0].dtype === 'int8';
     this.embed = { weight: signed ? new Int8Array(weightBytes.buffer, weightBytes.byteOffset, weightBytes.byteLength) : weightBytes, zeroPoint, scale: new (globalThis as any).Float16Array(scaleBytes) };
+    this.embedBytes = { weight: weightBytes, scale: new Uint8Array(scaleBytes), zeroPoint };
 
     // graphs (compiled while the layers download)
-    const t = performance.now();
-    const key = String(this.maxLength), decode = plan.graphs.decode[key], prefill = plan.graphs.prefill[key][String(this.C)];
-    const external = (c: { external?: string }) => {
-      if (c.external === 'lm_head_weight') return weightBytes;
-      if (c.external === 'lm_head_scale') return new Uint8Array(scaleBytes);
-      if (c.external === 'lm_head_zero_point' && zeroPoint) return zeroPoint;
-      throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
-    };
-    const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
-      progress({ stage: 'build', message: label });
-      const doc: GraphDoc = JSON.parse(await source.text(path));
-      const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
-      const { inputs, outputs } = loadGraph(builder, doc, provider);
-      const graph = await builder.build(outputs);
-      this.builtGraphs.push(graph);
-      return { name: doc.name, graph, inputs: Object.keys(inputs), outputs: Object.keys(outputs) };
-    };
-    const groups = new Map<number, Built>();
-    if (this.groupSize > 1) {
-      for (const [count, path] of Object.entries(decode.block_groups ?? {})) groups.set(+count, await build(path, `decode block x${count}`));
-      if (!groups.has(this.groupSize)) throw new Error(`the package has no decode graph with ${this.groupSize} blocks (it has ${Object.keys(decode.block_groups ?? {}).join(', ') || 'none'})`);
-    }
-    this.graphs = {
-      lmHead: await build(plan.graphs.lm_head, 'lm_head', external),
-      decode: { head: await build(decode.head, 'decode head'), block: await build(decode.block, 'decode block'), tail: await build(decode.tail, 'decode tail'),
-                flush: await build(decode.flush as string, 'kv flush'), groups },
-      prefill: { head: await build(prefill.head, 'prefill head'), block: await build(prefill.block, 'prefill block'), tail: await build(prefill.tail, 'prefill tail') },
-    };
-    this.stats.buildMs = performance.now() - t;
+    await this.buildGraphs(progress);
 
     // weights -> MLTensors, layer by layer as the files arrive
     const finalFile = byRole('final_norm')[0];
     const uploadShard = async (shard: (typeof ordered)[number], buffer: ArrayBuffer) => {
       const tensors: Record<string, ML> = {};
       for (const entry of shard.tensors) {
-        const tensor = await this.writable(entry.dtype, entry.shape);
+        const tensor = await this.createTensor(entry.dtype, entry.shape, { writable: true }, this.weightTensors);
         this.ctx.writeTensor(tensor, new Uint8Array(buffer, entry.offset, entry.bytes));
         tensors[entry.name] = tensor;
       }
@@ -183,8 +214,70 @@ export class LLM {
     progress({ stage: 'ready' });
   }
 
+  /** Build the graphs of the resolved session (variant, max length, chunk sizes, groups). */
+  private async buildGraphs(progress: Progress) {
+    const t = performance.now(), plan = this.pkg.plan, source = this.pkg.source, key = String(this.maxLength);
+    const table = plan.graphs[this.variant.id], decode = table.decode[key];
+    const bytes = this.embedBytes;
+    const external = (c: { external?: string }) => {
+      if (c.external === 'lm_head_weight') return bytes.weight;
+      if (c.external === 'lm_head_scale') return new Uint8Array(bytes.scale);
+      if (c.external === 'lm_head_zero_point' && bytes.zeroPoint) return bytes.zeroPoint;
+      throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
+    };
+    const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
+      progress({ stage: 'build', message: label });
+      const doc: GraphDoc = JSON.parse(await source.text(path));
+      const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
+      const { inputs, outputs } = loadGraph(builder, doc, provider);
+      const graph = await builder.build(outputs);
+      this.builtGraphs.push(graph);
+      return { name: doc.name, graph, inputs: Object.keys(inputs), outputs: Object.keys(outputs) };
+    };
+    const groupsOf = async (files: GraphTable, size: number, label: string) => {
+      const groups = new Map<number, Built>();
+      if (size > 1) for (const [count, path] of Object.entries(files.block_groups ?? {})) groups.set(+count, await build(path, `${label} block x${count}`));
+      return groups;
+    };
+    this.lmHead = await build(table.lm_head, 'lm_head', external);
+    this.decodeSet = {
+      head: await build(decode.head, 'decode head'), block: await build(decode.block, 'decode block'), tail: await build(decode.tail, 'decode tail'),
+      flush: this.style === 'staged' ? await build(decode.flush as string, 'kv flush') : null, groups: await groupsOf(decode, this.groupSize, 'decode'),
+    };
+    this.prefillSets = new Map();
+    for (const size of this.chunkSizes) {
+      const files = table.prefill[key][String(size)], label = `prefill c${size}`;
+      this.prefillSets.set(size, {
+        head: await build(files.head, `${label} head`), block: await build(files.block, `${label} block`), tail: await build(files.tail, `${label} tail`),
+        groups: await groupsOf(files, this.prefillGroupSize, label), act: null as any, sel: null,
+      });
+    }
+    this.stats.buildMs = performance.now() - t;
+  }
+
+  /** Change the session options of a loaded model: graphs are rebuilt and the state reallocated, the weights stay on the device. */
+  async reconfigure(options: SessionOptions) {
+    if (this.busy) throw new Error('a generation is running on this model');
+    const progress = (options as LoadOptions).onProgress ?? (() => {});
+    const config = this.resolve(options);   // throws before anything is released
+    this.releaseSession();
+    this.adopt(config);
+    await this.buildGraphs(progress);
+    progress({ stage: 'state', message: 'allocating the KV cache and activations' });
+    await this.allocateState();
+    progress({ stage: 'ready' });
+  }
+
+  private releaseSession() {
+    for (const t of this.stateTensors) t.destroy?.();
+    for (const g of this.builtGraphs) g.destroy?.();
+    this.stateTensors = []; this.builtGraphs = [];
+    this.kv = []; this.kvSpare = []; this.stg = []; this.stgSpare = [];
+    this.base = this.filled = this.position = this.pad = 0;
+  }
+
   private async allocateState() {
-    const s = this.pkg.model, { P, R, C, N } = this;
+    const s = this.pkg.model, { P, R, N } = this;
     const zero = (n: number) => newHalf(n);
     const kvShape = (rows: number) => [1, s.num_kv_heads, rows, s.head_dim];
     const makeKv = async (rows: number) => {
@@ -193,9 +286,10 @@ export class LLM {
       this.ctx.writeTensor(t.key, zeros); this.ctx.writeTensor(t.value, zeros);
       return t;
     };
+    const staged = this.style === 'staged';
     for (let l = 0; l < N; l++) {
       this.kv.push(await makeKv(P)); this.kvSpare.push(await makeKv(P));
-      this.stg.push(await makeKv(R)); this.stgSpare.push(await makeKv(R));
+      if (staged) { this.stg.push(await makeKv(R)); this.stgSpare.push(await makeKv(R)); }
     }
     const activations = async (S: number, maskColumns: number): Promise<Activations> => {
       const a: Activations = { hidden: await this.writable('float16', [1, S, s.hidden]), ropeCos: {}, ropeSin: {}, mask: {}, residuals: [], attentionOutputs: [], finalHidden: null };
@@ -211,10 +305,16 @@ export class LLM {
       a.finalHidden = await this.createTensor('float16', [1, 1, s.hidden]);
       return a;
     };
-    this.pre = await activations(C, P + C);
-    this.dec = await activations(1, P + R);
-    const pair = async (rows: number, columns: number) => ({ keep: await this.writable('float16', [1, 1, rows, 1]), select: await this.writable('float16', [1, 1, rows, columns]) });
-    this.sel = { prefill: await pair(P, C), decode: await pair(R, 1), flush: await pair(P, R) };
+    const pair = async (rows: number, columns: number): Promise<Selectors> => ({ keep: await this.writable('float16', [1, 1, rows, 1]), select: await this.writable('float16', [1, 1, rows, columns]) });
+    const scatter = this.style === 'tensorScatter';
+    for (const [size, set] of this.prefillSets) {
+      set.act = await activations(size, scatter ? P : P + size);
+      set.sel = scatter ? null : await pair(P, size);
+    }
+    this.dec = await activations(1, this.style === 'staged' ? P + R : scatter ? P : P + 1);
+    this.decodeSel = this.style === 'staged' ? await pair(R, 1) : this.style === 'onehot' ? await pair(P, 1) : null;
+    this.flushSel = staged ? await pair(P, R) : null;
+    this.writeIndexTensor = scatter ? await this.writable(this.variant.scatter_index_type ?? 'int32', [1]) : null;
     this.logitsTensor = await this.createTensor('float16', [1, 1, s.vocab_padded], { readable: true });
     this.logits = newHalf(s.vocab_padded);
   }
@@ -234,32 +334,36 @@ export class LLM {
     return out;
   }
   private swap(list: { key: ML; value: ML }[], spare: { key: ML; value: ML }[], layer: number) { [list[layer], spare[layer]] = [spare[layer], list[layer]]; }
+  private writeIndex(row: number) {
+    this.ctx.writeTensor(this.writeIndexTensor, this.variant.scatter_index_type === 'int64' ? BigInt64Array.of(BigInt(row)) : Int32Array.of(row));
+  }
 
   /** One forward pass: HEAD, the BLOCKs and (last chunk / decode) TAIL + lm_head. All host inputs of the phase are already written. */
-  private enqueue(phase: 'prefill' | 'decode', lastChunk: boolean) {
-    const decode = phase === 'decode', a = decode ? this.dec : this.pre, g = decode ? this.graphs.decode : this.graphs.prefill;
-    const w = this.pkg.plan.weights, types = this.pkg.model.layer_types, N = this.N;
-    const caches = decode ? this.stg : this.kv, spare = decode ? this.stgSpare : this.kvSpare;
-    const selectors = decode
-      ? { staging_rows_to_keep: this.sel.decode.keep, staging_row_selector: this.sel.decode.select }
-      : { rows_to_keep: this.sel.prefill.keep, row_selector: this.sel.prefill.select };
+  private enqueue(size: number, lastChunk: boolean) {   // size 0 = decode, else the chunk size of the prefill set
+    const decode = size === 0, set = (decode ? this.decodeSet : this.prefillSets.get(size)) as DecodeSet | PrefillSet, a = decode ? this.dec : (set as PrefillSet).act;
+    const w = this.pkg.plan.weights, types = this.pkg.model.layer_types, N = this.N, stagedDecode = decode && this.style === 'staged';
+    const caches = stagedDecode ? this.stg : this.kv, spare = stagedDecode ? this.stgSpare : this.kvSpare;
+    const selectors: Record<string, ML> = this.style === 'tensorScatter' ? { kv_write_index: this.writeIndexTensor }
+      : stagedDecode ? { staging_rows_to_keep: (this.decodeSel as Selectors).keep, staging_row_selector: (this.decodeSel as Selectors).select }
+        : decode ? { rows_to_keep: (this.decodeSel as Selectors).keep, row_selector: (this.decodeSel as Selectors).select }
+          : { rows_to_keep: (set as PrefillSet).sel!.keep, row_selector: (set as PrefillSet).sel!.select };
     const shared = (layer: number) => ({ rope_cos: a.ropeCos[types[layer]], rope_sin: a.ropeSin[types[layer]], attention_mask: a.mask[types[layer]], ...selectors });
     const cacheInputs = (layer: number, prefix = '') => ({
       [prefix + 'past_key']: this.kv[layer].key, [prefix + 'past_value']: this.kv[layer].value,
-      ...(decode ? { [prefix + 'staging_key']: this.stg[layer].key, [prefix + 'staging_value']: this.stg[layer].value } : {}),
+      ...(stagedDecode ? { [prefix + 'staging_key']: this.stg[layer].key, [prefix + 'staging_value']: this.stg[layer].value } : {}),
     });
     const dispatch = (graph: Built, inputs: Record<string, ML>, outputs: Record<string, ML>) => this.ctx.dispatch(graph.graph, this.bind(graph, inputs), this.bind(graph, outputs, true));
 
     // HEAD: attention half of layer 0
-    dispatch(g.head, { hidden_states: a.hidden, ...shared(0), ...cacheInputs(0), ...this.pick(0, w.attention) },
+    dispatch(set.head, { hidden_states: a.hidden, ...shared(0), ...cacheInputs(0), ...this.pick(0, w.attention) },
       { residual: a.residuals[0], attention_output: a.attentionOutputs[0], updated_key: spare[0].key, updated_value: spare[0].value });
     this.swap(caches, spare, 0);
 
     // BLOCK i: feed-forward half of layer i + attention half of layer i+1
-    const groups = decode && this.groupSize > 1 ? this.graphs.decode.groups : null;
+    const groupSize = decode ? this.groupSize : this.prefillGroupSize, groups = groupSize > 1 ? set.groups : null;
     if (groups) {
-      for (let start = 0; start < N - 1; start += this.groupSize) {
-        const count = Math.min(this.groupSize, N - 1 - start), graph = groups.get(count) as Built;
+      for (let start = 0; start < N - 1; start += groupSize) {
+        const count = Math.min(groupSize, N - 1 - start), graph = groups.get(count) as Built;
         const inputs: Record<string, ML> = { residual: a.residuals[start], attention_output: a.attentionOutputs[start], ...shared(start + 1) };
         const outputs: Record<string, ML> = { next_residual: a.residuals[start + count], next_attention_output: a.attentionOutputs[start + count] };
         for (let j = 0; j < count; j++) {
@@ -272,7 +376,7 @@ export class LLM {
       }
     } else {
       for (let layer = 0; layer < N - 1; layer++) {
-        dispatch(g.block, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...shared(layer + 1), ...cacheInputs(layer + 1),
+        dispatch(set.block, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...shared(layer + 1), ...cacheInputs(layer + 1),
           ...this.pick(layer, w.ffn), ...this.pick(layer + 1, w.attention) },
         { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], updated_key: spare[layer + 1].key, updated_value: spare[layer + 1].value });
         this.swap(caches, spare, layer + 1);
@@ -280,9 +384,9 @@ export class LLM {
     }
     if (!lastChunk) return;
     // TAIL: feed-forward half of the last layer + final norm; lm_head
-    dispatch(g.tail, { residual: a.residuals[N - 1], attention_output: a.attentionOutputs[N - 1], ...this.pick(N - 1, w.ffn), final_norm_gamma: this.finalGamma },
+    dispatch(set.tail, { residual: a.residuals[N - 1], attention_output: a.attentionOutputs[N - 1], ...this.pick(N - 1, w.ffn), final_norm_gamma: this.finalGamma },
       { final_hidden_states: a.finalHidden });
-    dispatch(this.graphs.lmHead, { final_hidden_states: a.finalHidden }, { logits: this.logitsTensor });
+    dispatch(this.lmHead, { final_hidden_states: a.finalHidden }, { logits: this.logitsTensor });
   }
 
   private embedRow(token: number, out: Half, offset: number) {
@@ -299,36 +403,56 @@ export class LLM {
     return this.logits;
   }
 
+  /** The chunk sizes the next prompt of `tokenCount` tokens would use. */
+  planFor(tokenCount: number): number[] { return planPrefill(this.chunkSizes, tokenCount, this.fixedTokens); }
+
+  /** No row left for the next decode step (tensorScatter: the padding rows in front of the prompt are used too). */
+  private get cacheFull() { return this.position + (this.style === 'tensorScatter' ? this.pad : 0) >= this.P; }
+
   // ------------------------------------------------------------------------------------------------------------------------------- generation
   /** Chunked prefill of the prompt; returns the logits of the last prompt token. */
   private async prefill(tokens: number[]): Promise<Half> {
-    const s = this.pkg.model, { P, C } = this, n = tokens.length;
+    const s = this.pkg.model, { P } = this, n = tokens.length, scatter = this.style === 'tensorScatter';
     if (n === 0) throw new Error('empty prompt');
-    if (n >= P) throw new Error(`the prompt has ${n} tokens but the KV cache holds ${P}: load the package with a larger max length`);
-    const a = this.pre;
-    for (let start = 0; start < n; start += C) {
-      const valid = Math.min(C, n - start), pad = C - valid, last = start + C >= n;
-      const hidden = newHalf(C * s.hidden);
-      for (let i = 0; i < valid; i++) this.embedRow(tokens[start + i], hidden, (pad + i) * s.hidden);
-      this.ctx.writeTensor(a.hidden, hidden);
-      this.writeRope(ropeTables(s, Array.from({ length: valid }, (_, i) => start + i), C, pad), a);
-      const masks = prefillMasks(s, P, C, start, valid);
-      for (const type of this.types) this.ctx.writeTensor(a.mask[type], masks[type]);
-      const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
-      this.ctx.writeTensor(this.sel.prefill.keep, rowsToKeep); this.ctx.writeTensor(this.sel.prefill.select, rowSelector);
-      this.enqueue('prefill', last);
+    const plan = this.planFor(n), rows = plan.reduce((a, b) => a + b, 0);
+    if (n >= P || (scatter && rows > P)) throw new Error(`the prompt has ${n} tokens (${rows} rows of chunks) but the KV cache holds ${P}: load the package with a larger max length`);
+    this.stats.prefillPlan = plan;
+    const padTotal = scatter ? rows - n : 0;
+    let start = 0;
+    for (let index = 0; index < plan.length; index++) {
+      const C = plan[index], last = index === plan.length - 1, set = this.prefillSets.get(C) as PrefillSet, a = set.act, hidden = newHalf(C * s.hidden);
+      if (scatter) {   // the chunk covers cache rows start .. start+C-1, token i is in row padTotal + i
+        for (let r = 0; r < C; r++) if (start + r - padTotal >= 0) this.embedRow(tokens[start + r - padTotal], hidden, r * s.hidden);
+        this.ctx.writeTensor(a.hidden, hidden);
+        this.writeRope(scatterPrefillRope(s, C, start, padTotal), a);
+        const masks = scatterPrefillMasks(s, P, C, start, padTotal);
+        for (const type of this.types) this.ctx.writeTensor(a.mask[type], masks[type]);
+        this.writeIndex(start);
+        start += C;
+      } else {
+        const valid = Math.min(C, n - start), pad = C - valid;
+        for (let i = 0; i < valid; i++) this.embedRow(tokens[start + i], hidden, (pad + i) * s.hidden);
+        this.ctx.writeTensor(a.hidden, hidden);
+        this.writeRope(ropeTables(s, Array.from({ length: valid }, (_, i) => start + i), C, pad), a);
+        const masks = prefillMasks(s, P, C, start, valid);
+        for (const type of this.types) this.ctx.writeTensor(a.mask[type], masks[type]);
+        const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
+        this.ctx.writeTensor((set.sel as Selectors).keep, rowsToKeep); this.ctx.writeTensor((set.sel as Selectors).select, rowSelector);
+        start += valid;
+      }
+      this.enqueue(C, last);
     }
-    this.base = n; this.filled = 0; this.position = n;
+    this.base = n; this.filled = 0; this.pad = padTotal; this.position = n;
     return this.readLogits();
   }
 
   private flush() {
-    const { rowsToKeep, rowSelector } = flushSelectors(this.P, this.R, this.base);
-    this.ctx.writeTensor(this.sel.flush.keep, rowsToKeep); this.ctx.writeTensor(this.sel.flush.select, rowSelector);
-    const g = this.graphs.decode.flush;
+    const sel = this.flushSel as Selectors, { rowsToKeep, rowSelector } = flushSelectors(this.P, this.R, this.base);
+    this.ctx.writeTensor(sel.keep, rowsToKeep); this.ctx.writeTensor(sel.select, rowSelector);
+    const g = this.decodeSet.flush as Built;
     for (let l = 0; l < this.N; l++) {
       this.ctx.dispatch(g.graph, this.bind(g, { past_key: this.kv[l].key, past_value: this.kv[l].value, new_key: this.stg[l].key, new_value: this.stg[l].value,
-        rows_to_keep: this.sel.flush.keep, row_selector: this.sel.flush.select }),
+        rows_to_keep: sel.keep, row_selector: sel.select }),
       this.bind(g, { updated_key: this.kvSpare[l].key, updated_value: this.kvSpare[l].value }, true));
       this.swap(this.kv, this.kvSpare, l);
     }
@@ -338,21 +462,31 @@ export class LLM {
   /** Feed one token at the current position; returns the logits for the next one. */
   private async step(token: number): Promise<Half> {
     const s = this.pkg.model, { P, R } = this;
-    if (this.position >= P) throw new Error('the KV cache is full');
+    if (this.cacheFull) throw new Error('the KV cache is full');
     let flushMs = 0;
-    if (this.filled === R) { const f = performance.now(); this.flush(); flushMs = performance.now() - f; this.stats.flushes++; }
+    if (this.style === 'staged' && this.filled === R) { const f = performance.now(); this.flush(); flushMs = performance.now() - f; this.stats.flushes++; }
     const t0 = performance.now();
     const pos = this.position, a = this.dec;
     const hidden = newHalf(s.hidden);
     this.embedRow(token, hidden, 0);
     this.ctx.writeTensor(a.hidden, hidden);
     this.writeRope(ropeTables(s, [pos], 1, 0), a);
-    const masks = decodeMasks(s, P, R, pos, this.base, this.filled);
+    let masks: Record<string, Half>;
+    if (this.style === 'staged') {
+      masks = decodeMasks(s, P, R, pos, this.base, this.filled);
+      const { rowsToKeep, rowSelector } = decodeSelectors(R, this.filled);
+      this.ctx.writeTensor((this.decodeSel as Selectors).keep, rowsToKeep); this.ctx.writeTensor((this.decodeSel as Selectors).select, rowSelector);
+    } else if (this.style === 'onehot') {
+      masks = decodeMasksOnehot(s, P, pos);
+      const { rowsToKeep, rowSelector } = decodeSelectorsOnehot(P, pos);
+      this.ctx.writeTensor((this.decodeSel as Selectors).keep, rowsToKeep); this.ctx.writeTensor((this.decodeSel as Selectors).select, rowSelector);
+    } else {
+      masks = scatterDecodeMasks(s, P, pos, this.pad);
+      this.writeIndex(this.pad + pos);
+    }
     for (const type of this.types) this.ctx.writeTensor(a.mask[type], masks[type]);
-    const { rowsToKeep, rowSelector } = decodeSelectors(R, this.filled);
-    this.ctx.writeTensor(this.sel.decode.keep, rowsToKeep); this.ctx.writeTensor(this.sel.decode.select, rowSelector);
     const t1 = performance.now();
-    this.enqueue('decode', true);
+    this.enqueue(0, true);
     const t2 = performance.now();
     this.filled++; this.position++;
     const logits = await this.readLogits();
@@ -389,14 +523,15 @@ export class LLM {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
       let logits = await this.prefill(tokens);
-      this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t, prefillChunks: Math.ceil(tokens.length / this.C), promptTokens: tokens.length };
+      this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
+        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length };
       t = performance.now();
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();
         const token = this.pickToken(logits, options);
         const samplingMs = performance.now() - sampleStart;
         yield token;
-        if (stop.has(token) || i === max - 1 || this.position >= this.P || options.signal?.aborted) break;
+        if (stop.has(token) || i === max - 1 || this.cacheFull || options.signal?.aborted) break;
         const stepStart = performance.now();
         logits = await this.step(token);
         const stepMs = performance.now() - stepStart;
@@ -410,9 +545,9 @@ export class LLM {
   }
 
   destroy() {
-    for (const t of this.tensors) t.destroy?.();
-    for (const g of this.builtGraphs) g.destroy?.();
-    this.tensors = []; this.builtGraphs = [];
+    this.releaseSession();
+    for (const t of this.weightTensors) t.destroy?.();
+    this.weightTensors = []; this.weights = [];
   }
 }
 

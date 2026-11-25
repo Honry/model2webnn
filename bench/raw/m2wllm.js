@@ -1,10 +1,11 @@
 // Browser test page for the model2webnn runtime (src/runtime, built to lib/runtime by `npm run build:lib`): loads a package written by `m2w compile`, checks it against the tokens the
-// Python reference produced (verification.json), and chats. URL parameters pre-fill the form: ?package=..&device=npu&maxLength=1152&chunk=64&bpg=1&auto=check|chat
+// Python reference produced (verification.json), and chats. URL parameters pre-fill the form: ?package=..&device=npu&maxLength=1152&chunk=64&bpg=1&variant=onehot-float32&pbpg=1&auto=check|chat
+// (chunk may list several sizes: 64,128; empty variant / chunk = what verification.json was made with, else the package defaults)
 import { LLM, UrlSource, CachedSource, openPackage, chat, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
 
 const query = new URLSearchParams(location.search);
 const byId = (id) => document.getElementById(id);
-for (const [id, name] of [["pkg", "package"], ["device", "device"], ["maxLength", "maxLength"], ["chunk", "chunk"], ["bpg", "bpg"]]) if (query.get(name)) byId(id).value = query.get(name);
+for (const [id, name] of [["pkg", "package"], ["device", "device"], ["maxLength", "maxLength"], ["chunk", "chunk"], ["bpg", "bpg"], ["pbpg", "pbpg"], ["variant", "variant"]]) if (query.get(name)) byId(id).value = query.get(name);
 const start = performance.now();
 const log = (message) => {
     byId("out").textContent += `[${((performance.now() - start) / 1000).toFixed(1).padStart(6)} s] ${message}\n`;
@@ -19,9 +20,14 @@ let llm = null, tokenizer = null;
 async function load() {
     llm?.destroy(); llm = null; tokenizer = null;
     byId("check").disabled = byId("send").disabled = byId("bench").disabled = true;
-    const options = { device: byId("device").value, blocksPerGraph: +byId("bpg").value || 1 };
+    const options = { device: byId("device").value, blocksPerGraph: +byId("bpg").value || 1, prefillBlocksPerGraph: +byId("pbpg").value || 0 };
+    let recorded = {};   // the variant / chunk sizes the Python reference was run with: the default of the form, so that "check" compares like with like
+    try { recorded = await (await fetch(new URL("verification.json", packageUrl()).href, { cache: "no-store" })).json(); } catch { /* no verification.json */ }
+    const variant = byId("variant").value || recorded.variant, chunks = byId("chunk").value ? byId("chunk").value.split(",").map(Number) : recorded.chunks;
     if (byId("maxLength").value) options.maxLength = +byId("maxLength").value;
-    if (byId("chunk").value) options.chunkSize = +byId("chunk").value;
+    else if (recorded.max_length) options.maxLength = recorded.max_length;
+    if (variant) options.variant = variant;
+    if (chunks?.length) options.chunkSizes = chunks;
     let lastStage = "", lastDownload = 0;
     options.onProgress = (p) => {
         setStatus(`${p.stage}${p.message ? ": " + p.message : ""}`);
@@ -32,7 +38,7 @@ async function load() {
     log(`loading ${packageUrl()} on ${options.device}`);
     llm = await LLM.load(packageUrl(), options);
     const m = llm.pkg.model;
-    log(`READY: ${m.architecture}, ${m.num_layers} layers, max length ${llm.maxLength}, chunk ${llm.chunkSize}; load ${(llm.stats.loadMs / 1000).toFixed(1)} s, graph build ${(llm.stats.buildMs / 1000).toFixed(1)} s`);
+    log(`READY: ${m.architecture}, ${m.num_layers} layers, max length ${llm.maxLength}, chunks ${llm.chunkSizes.join('+')}, variant ${llm.variant.id}; load ${(llm.stats.loadMs / 1000).toFixed(1)} s, graph build ${(llm.stats.buildMs / 1000).toFixed(1)} s`);
     setStatus("ready");
     byId("check").disabled = false; byId("send").disabled = false; byId("bench").disabled = false;
 }

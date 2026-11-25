@@ -9,11 +9,15 @@ export interface ModelSpecJson {
   layer_types: string[]; sliding_window: number | null; rope: Record<string, RopeEntry>; eos_token_ids: number[]; bos_token_id: number | null; group_size: number;
 }
 export interface GraphTable { head: string; block: string; tail: string; flush?: string; block_groups?: Record<string, string> }
+/** One set of graphs of the package: a KV protocol x a compute type (x the staging rows of the staged protocol). Weights are shared by all variants. */
+export interface Variant { id: string; kv_style: 'staged' | 'onehot' | 'tensorScatter'; compute_type: 'float32' | 'float16'; staging_rows?: number; scatter_index_type?: 'int32' | 'int64' }
+export interface VariantGraphs { lm_head: string; decode: Record<string, GraphTable>; prefill: Record<string, Record<string, GraphTable>> }
 export interface Plan {
-  max_lengths: number[]; prefill_chunks: number[]; staging_rows: number;
-  graphs: { lm_head: string; decode: Record<string, GraphTable>; prefill: Record<string, Record<string, GraphTable>> };
+  max_lengths: number[]; prefill_chunks: number[]; blocks_per_graph: number[]; prefill_blocks_per_graph: number[];
+  variants: Variant[]; default_variant: string;
+  graphs: Record<string, VariantGraphs>;
   weights: { attention: string[]; ffn: string[]; final_norm: string[]; embedding: string[] };
-  profile: { compute_type: string; kv_style: string; merge_projections: boolean };
+  profile: { merge_projections: boolean; lm_head_format: string };
 }
 export interface ManifestTensor { name: string; dtype: string; shape: number[]; offset: number; bytes: number }
 export interface ManifestFile { file: string; role: 'layer' | 'final_norm' | 'embedding'; layer?: number; bytes: number; tensors: ManifestTensor[] }

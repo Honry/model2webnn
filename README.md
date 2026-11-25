@@ -77,7 +77,7 @@ result.unresolvedFreeDims; // symbolic dimension names not yet overridden
 
 ## LLM packages: Hugging Face model → static WebNN graphs (`m2w`)
 
-Decoder-only LLMs have a second path next to the ONNX / TFLite converter. The Python tool in [`python/`](python/README.md) compiles a Hugging Face model into a **model package**: static-shape WebNN graphs split the way OpenVINO's NPUW splits them (HEAD / one shared BLOCK graph with the weights as inputs / TAIL / lm_head), int4 block-128 weights, the tokenizer and the chat format. The runtime in [`src/runtime`](src/runtime) (`model2webnn/runtime`) loads such a package in the browser and runs chunked prefill and staged-KV decode on WebNN. Python and TypeScript only meet at the package files, described by the JSON Schemas in [`spec/`](spec).
+Decoder-only LLMs have a second path next to the ONNX / TFLite converter. The Python tool in [`python/`](python/README.md) compiles a Hugging Face model into a **model package**: static-shape WebNN graphs split the way OpenVINO's NPUW splits them (HEAD / one shared BLOCK graph with the weights as inputs / TAIL / lm_head), int4 block-128 weights, the tokenizer and the chat format. The runtime in [`src/runtime`](src/runtime) (`model2webnn/runtime`) loads such a package in the browser and runs chunked prefill (one or several chunk sizes) and decode on WebNN with the KV protocol (staged / one-hot / tensorScatter), compute type and block grouping you pick from what the package contains (`LLM.load(url, { kvStyle, chunkSizes, blocksPerGraph, ... })`, `llm.reconfigure(...)` keeps the weights on the device). Python and TypeScript only meet at the package files, described by the JSON Schemas in [`spec/`](spec).
 
 ```bash
 pip install -e "python[hf]"

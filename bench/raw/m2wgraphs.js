@@ -1,5 +1,5 @@
 // Times every graph of a package ON ITS OWN (random inputs, N back-to-back dispatches of the same tensors, one readback): which graph of a model is slow?
-// URL: m2wgraphs.html?package=../packages/aion-2.3b/&device=npu&maxLength=1152&chunk=64&chain=20
+// URL: m2wgraphs.html?package=../packages/aion-2.3b/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
 import { openPackage, loadGraph } from "../../lib/runtime/index.js";
 import { buildLmHeadGraph, setLmHeadFormat } from "./qwen3_subgraphs.js?v=20261124a";   // the hand-written lm_head (Qwen3-4B dims), timed side by side with the package graph
 
@@ -53,7 +53,7 @@ async function timeGraph(ctx, name, graph, inputSpecs, outputSpecs, extra) {
 
 // lmVariants=1: the lm_head graph of the package with (a) synthetic data (b) the package's real embedding table (c) the real table with the scale of zero-scale rows set to 1e-3
 async function lmHeadVariants(ctx, pkg) {
-    const plan = pkg.plan, doc = JSON.parse(await pkg.source.text(plan.graphs.lm_head));
+    const plan = pkg.plan, doc = JSON.parse(await pkg.source.text(plan.graphs[param("variant", plan.default_variant)].lm_head));
     const fileOf = (name) => pkg.manifest.files.find((f) => f.role === "embedding" && f.tensors[0].name === name).file;
     const real = {};
     for (const name of plan.weights.embedding) real[name] = new Uint8Array(await pkg.source.bytes(`weights/${fileOf(name)}`));   // int8-sym tables have no zero point
@@ -125,13 +125,14 @@ async function lmHeadBuildAB(ctx) {
 
 async function main() {
     const pkg = await openPackage(packageUrl, false);
-    const key = param("maxLength", String(Math.min(...pkg.plan.max_lengths))), chunk = param("chunk", String(Math.min(...Object.keys(pkg.plan.graphs.prefill[key]).map(Number))));
-    const decode = pkg.plan.graphs.decode[key], prefill = pkg.plan.graphs.prefill[key][chunk];
-    const list = [["lm_head", pkg.plan.graphs.lm_head], ["decode_head", decode.head], ["decode_block", decode.block], ["decode_tail", decode.tail], ["kv_flush", decode.flush],
+    const key = param("maxLength", String(Math.min(...pkg.plan.max_lengths))), chunk = param("chunk", String(Math.min(...Object.keys(pkg.plan.graphs[pkg.plan.default_variant].prefill[key]).map(Number))));
+    const variant = param("variant", pkg.plan.default_variant), table = pkg.plan.graphs[variant];
+    const decode = table.decode[key], prefill = table.prefill[key][chunk];
+    const list = [["lm_head", table.lm_head], ["decode_head", decode.head], ["decode_block", decode.block], ["decode_tail", decode.tail], ...(decode.flush ? [["kv_flush", decode.flush]] : []),
         ...Object.entries(decode.block_groups ?? {}).map(([k, p]) => [`decode_block_x${k}`, p]),
         ["prefill_head", prefill.head], ["prefill_block", prefill.block], ["prefill_tail", prefill.tail]].filter(([name]) => !only.length || only.includes(name));
     const ctx = await navigator.ml.createContext({ deviceType });
-    log(`${pkg.model.architecture} (${pkg.model.num_layers} layers), max length ${key}, chunk ${chunk}, device ${deviceType}, chain ${chain}`);
+    log(`${pkg.model.architecture} (${pkg.model.num_layers} layers), max length ${key}, chunk ${chunk}, variant ${variant}, device ${deviceType}, chain ${chain}`);
     if (query.get("lmBuild") === "1") { await lmHeadBuildAB(ctx); log("DONE"); byId("status").textContent = "done"; return; }
     if (query.get("lmInt8") === "1") { await lmHeadInt8(ctx); log("DONE"); byId("status").textContent = "done"; return; }
     if (query.get("lmVariants") === "1") { await lmHeadVariants(ctx, pkg); log("DONE"); byId("status").textContent = "done"; return; }

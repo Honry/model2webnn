@@ -13,6 +13,7 @@ from tiny_model import CONFIG
 
 GOLDEN = Path(__file__).resolve().parents[2] / "tests" / "golden" / "protocol_vectors.json"
 P, C, R = 23, 8, 4
+PS = 40   # cache rows of the tensorScatter vectors (the padded prompt needs rows beyond the window)
 
 
 def visible_columns(mask):   # [rows, cols] f16 -> per row the indices that are 0
@@ -25,7 +26,7 @@ def f(arr, digits=6):
 
 def build():
     spec = spec_from_config(CONFIG)
-    out = {"spec": {"layer_types": spec.layer_types, "sliding_window": spec.sliding_window, "head_dim": spec.head_dim, "rope": spec.rope}, "P": P, "C": C, "R": R}
+    out = {"spec": {"layer_types": spec.layer_types, "sliding_window": spec.sliding_window, "head_dim": spec.head_dim, "rope": spec.rope}, "P": P, "C": C, "R": R, "PS": PS}
     rope = protocol.rope_tables(spec, [5, 6, 7], C, 5)      # a left-padded chunk: 5 pad rows, 3 real rows at positions 5..7
     out["rope_padded_chunk"] = {"positions": [5, 6, 7], "rows": C, "pad": 5, **{t: {"cos": f(c), "sin": f(s)} for t, (c, s) in rope.items()}}
     out["prefill_full_chunk"] = {"start": 0, "valid": 8, "masks": {t: visible_columns(m) for t, m in protocol.prefill_masks(spec, P, C, 0, 8).items()}}
@@ -40,6 +41,20 @@ def build():
     for base in (20, 22):
         keep, selector = protocol.flush_selectors(P, R, base)
         out[f"flush_{base}"] = {"base": base, "rows_to_keep": f(keep), "row_selector_ones": np.argwhere(selector.reshape(P, R) == 1).tolist()}
+    # onehot KV: decode writes cache row `pos`
+    out["onehot_decode"] = {"pos": 22, "masks": {t: visible_columns(m) for t, m in protocol.decode_masks_onehot(spec, P, 22).items()}}
+    keep, selector = protocol.decode_selectors_onehot(P, 22)
+    out["onehot_decode_selectors"] = {"rows_to_keep": f(keep), "row_selector_ones": np.argwhere(selector.reshape(P, 1) == 1).tolist()}
+    # tensorScatter KV: the prompt padding is in front (3 pad rows), every chunk is full
+    out["scatter_prefill_pad_chunk"] = {"start": 0, "pad": 3, "masks": {t: visible_columns(m) for t, m in protocol.scatter_prefill_masks(spec, PS, C, 0, 3).items()}}
+    out["scatter_prefill_later_chunk"] = {"start": 16, "pad": 3, "masks": {t: visible_columns(m) for t, m in protocol.scatter_prefill_masks(spec, PS, C, 16, 3).items()}}
+    for name, (start, pad) in {"pad": (0, 3), "later": (16, 3)}.items():
+        tables = protocol.scatter_prefill_rope(spec, C, start, pad)
+        out[f"scatter_prefill_rope_{name}"] = {"start": start, "pad": pad, **{t: {"cos": f(c), "sin": f(s_)} for t, (c, s_) in tables.items()}}
+    out["scatter_decode"] = {"pos": 20, "pad": 3, "masks": {t: visible_columns(m) for t, m in protocol.scatter_decode_masks(spec, PS, 20, 3).items()}}
+    # prefill planning
+    out["plans"] = [{"sizes": sizes, "tokens": n, "fixed": fixed, "plan": protocol.plan_prefill(sizes, n, fixed)}
+                    for sizes, n, fixed in (([64], 20, 200), ([64], 130, 200), ([64, 256], 20, 200), ([64, 256], 300, 200), ([64, 256], 200, 200), ([32, 64, 128], 95, 50), ([8, 16], 21, 2))]
     # RoPE: default and YaRN tables of the real Aion entries
     aion = {"sliding_attention": {"type": "default", "theta": 32000.0},
             "full_attention": {"type": "yarn", "theta": 32000.0, "factor": 16.0, "original_max_position_embeddings": 2048, "beta_fast": 32.0, "beta_slow": 1.0}}

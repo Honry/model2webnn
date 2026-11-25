@@ -25,13 +25,19 @@ def _cos(a, b) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_length: int = 0, chunk: int = 0, endpoint: Optional[str] = None, cache_dir=None,
-                   skip_float_reference: bool = False, token_ids: Optional[list] = None) -> int:
+def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_length: int = 0, chunks=None, variants=None, decode_group: int = 1, prefill_group: int = 1,
+                   endpoint: Optional[str] = None, cache_dir=None, skip_float_reference: bool = False, token_ids: Optional[list] = None) -> int:
+    """Runs the graph FILES of the package (what the browser loads) for each requested variant; the first variant also writes verification.json."""
     index = json.loads((package / "m2w.json").read_text())
     spec = arch.ModelSpec.from_dict(json.loads((package / index["model"]).read_text()))
     plan = json.loads((package / index["plan"]).read_text())
     max_length = max_length or min(plan["max_lengths"])
-    chunk = chunk or min(c for c in plan["prefill_chunks"] if c <= max_length - 1)
+    chunks = list(chunks) if chunks else [min(c for c in plan["prefill_chunks"] if c <= max_length - 1)]
+    ids = [v["id"] for v in plan["variants"]]
+    wanted = ids if variants and "all" in variants else list(variants or [plan["default_variant"]])
+    for v in wanted:
+        if v not in ids:
+            raise SystemExit(f"the package has no variant '{v}' (it has {', '.join(ids)})")
     weights_dir = package / "weights"
 
     if token_ids is None:
@@ -48,18 +54,21 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
     else:
         tokenizer = None
 
-    t = time.perf_counter()
-    runner = PackageRunner(spec, weights_dir, max_length=max_length, chunk_size=chunk, staging_rows=plan["staging_rows"])
-    generated, step_logits = runner.generate(token_ids, steps, eos=spec.eos_token_ids)
-    print(f"compiled graphs on the CPU: {len(generated)} tokens in {time.perf_counter() - t:.0f} s (max length {max_length}, chunk {chunk})")
-    if tokenizer:
-        print("  generated:", repr(tokenizer.decode(generated, skip_special_tokens=False)))
-
-    # the expected result of this run, for the runtime conformance test in the browser (tests/ in the package folder is not part of the package index)
-    (package / "verification.json").write_text(json.dumps({
-        "max_length": max_length, "chunk": chunk, "prompt_ids": [int(t) for t in token_ids], "generated_ids": generated,
-        "steps": [{"top_ids": np.argsort(l)[-5:][::-1].tolist(), "top_logits": [round(float(l[i]), 3) for i in np.argsort(l)[-5:][::-1]]} for l in step_logits],
-        "text": tokenizer.decode(generated, skip_special_tokens=False) if tokenizer else None}), encoding="utf-8", newline="\n")
+    runs = []
+    for number, variant in enumerate(wanted):
+        t = time.perf_counter()
+        runner = PackageRunner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group, prefill_group=prefill_group)
+        generated, step_logits = runner.generate(token_ids, steps, eos=spec.eos_token_ids)
+        print(f"[{variant}] compiled graphs on the CPU: {len(generated)} tokens in {time.perf_counter() - t:.0f} s (max length {max_length}, chunks {chunks}, "
+              f"plan {runner.plan(len(token_ids))}, blocks/graph {decode_group}/{prefill_group})")
+        if tokenizer:
+            print("  generated:", repr(tokenizer.decode(generated, skip_special_tokens=False)))
+        runs.append((variant, generated, step_logits))
+        if number == 0:   # the expected result of this run, for the runtime conformance test in the browser (verification.json is not part of the package index)
+            (package / "verification.json").write_text(json.dumps({
+                "variant": variant, "max_length": max_length, "chunk": chunks[0], "chunks": chunks, "prompt_ids": [int(t) for t in token_ids], "generated_ids": generated,
+                "steps": [{"top_ids": np.argsort(l)[-5:][::-1].tolist(), "top_logits": [round(float(l[i]), 3) for i in np.argsort(l)[-5:][::-1]]} for l in step_logits],
+                "text": tokenizer.decode(generated, skip_special_tokens=False) if tokenizer else None}), encoding="utf-8", newline="\n")
 
     sources = [("dequantized weights", ReferenceModel(spec, PackageReader(spec, weights_dir).read), True)]
     if not skip_float_reference:
@@ -67,15 +76,17 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
         sources.append(("original weights", ReferenceModel(spec, TensorStore.open(folder).read), False))
     ok = True
     for name, reference, strict in sources:
-        cosines, agree = [], 0
-        for k in range(len(generated)):
-            logits = reference.logits(token_ids + generated[:k])[-1]
-            cosines.append(_cos(step_logits[k], logits))
-            agree += int(np.argmax(logits)) == generated[k]
-        print(f"vs {name:20s}: logits cosine min {min(cosines):.5f} mean {np.mean(cosines):.5f}; the reference picks the same token at {agree}/{len(generated)} steps")
+        for variant, generated, step_logits in runs:
+            cosines, agree = [], 0
+            for k in range(len(generated)):
+                logits = reference.logits(token_ids + generated[:k])[-1]
+                cosines.append(_cos(step_logits[k], logits))
+                agree += int(np.argmax(logits)) == generated[k]
+            print(f"[{variant}] vs {name:20s}: logits cosine min {min(cosines):.5f} mean {np.mean(cosines):.5f}; the reference picks the same token at {agree}/{len(generated)} steps")
+            if strict:
+                ok &= min(cosines) > 0.999 and agree == len(generated)
         peak = max(reference.layer_max_abs) if reference.layer_max_abs else 0
         if strict:
-            ok &= min(cosines) > 0.999 and agree == len(generated)
             print(f"  largest |residual| of any layer: {peak:.0f}" + ("   WARNING: close to the float16 limit 65504" if peak > 30000 else ""))
     print("RESULT:", "pipeline OK (graphs + protocol + weights agree with the independent reference)" if ok else "MISMATCH between the compiled graphs and the reference")
     return 0 if ok else 1
