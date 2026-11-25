@@ -106,6 +106,31 @@ def part_graphs(heads, dtype):
         out.append(b.build())
 
     out += matmul_shape_graphs(dtype)
+
+    def graph_multi(name, shapes, body):
+        b = GraphBuilder(f"part_{name}_{dtype}")
+        values = {n: b.input(n, dtype, shape) for n, shape in shapes.items()}
+        for output_name, value in body(b, values).items():
+            b.output(output_name, value)
+        out.append(b.build())
+
+    # bisect 1: which pattern of the Neumann inverse makes the NPU fail to create a session (8 x 8 batched 128 did, 16 x 16 and 32 x 32 did not)?
+    for c in (4, 8, 16):
+        for batch in (32, 128):
+            graph(f"inv_c{c}_b{batch}", [1, batch, c, c], lambda b, x, c=c: unit_lower_inverse(b, x, c, dtype))
+    eye8 = lambda b: _identity_constant(b, 8, dtype)
+    graph("sq_c8", [1, 32, 8, 8], lambda b, x: b.matmul(x, x))
+    graph("sqadd_c8", [1, 32, 8, 8], lambda b, x: b.add(b.matmul(x, x), eye8(b)))
+    graph("prod_c8", [1, 32, 8, 8], lambda b, x: b.matmul(b.add(x, eye8(b)), b.add(x, eye8(b))))
+    graph("prod2_c8", [1, 32, 8, 8], lambda b, x: b.matmul(b.add(x, eye8(b)), b.add(b.matmul(x, x), eye8(b))))
+    # bisect 2: the decode step is WRONG on the NPU when decayed = state * exp(g) feeds the prediction and the new state (style A); which part of that pattern?
+    h, step = 32, {"state": [1, 32, 128, 128], "k": [1, 32, 1, 128], "g": [1, 32, 1, 1], "delta": [1, 32, 1, 128]}
+    graph_multi("step_pred_only", {n: step[n] for n in ("state", "k", "g")}, lambda b, v: {"y": b.matmul(v["k"], b.mul(v["state"], b.exp(v["g"])))})
+    graph_multi("step_new_only", step, lambda b, v: {"y": b.add(b.mul(v["state"], b.exp(v["g"])), b.matmul(b.transpose(v["k"], [0, 1, 3, 2]), v["delta"]))})
+    graph_multi("step_shared", step, lambda b, v: (lambda d: {"y": b.matmul(v["k"], d), "z": b.add(d, b.matmul(b.transpose(v["k"], [0, 1, 3, 2]), v["delta"]))})(b.mul(v["state"], b.exp(v["g"]))))
+    graph_multi("step_shared_noexp", step, lambda b, v: (lambda d: {"y": b.matmul(v["k"], d), "z": b.add(d, b.matmul(b.transpose(v["k"], [0, 1, 3, 2]), v["delta"]))})(b.mul(v["state"], v["g"])))
+    graph_multi("step_shared_chain", step, lambda b, v: (lambda d: {"z": b.add(d, b.matmul(b.transpose(v["k"], [0, 1, 3, 2]), b.sub(v["delta"], b.matmul(v["k"], d))))})(b.mul(v["state"], b.exp(v["g"]))))
+    graph_multi("step_scale_only", {"state": step["state"], "g": step["g"]}, lambda b, v: {"y": b.mul(v["state"], b.exp(v["g"]))})
     graph("diag_slices_c32", [1, heads, 32, 32], lambda b, x: b.concat([b.slice(x, [0, 0, i * 8, i * 8], [1, heads, 8, 8]) for i in range(4)], 1))
     graph("slice_heads", [1, 4 * heads, 8, 8], lambda b, x: b.slice(x, [0, heads, 0, 0], [1, heads, 8, 8]))
     graph("zero_concat", [1, heads, 8, 8], lambda b, x: b.concat([x, b.constant(dtype, [1, heads, 8, 24], fill=0.0)], 3))
@@ -115,6 +140,11 @@ def part_graphs(heads, dtype):
     graph("inverse32_blocked8", [1, heads, 32, 32], lambda b, x: unit_lower_inverse_blocked(b, x, 32, 8, dtype))
     graph("inverse16_blocked8", [1, heads, 16, 16], lambda b, x: unit_lower_inverse_blocked(b, x, 16, 8, dtype))
     return out
+
+
+def _identity_constant(b, c, dtype):
+    from m2w.frontends.hf_llm.builders.gated_delta import _identity
+    return _identity(b, c, dtype)
 
 
 def build_part_twin(name):
@@ -147,19 +177,21 @@ def export(directory: Path, heads, tokens, subs, regimes, seed):
             parts = [(g, None, None, None) for g in part_graphs(heads, dtype)]
             for graph, ins, want_out, want_state in cases + probes + parts:
                 serialize.dump(graph, directory / f"{graph.name}.json")
-                if ins is None:   # a part: a random strictly lower-triangular input, the expected result is the float32 interpreter's
-                    shape = graph.inputs["x"].shape
-                    x = np.tril(rng.standard_normal(shape) * 0.2, -1)
-                    feeds = {"x": x.astype(np.float16 if dtype == "float16" else np.float32)}
-                    reference = interpreter.run(build_part_twin(graph.name), {"x": x.astype(np.float32)})
-                    want_out, want_state = reference["y"][0], reference["y"][0]
+                if ins is None:   # a part: random inputs (strictly lower-triangular x, negative g), the expected results are the float32 interpreter's
+                    f32 = {}
+                    for name, spec in graph.inputs.items():
+                        r = rng.standard_normal(spec.shape) * 0.5
+                        f32[name] = np.tril(r * 0.4, -1) if name == "x" else (-np.abs(r) if name == "g" else r)
+                    feeds = {n: x.astype(np.float16 if dtype == "float16" else np.float32) for n, x in f32.items()}
+                    reference = interpreter.run(build_part_twin(graph.name), {n: x.astype(np.float32) for n, x in f32.items()})
+                    want_out = want_state = None
                 else:
                     feeds = graph_feeds(ins, state0, dtype)
                 blob, entries = bytearray(), {"inputs": [], "expected": []}
                 for name in graph.inputs:
                     raw = np.ascontiguousarray(feeds[name]).tobytes()
                     entries["inputs"].append({"name": name, "dataType": dtype, "shape": list(feeds[name].shape), "offset": len(blob), "bytes": len(raw)}); blob += raw
-                expected = {"out": want_out[None], "new_state": want_state[None]} if ins is not None else {"y": want_out[None]}
+                expected = {"out": want_out[None], "new_state": want_state[None]} if ins is not None else dict(reference)
                 if any(n.startswith("p_") for n in graph.outputs):
                     reference = interpreter.run(build_graph_like(graph, "float32"), graph_feeds(ins, state0, "float32"))
                     expected.update({n: reference[n] for n in graph.outputs if n.startswith("p_")})
