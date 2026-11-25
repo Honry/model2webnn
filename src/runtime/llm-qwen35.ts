@@ -50,6 +50,8 @@ export class Qwen35LLM {
   private base = 0; private filled = 0; private position = 0;
   private busy = false;
   private lastStep = { hostMs: 0, enqueueMs: 0, waitMs: 0 };
+  private queue: { label: string; run: () => void; sync?: ML }[] | null = null;   // debugTrace(stepwise): dispatches are collected and run one by one, each followed by a readback
+  private onDispatch: ((label: string) => void | Promise<void>) | null = null;
 
   get chunkSize(): number { return this.chunkSizes[0]; }
 
@@ -273,7 +275,11 @@ export class Qwen35LLM {
     const selectors = decode ? { staging_rows_to_keep: sel.keep, staging_row_selector: sel.select } : { rows_to_keep: sel.keep, row_selector: sel.select };
     const controls = decode ? {} : { valid_mask: (set as PrefillSet).validMask, conv_perm: (set as PrefillSet).convPerm };
     const caches = decode ? this.stg : this.kv, spare = decode ? this.stgSpare : this.kvSpare;
-    const dispatch = (graph: Built, inputs: Record<string, ML>, outputs: Record<string, ML>) => this.ctx.dispatch(graph.graph, this.bind(graph, inputs), this.bind(graph, outputs, true));
+    const dispatch = (graph: Built, inputs: Record<string, ML>, outputs: Record<string, ML>) => {
+      const ins = this.bind(graph, inputs), outs = this.bind(graph, outputs, true);
+      if (this.queue) this.queue.push({ label: graph.name, run: () => this.ctx.dispatch(graph.graph, ins, outs), sync: Object.values(outs).find((t: ML) => t.readable) });
+      else this.ctx.dispatch(graph.graph, ins, outs);
+    };
     // the inputs / outputs of the attention half of `layer`
     const attentionInputs = (layer: number) => {
       const kind = this.kinds[layer], names = attentionNames[kind];
@@ -330,10 +336,30 @@ export class Qwen35LLM {
 
   planFor(tokenCount: number): number[] { return planPrefill(this.chunkSizes, tokenCount, this.fixedTokens); }
 
+  /** stepwise debugging: run the collected dispatches one by one, waiting for each (so that a crash / lost context names the graph that caused it) */
+  private async flushQueue() {
+    const queue = this.queue as NonNullable<typeof this.queue>;
+    this.queue = [];
+    const scratch = new Map<ML, Half>();
+    for (const [i, entry] of queue.entries()) {
+      await this.onDispatch?.(`${i + 1}/${queue.length} ${entry.label}`);
+      entry.run();
+      const t = entry.sync;
+      if (t) { if (!scratch.has(t)) scratch.set(t, newHalf(t.shape.reduce((x: number, y: number) => x * y, 1))); await this.ctx.readTensor(t, scratch.get(t)); }
+    }
+  }
+
   /** Debugging: prefill `tokens`, then one decode step with `decodeToken` (not sampled), reading back after each of the two the hidden state that enters every layer (and the final hidden state).
    *  -> per phase an array of N + 1 float16 arrays ([rows * hidden]: all rows of the last prefill chunk, left-padded, | the one row of the decode step) and the logits. Needs Qwen35LLM.debugReadback. */
-  async debugTrace(tokens: number[], decodeToken: number) {
+  async debugTrace(tokens: number[], decodeToken: number, options: { stepwise?: boolean; onDispatch?: (label: string) => void | Promise<void> } = {}) {
     if (!Qwen35LLM.debugReadback) throw new Error('set Qwen35LLM.debugReadback = true before loading the model');
+    if (options.stepwise) { this.queue = []; this.onDispatch = options.onDispatch ?? null; }
+    try {
+      return await this.debugTraceRun(tokens, decodeToken);
+    } finally { this.queue = null; this.onDispatch = null; }
+  }
+
+  private async debugTraceRun(tokens: number[], decodeToken: number) {
     const readAll = async (a: Activations) => {
       const out: Half[] = [];
       for (const t of [...a.residuals, a.finalHidden]) { const h = newHalf(t.shape.reduce((x: number, y: number) => x * y, 1)); await this.ctx.readTensor(t, h); out.push(h); }
@@ -369,6 +395,7 @@ export class Qwen35LLM {
       const { validMask, convPerm } = linearPrefillControls(C, valid);
       this.ctx.writeTensor(set.validMask, validMask); this.ctx.writeTensor(set.convPerm, convPerm);
       this.enqueue(C, last);
+      if (this.queue) await this.flushQueue();
       start += valid;
     }
     this.base = n; this.filled = 0; this.position = n;
@@ -403,6 +430,7 @@ export class Qwen35LLM {
     this.ctx.writeTensor(this.decodeSel.keep, rowsToKeep); this.ctx.writeTensor(this.decodeSel.select, rowSelector);
     const t1 = performance.now();
     this.enqueue(0, true);
+    if (this.queue) await this.flushQueue();
     const t2 = performance.now();
     this.filled++; this.position++;
     const logits = await this.readLogits();
