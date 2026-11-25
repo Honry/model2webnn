@@ -11,12 +11,15 @@ export interface ModelSpecJson {
   layer_dims?: Record<string, { head_dim: number; num_heads: number; num_kv_heads: number }>;   // layer types whose attention dims differ from the defaults above
   kv_producer?: number[];                                                             // per layer: the layer whose K / V it attends over, -1 = its own (empty / absent: nothing shared)
   ple_dim?: number; embed_scale?: number; attention_scale?: number | null; logit_softcap?: number;
+  linear?: { num_k_heads: number; num_v_heads: number; k_dim: number; v_dim: number; conv_kernel: number };   // Qwen3.5: the Gated DeltaNet (linear_attention) layers
+  attn_output_gate?: boolean;
 }
 export interface GraphTable {
   head: string; block: string; tail: string; flush?: string; block_groups?: Record<string, string>;
   blocks?: Record<string, string>;                // Gemma 4: one block graph per attention kind (instead of `block`)
 }
 export interface GemmaDecodeTable { head: string; blocks: Record<string, string>; tail: string; flush: Record<string, string> }
+export interface QwenDecodeTable { head: string; blocks: Record<string, string>; tail: string; flush: string }
 /** One set of graphs of the package: a KV protocol x a compute type (x the staging rows of the staged protocol). Weights are shared by all variants. */
 export interface Variant { id: string; kv_style: 'staged' | 'onehot' | 'tensorScatter' | 'scatterND'; compute_type: 'float32' | 'float16'; staging_rows?: number; scatter_index_type?: 'int32' | 'int64'; value_layout?: 'natural' | 'transposed' }
 export interface VariantGraphs { lm_head: string; decode: Record<string, GraphTable>; prefill: Record<string, Record<string, GraphTable>> }
@@ -26,7 +29,8 @@ export interface Plan {
   block_group_controls?: 'shared' | 'per_block';   // block groups: one rope / mask for all blocks (single layer type), or b<j>_rope_cos / b<j>_attention_mask per block (hybrid models)
   graphs: Record<string, VariantGraphs>;
   weights: { attention: string[] | Record<string, string[]>; ffn: string[]; final_norm: string[]; embedding: string[]; head_extra?: string[]; ple_table?: string[] };
-  architecture_kind?: 'gemma4';
+  architecture_kind?: 'gemma4' | 'qwen35';
+  state?: { conv_channels: number; v_heads: number; k_dim: number; v_dim: number; layers: number[] };   // qwen35: the layers that carry a Gated DeltaNet state instead of a KV cache
   profile: { merge_projections: boolean; lm_head_format: string };
 }
 export interface ManifestTensor { name: string; dtype: string; shape: number[]; offset: number; bytes: number }

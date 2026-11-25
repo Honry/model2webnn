@@ -22,6 +22,7 @@ from .reference.gemma4_ref import Gemma4Reference
 from .reference.gemma4_runner import Gemma4Runner
 from .reference.graph_runner import PackageRunner
 from .reference.package_reader import PackageReader
+from .reference.qwen35_runner import Qwen35PackageReader, Qwen35Runner
 from .reference.transformer_ref import ReferenceModel
 
 
@@ -75,6 +76,8 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
         t = time.perf_counter()
         if spec.builder == "gemma4":
             runner = Gemma4Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks)
+        elif spec.builder == "qwen35":
+            runner = Qwen35Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks)
         else:
             runner = PackageRunner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group, prefill_group=prefill_group)
         generated, step_logits = runner.generate(token_ids, steps, eos=spec.eos_token_ids)
@@ -95,6 +98,14 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
         if not skip_float_reference:
             store = TensorStore.open(hub.resolve_model(source, cache_dir=cache_dir, endpoint=endpoint))
             sources.append(("original weights", _Gemma4Model(spec, text_config, lambda name, rows=None: store.read(GEMMA4_PREFIX + name, rows=rows)), False))
+    elif spec.builder == "qwen35":   # the transformers implementation is the reference
+        from .reference.qwen35_hf import Qwen35HFModel, original_tensors
+
+        text_config = _gemma4_text_config(package, source, endpoint, cache_dir)
+        sources = [("dequantized weights", Qwen35HFModel(text_config, Qwen35PackageReader(spec, weights_dir).hf_state_dict()), True)]
+        if not skip_float_reference:
+            store = TensorStore.open(hub.resolve_model(source, cache_dir=cache_dir, endpoint=endpoint))
+            sources.append(("original weights", Qwen35HFModel(text_config, original_tensors(store, spec)), False))
     else:
         sources = [("dequantized weights", ReferenceModel(spec, PackageReader(spec, weights_dir).read), True)]
         if not skip_float_reference:

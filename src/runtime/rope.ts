@@ -13,7 +13,7 @@ export interface RopeEntry {
   mscale?: number;
   mscale_all_dim?: number;
   truncate?: boolean;
-  partial_rotary_factor?: number;   // proportional
+  partial_rotary_factor?: number;   // proportional | default (partial rotary)
 }
 
 const f32 = Math.fround;
@@ -42,6 +42,10 @@ export function yarnInvFreq(e: RopeEntry, dim: number): { invFreq: number[]; att
 
 /** inverse frequencies [dim/2] and the factor that multiplies cos and sin */
 export function invFreqFor(e: RopeEntry, headDim: number): { invFreq: number[]; attentionFactor: number } {
+  if (e.type === 'default' && (e.partial_rotary_factor ?? 1) !== 1) {   // partial rotary (Qwen3.5): the first `rot` dims rotate (exponents over rot); the packed head dims are permuted so that the pairs sit at (i, i + headDim / 2), the others get frequency 0
+    const rot = Math.floor(headDim * (e.partial_rotary_factor as number));
+    return { invFreq: Array.from({ length: headDim / 2 }, (_, i) => (i < rot / 2 ? 1 / e.theta ** ((2 * i) / rot) : 0)), attentionFactor: 1 };
+  }
   if (e.type === 'default') return { invFreq: posFreqs(e.theta, headDim).map((p) => 1 / p), attentionFactor: 1 };
   if (e.type === 'linear') return { invFreq: posFreqs(e.theta, headDim).map((p) => 1 / p / (e.factor as number)), attentionFactor: 1 };
   if (e.type === 'yarn') return yarnInvFreq(e, headDim);

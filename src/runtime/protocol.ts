@@ -32,7 +32,8 @@ export interface LayoutSpec {
 /** the head dim of the attention of a layer type */
 export const headDimOf = (spec: LayoutSpec, layerType: string): number => spec.layer_dims?.[layerType]?.head_dim ?? spec.head_dim;
 
-export const layerTypesOf = (spec: LayoutSpec): string[] => [...new Set(spec.layer_types)].sort();
+/** the layer types that attend over a KV cache (masks, rope tables); Gated DeltaNet layers (linear_attention) have neither */
+export const layerTypesOf = (spec: LayoutSpec): string[] => [...new Set(spec.layer_types)].filter((t) => t !== 'linear_attention').sort();
 
 /** may a query at q_pos attend to the key at k_pos in a layer of this type? */
 export function visible(spec: LayoutSpec, layerType: string, qPos: number, kPos: number): boolean {
@@ -246,4 +247,16 @@ export function incachePrefillMasks(spec: LayoutSpec, P: number, C: number, star
     out[type] = mask;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Gated DeltaNet (linear attention) layers in a prefill chunk (Qwen3.5); python: protocol.linear_prefill_controls
+// ---------------------------------------------------------------------------------------------------------------------
+/** validMask [C]: 1 for a real row, 0 for a pad row (beta and g are zeroed there: the pad rows leave the recurrent state alone);
+ *  convPerm [(C+3) * (C+3)]: a permutation matrix applied to [3 conv-state rows | C chunk rows] that moves the pad rows in front of the state rows (the identity for a full chunk) */
+export function linearPrefillControls(C: number, valid: number): { validMask: Half; convPerm: Half } {
+  const pad = C - valid, size = C + 3, validMask = newHalf(C), convPerm = newHalf(size * size);
+  validMask.fill(1, pad, C);
+  for (let r = 0; r < size; r++) convPerm[r * size + (r < pad ? 3 + r : r < pad + 3 ? r - pad : r)] = 1;
+  return { validMask, convPerm };
 }
