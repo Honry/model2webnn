@@ -178,8 +178,11 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
 
 
 def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", name: str | None = None, probe: bool = False, style: str = "A"):
-    """The decode step: one token, no chunk machinery. Styles (the same math; the NPU compiler returned wrong results for A when nothing else was an output):
-    A: decayed = S exp(g) feeds both the prediction and the new state;  B: the prediction scales the [1,dv] vector instead (decayed only feeds the new state);  C: like A with an explicit expand of exp(g)."""
+    """The decode step: one token, no chunk machinery. The same math in several shapes, because the f16 execution of the OpenVINO GPU / NPU plugins returned wrong results for some of them
+    (the graph is right: CPU and f32 are exact), see docs / notes:
+    A: decayed = S exp(g) feeds the prediction and the new state;  B: the prediction scales the [1,dv] vector instead;  C: like A with an explicit expand of exp(g);
+    D: B with the operands of the multiplications swapped;  E: the decay scales k (matmul(k exp(g), S)) instead of the prediction;
+    F: B computed in float32 inside an f16 graph (cast in, cast out);  G: B with the prediction also written out (one extra output)."""
     b = GraphBuilder(name or f"gdn_step{'' if style == 'A' else style}_{dtype}{'_probe' if probe else ''}")
     q = b.input("q", dtype, [1, heads, 1, dk])
     k = b.input("k", dtype, [1, heads, 1, dk])
@@ -187,17 +190,32 @@ def build_recurrent_graph(heads: int, dk: int, dv: int, dtype: str = "float32", 
     g = b.input("g", dtype, [1, heads, 1, 1])
     beta = b.input("beta", dtype, [1, heads, 1, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
+    work = dtype
+    if style == "F" and dtype == "float16":
+        work = "float32"
+        q, k, v, g, beta, state = (b.cast(x, work) for x in (q, k, v, g, beta, state))
+    m = (lambda x, y: b.mul(y, x)) if style == "D" else b.mul
     e = b.exp(g)
     if style == "C":
         e = b.expand(e, [1, heads, dk, dv])
-    decayed = b.mul(state, e)                                                       # g [1,H,1,1] broadcasts over [dk, dv]
-    predicted = b.mul(b.matmul(k, state), b.exp(g)) if style == "B" else b.matmul(k, decayed)
+    decayed = m(state, e)                                                           # g [1,H,1,1] broadcasts over [dk, dv]
+    if style in ("B", "D", "F", "G"):
+        predicted = m(b.matmul(k, state), b.exp(g))
+    elif style == "E":
+        predicted = b.matmul(m(k, b.exp(g)), state)
+    else:
+        predicted = b.matmul(k, decayed)
     delta = b.mul(b.sub(v, predicted), beta)                                        # [1,H,1,dv]
     new_state = b.add(decayed, b.matmul(b.transpose(k, [0, 1, 3, 2]), delta))
+    out = b.matmul(q, new_state)
+    if work != dtype:
+        out, new_state = b.cast(out, dtype), b.cast(new_state, dtype)
     if probe:
         b.output("p_decayed", decayed)
         b.output("p_predicted", predicted)
         b.output("p_delta", delta)
-    b.output("out", b.matmul(q, new_state))
+    if style == "G":
+        b.output("predicted", predicted if work == dtype else b.cast(predicted, dtype))
+    b.output("out", out)
     b.output("new_state", new_state)
     return b.build()
