@@ -74,7 +74,7 @@ def verify_package(package: Path, source: str, *, prompt: str, steps: int, max_l
     for number, variant in enumerate(wanted):
         t = time.perf_counter()
         if spec.builder == "gemma4":
-            runner = Gemma4Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks)
+            runner = Gemma4Runner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group)
         else:
             runner = PackageRunner.from_package(package, spec, variant=variant, max_length=max_length, chunk_sizes=chunks, decode_group=decode_group, prefill_group=prefill_group)
         generated, step_logits = runner.generate(token_ids, steps, eos=spec.eos_token_ids)

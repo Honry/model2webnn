@@ -113,8 +113,8 @@ def main(argv=None) -> int:
         sp.add_argument("--kv-style", nargs="+", choices=["staged", "onehot", "tensorScatter", "scatterND"], default=["staged"], help="KV cache protocols (see plan.json kv_protocols)")
         sp.add_argument("--staging-rows", type=int, nargs="+", default=[64], help="rows of the staging buffer (staged only)")
         sp.add_argument("--compute-type", nargs="+", choices=["float32", "float16"], default=["float32"], help="type of the computation inside the graphs (the boundaries stay f16)")
-        sp.add_argument("--blocks-per-graph", type=int, nargs="+", default=[1], help="also build decode graphs with K blocks each (fewer dispatches, longer compile)")
-        sp.add_argument("--prefill-blocks-per-graph", type=int, nargs="+", default=[1], help="the same for the prefill graphs")
+        sp.add_argument("--blocks-per-graph", type=int, nargs="+", default=[1], help="also build decode graphs with K blocks each (fewer dispatches, longer compile; Gemma 4 too: groups are cut per sequence of attention kinds)")
+        sp.add_argument("--prefill-blocks-per-graph", type=int, nargs="+", default=[1], help="the same for the prefill graphs (not for Gemma 4)")
 
     def source_args(sp):
         sp.add_argument("--endpoint", help="Hugging Face endpoint (default: $HF_ENDPOINT or https://huggingface.co; e.g. https://hf-mirror.com)")

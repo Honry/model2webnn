@@ -65,7 +65,17 @@
               "type": "object", "required": ["head", "block", "tail"],
               "properties": {
                 "head": { "type": "string" }, "block": { "type": "string" }, "tail": { "type": "string" }, "flush": { "type": "string" },
-                "block_groups": { "type": "object", "description": "number of blocks -> graph with that many blocks (single layer type models only)", "additionalProperties": { "type": "string" } }
+                "block_groups": {
+                  "type": "object",
+                  "description": "number of blocks -> graph with that many blocks (hybrid-layer models: b<j>_ controls per block when block_group_controls = per_block); Gemma 4 (decode only): number of blocks per graph -> the schedule of the N - 1 blocks (see chain.block_groups)",
+                  "additionalProperties": {
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "array", "items": { "type": "object", "required": ["first_block", "blocks", "key", "graph"],
+                                                     "properties": { "first_block": { "type": "integer" }, "blocks": { "type": "integer" }, "key": { "type": "string", "description": "the kinds of the blocks joined by '-' (so / fo / ss / fs)" }, "graph": { "type": "string" } } } }
+                    ]
+                  }
+                }
               }
             }
           },

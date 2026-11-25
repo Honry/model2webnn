@@ -1,6 +1,8 @@
 // Times every graph of a package ON ITS OWN (random inputs, N back-to-back dispatches of the same tensors, one readback): which graph of a model is slow?
 // URL: m2wgraphs.html?package=../packages/aion-2.3b-i8/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
 //      m2wgraphs.html?package=../packages/gemma4-e4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Gemma 4: one block graph per attention kind, and the sum over the layers = an estimate of a decode step)
+//      m2wgraphs.html?package=../packages/gemma4-e4b-pkg/&only=decode_head,decode_group,decode_tail,lm_head   (a Gemma 4 package built with --blocks-per-graph K: every decode group graph `decode_group <kinds>` and one
+//                                                                                                           ESTIMATED line per K = head + tail + lm_head + the sum over the group schedule)
 import { openPackage, loadGraph } from "../../lib/runtime/index.js";
 import { buildLmHeadGraph, setLmHeadFormat } from "./qwen3_subgraphs.js?v=20261124a";   // the hand-written lm_head (Qwen3-4B dims), timed side by side with the package graph
 
@@ -26,7 +28,7 @@ function dataFor(spec) {
     if (spec.dataType === "uint8" || spec.dataType === "int8") return randomBytes(n);
     if (spec.dataType === "int32") return new Int32Array(n);
     const half = new Float16Array(n);   // activations, scales, gammas, caches, masks (0 = visible), selectors
-    if (spec.name.endsWith("_scale")) half.fill(0.002); else if (spec.name.endsWith("_gamma") || spec.name === "layer_scalar") half.fill(1); else if (spec.role === "weight") half.fill(0.02); else if (spec.role === "activation" || spec.role === "kv") half.fill(0.05);
+    if (spec.name.endsWith("_scale")) half.fill(0.002); else if (spec.name.endsWith("_gamma") || spec.name.endsWith("layer_scalar")) half.fill(1); else if (spec.role === "weight") half.fill(0.02); else if (spec.role === "activation" || spec.role === "kv") half.fill(0.05);
     return spec.dataType === "float32" ? Float32Array.from(half) : half;
 }
 
@@ -132,10 +134,11 @@ async function main() {
     const key = param("maxLength", String(Math.min(...pkg.plan.max_lengths))), chunk = param("chunk", String(Math.min(...Object.keys(pkg.plan.graphs[pkg.plan.default_variant].prefill[key]).map(Number))));
     const variant = param("variant", pkg.plan.default_variant), table = pkg.plan.graphs[variant];
     const decode = table.decode[key], prefill = table.prefill[key][chunk], gemma = pkg.plan.architecture_kind === "gemma4";
+    const gemmaGroups = (t) => { const seen = new Map(); for (const schedule of Object.values(t.block_groups ?? {})) for (const e of schedule) seen.set(e.key, e); return [...seen.values()]; };   // Gemma 4: block_groups[K] = the schedule, graphs shared by key
     const blocksOf = (phase, t) => (gemma ? Object.entries(t.blocks).map(([kind, p]) => [`${phase}_block ${kind}`, p]) : [[`${phase}_block`, t.block]]);
     const list = [["lm_head", table.lm_head], ["decode_head", decode.head], ...blocksOf("decode", decode), ["decode_tail", decode.tail],
         ...(gemma ? Object.entries(decode.flush).map(([type, p]) => [`kv_flush ${type}`, p]) : decode.flush ? [["kv_flush", decode.flush]] : []),
-        ...Object.entries(decode.block_groups ?? {}).map(([k, p]) => [`decode_block_x${k}`, p]),
+        ...(gemma ? gemmaGroups(decode).map(({ key, graph }) => [`decode_group ${key}`, graph]) : Object.entries(decode.block_groups ?? {}).map(([k, p]) => [`decode_block_x${k}`, p])),
         ["prefill_head", prefill.head], ...blocksOf("prefill", prefill), ["prefill_tail", prefill.tail]].filter(([name]) => !only.length || only.some((o) => name === o || name.startsWith(o + " ")));
     const chainedMs = {};   // graph name -> ms per dispatch when chained: the sum over the layers estimates a decode step
     const ctx = await navigator.ml.createContext({ deviceType });
@@ -174,7 +177,12 @@ async function main() {
         graph.destroy?.();
     }
     if (gemma && ["decode_head", "decode_tail", "lm_head"].every((n) => chainedMs[n] !== undefined)) {   // every block graph of the kinds of layers 1 .. N-1 once per layer
-        const kinds = pkg.plan.chain.kinds.slice(1);
+        const kinds = pkg.plan.chain.kinds.slice(1), fixed = chainedMs.decode_head + chainedMs.decode_tail + chainedMs.lm_head;
+        for (const [k, schedule] of Object.entries(decode.block_groups ?? {})) {   // with block groups: one dispatch per entry of the schedule
+            if (!schedule.every((e) => chainedMs[`decode_group ${e.key}`] !== undefined)) continue;
+            const blocks = schedule.reduce((sum, e) => sum + chainedMs[`decode_group ${e.key}`], 0);
+            log(`ESTIMATED decode step with ${k} blocks per graph (sum of the chained graph times): ${(fixed + blocks).toFixed(1)} ms  = head + tail + lm_head ${fixed.toFixed(2)} + ${schedule.length} groups ${blocks.toFixed(1)} ms`);
+        }
         if (kinds.every((k) => chainedMs[`decode_block ${k}`] !== undefined)) {
             const total = chainedMs.decode_head + chainedMs.decode_tail + chainedMs.lm_head + kinds.reduce((sum, k) => sum + chainedMs[`decode_block ${k}`], 0);
             const perKind = Object.entries(kinds.reduce((m, k) => ({ ...m, [k]: (m[k] ?? 0) + 1 }), {})).map(([k, n]) => `${n} x ${k} ${(n * chainedMs[`decode_block ${k}`]).toFixed(1)} ms`).join(", ");

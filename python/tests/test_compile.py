@@ -70,7 +70,8 @@ def test_committed_tiny_gemma4_package_is_what_the_compiler_writes_today(tmp_pat
 
     committed = Path(__file__).resolve().parents[2] / "tests" / "golden" / "tiny-gemma4-package"
     write_tiny_gemma4(tmp_path / "hf", dtype="BF16")
-    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(128,), chunks=(16, 8), staging_rows=(8,), compute_types=("float32", "float16"), workers=2, progress=lambda m: None)
+    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(128,), chunks=(16, 8), staging_rows=(8,), compute_types=("float32", "float16"), blocks_per_graph=(1, 2, 3, 4, 5), workers=2,
+                          progress=lambda m: None)
     fresh = {f["path"]: f["sha256"] for f in json.loads((out / "m2w.json").read_text())["files"]}
     old = {f["path"]: f["sha256"] for f in json.loads((committed / "m2w.json").read_text())["files"]}
     assert fresh == old, "tests/golden/tiny-gemma4-package is stale: run `python scripts/make-tiny-package.py`"

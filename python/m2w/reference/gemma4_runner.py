@@ -8,6 +8,7 @@ of its producer layer: in a decode step the main cache and the staging buffer AF
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -24,8 +25,9 @@ from .gemma4_package import Gemma4PackageReader
 
 class Gemma4Runner:
     def __init__(self, spec: ModelSpec, weights_dir, *, max_length: int = 128, chunk_sizes=(16,), staging_rows: int = 8, opt: Optional[D.GraphOptions] = None,
-                 graphs: Optional[dict] = None, prefill_fixed_tokens: int = 200):
+                 graphs: Optional[dict] = None, prefill_fixed_tokens: int = 200, blocks_per_graph: int = 1):
         self.spec = spec
+        self.group = blocks_per_graph   # decode block groups (the prefill chain always runs one dispatch per block)
         self.opt = opt or D.GraphOptions(kv_style="staged", staging_rows=staging_rows)
         self.R, self.P = self.opt.staging_rows, max_length - 1
         self.sizes = sorted(set(chunk_sizes))
@@ -48,12 +50,22 @@ class Gemma4Runner:
         flush = {t: G.build_flush_graph(s, t, staging_rows=self.R, past_len=P) for t in sorted(set(s.layer_types))}
         decode = {"head": G.build_head_graph(s, opt, seq=1, past_len=P), "blocks": {k: G.build_block_graph(s, opt, k, seq=1, past_len=P) for k in sorted(set(s.layer_kind(i) for i in range(s.num_layers)))},
                   "tail": G.build_tail_graph(s, opt, seq=1), "flush": flush}
+        if self.group > 1:
+            decode["groups"] = []   # the schedule: (first block, blocks, graph)
+            built = {}
+            for first, blocks in G.block_group_schedule(s, self.group):
+                layout = G.block_group_layout(s, first, blocks)
+                key = G.block_group_key(layout)
+                if key not in built:
+                    built[key] = G.build_block_group_graph(s, opt, layout, seq=1, past_len=P)
+                decode["groups"].append((first, blocks, built[key]))
         prefill = {C: {"head": G.build_head_graph(s, opt, seq=C, past_len=P), "tail": G.build_tail_graph(s, opt, seq=C),
                        "blocks": {k: G.build_block_graph(s, opt, k, seq=C, past_len=P) for k in sorted(set(s.layer_kind(i) for i in range(s.num_layers)))}} for C in self.sizes}
         return {"decode": decode, "prefill": prefill, "lm_head": G.build_lm_head_graph(s, opt)}
 
     @classmethod
-    def from_package(cls, package, spec: ModelSpec, *, variant: Optional[str] = None, max_length: int = 0, chunk_sizes=None, prefill_fixed_tokens: int = 200) -> "Gemma4Runner":
+    def from_package(cls, package, spec: ModelSpec, *, variant: Optional[str] = None, max_length: int = 0, chunk_sizes=None, prefill_fixed_tokens: int = 200,
+                     decode_group: int = 1) -> "Gemma4Runner":
         package = Path(package)
         plan = json.loads((package / "plan.json").read_text(encoding="utf-8"))
         info = next(v for v in plan["variants"] if v["id"] == (variant or plan["default_variant"]))
@@ -63,13 +75,18 @@ class Gemma4Runner:
         load = lambda path: serialize.load(package / path)   # noqa: E731
         d = table["decode"][str(L)]
         decode = {"head": load(d["head"]), "tail": load(d["tail"]), "blocks": {k: load(p) for k, p in d["blocks"].items()}, "flush": {t: load(p) for t, p in d["flush"].items()}}
+        if decode_group > 1:
+            if str(decode_group) not in d.get("block_groups", {}):
+                raise ValueError(f"the package has no decode block groups of {decode_group} blocks (it has {', '.join(d.get('block_groups', {})) or 'none'})")
+            loaded = {}
+            decode["groups"] = [(e["first_block"], e["blocks"], loaded.setdefault(e["graph"], load(e["graph"]))) for e in d["block_groups"][str(decode_group)]]
         prefill = {}
         for C in sizes:
             f = table["prefill"][str(L)][str(C)]
             prefill[C] = {"head": load(f["head"]), "tail": load(f["tail"]), "blocks": {k: load(p) for k, p in f["blocks"].items()}}
         opt = D.GraphOptions(**{**{k: v for k, v in plan["profile"].items() if k in D.GraphOptions.__dataclass_fields__}, "compute_type": info["compute_type"], "kv_style": "staged",
                                 "staging_rows": info.get("staging_rows", 64)})
-        return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens,
+        return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens, blocks_per_graph=decode_group,
                    graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
 
     def _lm_head_externals(self) -> dict:
@@ -134,15 +151,55 @@ class Gemma4Runner:
         store(0, out)
         residual, attention = out["residual"], out["attention_output"]
         ple = [out[f"ple_{i}"] for i in range(N)]
-        for i in range(N - 1):
-            out = run(graphs["blocks"][self.kinds[i + 1]], {"residual": residual, "attention_output": attention, "per_layer_input": ple[i], **self._weights(i, self.ffn_names), **feeds_for(i + 1)})
-            store(i + 1, out)
-            residual, attention = out["next_residual"], out["next_attention_output"]
+        if decode and self.group > 1:
+            for first, blocks, graph in graphs["groups"]:
+                out = run(graph, self._group_feeds(graph, first, residual, attention, ple, rope, masks, selectors))
+                for j in range(blocks):
+                    if f"b{j}_updated_key" in out:
+                        store(first + j + 1, {"updated_key": out[f"b{j}_updated_key"], "updated_value": out[f"b{j}_updated_value"]})
+                residual, attention = out["next_residual"], out["next_attention_output"]
+        else:
+            for i in range(N - 1):
+                out = run(graphs["blocks"][self.kinds[i + 1]], {"residual": residual, "attention_output": attention, "per_layer_input": ple[i], **self._weights(i, self.ffn_names), **feeds_for(i + 1)})
+                store(i + 1, out)
+                residual, attention = out["next_residual"], out["next_attention_output"]
         if not last:
             return None
         tail = run(graphs["tail"], {"residual": residual, "attention_output": attention, "per_layer_input": ple[N - 1], **self._weights(N - 1, self.ffn_names), "final_norm_gamma": self.final_gamma})
         logits = run(self.g["lm_head"], {"final_hidden_states": tail["final_hidden_states"]}, externals=self.externals)["logits"]
         return logits.reshape(-1)[: s.vocab].astype(np.float32)
+
+    def _group_feeds(self, graph, first: int, residual, attention, ple, rope, masks, selectors) -> dict:
+        """The feeds of a decode block group, bound by the NAMES of its inputs (the contract of plan.json chain.block_groups; the TS runtime does the same): residual / attention_output of
+        the first block, the controls per layer type, and b<j>_ = the block of layers first + j (feed-forward half) and first + j + 1 (attention half)."""
+        feeds = {"residual": residual, "attention_output": attention}
+        for name in graph.inputs:
+            m = re.fullmatch(r"b(\d+)_(.+)", name)
+            if m:
+                j, rest = int(m.group(1)), m.group(2)
+                ffn_layer, layer = first + j, first + j + 1
+                p = self.producer[layer]
+                if rest == "per_layer_input":
+                    feeds[name] = ple[ffn_layer]
+                elif rest in ("past_key", "past_value"):
+                    feeds[name] = (self.k if rest == "past_key" else self.v)[p]
+                elif rest in ("staging_key", "staging_value"):
+                    feeds[name] = (self.sk if rest == "staging_key" else self.sv)[p]
+                elif rest in self.ffn_names:
+                    feeds[name] = self.reader.raw(self.reader._layer[ffn_layer], rest)
+                elif rest in self.attention_names[self.kinds[layer]]:
+                    feeds[name] = self.reader.raw(self.reader._layer[layer], rest)
+                else:
+                    raise KeyError(f"nothing is bound to the group input {name}")
+            elif name in selectors:
+                feeds[name] = selectors[name]
+            elif name not in feeds:
+                c = re.fullmatch(r"(.+)_(rope_cos|rope_sin|attention_mask)", name)
+                if c is None:
+                    raise KeyError(f"nothing is bound to the group input {name}")
+                t, control = c.groups()
+                feeds[name] = {"rope_cos": rope[t][0], "rope_sin": rope[t][1], "attention_mask": masks[(t, "own")]}[control]
+        return feeds
 
     # ----------------------------------------------------------------------------------------------- prefill / decode
     def plan(self, token_count: int) -> list:

@@ -114,8 +114,9 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
     return tables
 
 
-def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks) -> dict:
-    """The graphs of a Gemma-4-style model, per variant: head, one block per attention kind of layers 1.., tail, flush per layer type (own K / V), lm_head."""
+def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph=(1,)) -> dict:
+    """The graphs of a Gemma-4-style model, per variant: head, one block per attention kind of layers 1.., tail, flush per layer type (own K / V), lm_head;
+    decode only: for every K > 1 of blocks_per_graph the block groups (decode.block_groups[K] = the schedule of the N - 1 blocks, one graph per distinct sequence of kinds)."""
     block_kinds = sorted({spec.layer_kind(i) for i in range(1, spec.num_layers)})
     cache_types = sorted({spec.layer_types[i] for i in range(spec.num_layers) if not spec.kv_producer or spec.kv_producer[i] < 0})
     tables: dict = {}
@@ -137,6 +138,9 @@ def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, va
                 "blocks": {k: emit(G.build_block_graph(spec, vopt, k, seq=1, past_len=past, name=f"decode_block_{k}_L{L}")) for k in block_kinds},
                 "tail": emit(G.build_tail_graph(spec, vopt, seq=1, name="decode_tail")),
                 "flush": {t: emit(G.build_flush_graph(spec, t, staging_rows=vopt.staging_rows, past_len=past, name=f"kv_flush_{t}_L{L}")) for t in cache_types}}
+            groups = {str(k): _gemma4_block_groups(spec, vopt, k, past, L, emit) for k in blocks_per_graph if k > 1}
+            if groups:
+                table["decode"][str(L)]["block_groups"] = groups
             table["prefill"][str(L)] = {}
             for C in chunks:
                 if C > past:
@@ -149,9 +153,25 @@ def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, va
     return tables
 
 
-def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks) -> dict:
+def _gemma4_block_groups(spec: arch.ModelSpec, vopt: D.GraphOptions, count: int, past: int, L: int, emit) -> list:
+    """The schedule of the decode block groups of `count` blocks: [{first_block, blocks, key, graph}]; the graphs are shared by the groups with the same sequence of kinds (the key)."""
+    if count > spec.num_layers - 1:
+        raise ValueError(f"{count} blocks per graph: the model has {spec.num_layers - 1} blocks")
+    schedule, built = [], {}
+    for first, blocks in G.block_group_schedule(spec, count):
+        layout = G.block_group_layout(spec, first, blocks)
+        key = G.block_group_key(layout)
+        if key not in built:
+            built[key] = (layout, emit(G.build_block_group_graph(spec, vopt, layout, seq=1, past_len=past, name=f"decode_group_{key}_L{L}")))
+        elif built[key][0] != layout:   # the same kinds but another cache sharing: would need its own graph
+            raise ValueError(f"block groups with the kinds {key} differ in which block reads which cache: {built[key][0]} vs {layout}")
+        schedule.append({"first_block": first, "blocks": blocks, "key": key, "graph": built[key][1]})
+    return schedule
+
+
+def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks, blocks_per_graph=(1,)) -> dict:
     kinds = sorted({spec.layer_kind(i) for i in range(spec.num_layers)})
-    return {
+    plan = {
         "format": "m2w-plan", "version": 0, "target": TARGET, "architecture_kind": "gemma4",
         "weights": {
             "description": "tensor names of the weights manifest: attention = by attention kind (the layer type and whether the layer has K / V of its own), ffn = the feed-forward half of every layer "
@@ -165,7 +185,7 @@ def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
         },
         "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type", "value_layout")},
         "variants": variants, "default_variant": variants[0]["id"],
-        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": [1], "prefill_blocks_per_graph": [1],
+        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": [1],
         "graphs": graphs,
         "chain": {
             "description": "HEAD = attention half of layer 0 + the per-layer-embedding prologue (outputs ple_0 .. ple_{N-1}); BLOCK i (i = 0 .. N-2) = feed-forward half of layer i (input per_layer_input = ple_i) + "
@@ -188,16 +208,29 @@ def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
         "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
         "logits": {"padded_vocab": spec.vocab_padded, "vocab": spec.vocab, "note": "argmax / sampling over the first `vocab` entries only"},
     }
+    if any(k > 1 for k in blocks_per_graph):
+        plan["chain"]["block_groups"] = {
+            "description": "decode only: graphs.<variant>.decode.<max length>.block_groups[K] = the N - 1 BLOCKs cut into runs of K ([{first_block, blocks, key, graph}], the last run may be shorter), one "
+                           "graph per distinct sequence of kinds (key: the kinds joined by '-', so / fo = sliding / full attention with K / V of its own, ss / fs = sliding / full attention sharing K / V). A group graph takes "
+                           "residual + attention_output of its first block and returns next_residual + next_attention_output of its last block. Block j (BLOCK first_block + j) has the prefix b<j>_: "
+                           "b<j>_per_layer_input (ple_<first_block + j>), the weights of the feed-forward half of layer first_block + j and of the attention half of layer first_block + j + 1, "
+                           "and b<j>_past_key / b<j>_past_value / b<j>_staging_key / b<j>_staging_value = the main cache and staging buffer of the layer whose K / V that attention half reads "
+                           "(model.json kv_producer); a block that reads the cache of a layer already read by an earlier block of the group has no cache inputs (it reuses that block's), and a block "
+                           "that reads the cache of a layer INSIDE the group attends over the staging buffer after that layer's update, computed in the graph. Output b<j>_updated_key / "
+                           "b<j>_updated_value (blocks with K / V of their own) = the spare staging buffer, to be swapped in. <layer type>_rope_cos / _rope_sin / _attention_mask: one per layer type "
+                           "(the decode masks of own and shared layers are the same). Prefill has no groups (prefill_blocks_per_graph = [1]).",
+            "kind_codes": {code: kind for kind, code in G.KIND_CODES.items()}}
+    return plan
 
 
 def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
     if spec.builder == "gemma4":
         if any(v["kv_style"] != "staged" for v in variants):
             raise ValueError("Gemma 4 packages support the staged KV protocol only")
-        if any(k > 1 for k in tuple(blocks_per_graph) + tuple(prefill_blocks_per_graph)):
-            raise ValueError("block groups are not available for Gemma 4 packages yet")
-        graphs = write_graphs_gemma4(spec, opt, out, variants, max_lengths, chunks)
-        return graphs, build_plan_gemma4(spec, opt, variants, graphs, max_lengths, chunks)
+        if any(k > 1 for k in prefill_blocks_per_graph):
+            raise ValueError("block groups of Gemma 4 packages are for decode only: prefill blocks per graph must be 1 (prefill grouping gave no TTFT gain)")
+        graphs = write_graphs_gemma4(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph)
+        return graphs, build_plan_gemma4(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph)
     graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     return graphs, build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
 
@@ -292,6 +325,8 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
     spec = arch.spec_from_config(config, generation_config)
     _check_lengths(spec, max_lengths, progress)
+    if spec.builder == "gemma4" and any(k > 1 for k in prefill_blocks_per_graph):   # before the (long) quantization
+        raise ValueError("block groups of Gemma 4 packages are for decode only: prefill blocks per graph must be 1")
     opt = D.GraphOptions(merge_projections=merge_projections or spec.builder == "gemma4", lm_head_format="int8-sym" if spec.builder == "gemma4" else lm_head_format)
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     progress(f"{spec.architecture}: {spec.num_layers} layers, hidden {spec.hidden}, {spec.num_heads}/{spec.num_kv_heads} heads, vocab {spec.vocab} (padded {spec.vocab_padded}), "
