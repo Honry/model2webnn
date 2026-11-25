@@ -102,7 +102,7 @@ def test_runner_with_the_uint8_asymmetric_lm_head(tmp_path):
 
 
 # ------------------------------------------------------------------------------------------------------------- option variants (KV protocol, chunk plans, groups)
-STYLES = ["staged", "onehot", "onehot-transposed", "tensorScatter"]   # onehot-transposed: the one-hot protocol with the value cache stored [1,kvHeads,128,P]
+STYLES = ["staged", "onehot", "onehot-transposed", "tensorScatter", "scatterND"]   # onehot-transposed: the one-hot protocol with the value cache stored [1,kvHeads,128,P]
 
 
 def style_kw(style):

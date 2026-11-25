@@ -25,8 +25,8 @@
         "type": "object",
         "required": ["id", "kv_style", "compute_type"],
         "properties": {
-          "id": { "type": "string", "description": "staged-r<rows>-<compute type> | onehot-<compute type> | tensorScatter-<compute type>; the graphs are in graphs/<id>/" },
-          "kv_style": { "enum": ["staged", "onehot", "tensorScatter"], "description": "see kv_protocols" },
+          "id": { "type": "string", "description": "staged-r<rows>-<compute type> | onehot-<compute type> | tensorScatter-<compute type> | scatterND-<compute type>; the graphs are in graphs/<id>/" },
+          "kv_style": { "enum": ["staged", "onehot", "tensorScatter", "scatterND"], "description": "see kv_protocols" },
           "compute_type": { "enum": ["float32", "float16"], "description": "type of the computation inside the graphs; the boundaries stay float16" },
           "staging_rows": { "type": "integer", "description": "staged only: rows of the staging buffer = decode steps between flushes" },
           "scatter_index_type": { "enum": ["int32", "int64"], "description": "tensorScatter only: data type of kv_write_index" },

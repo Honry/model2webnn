@@ -1,5 +1,5 @@
 """Executes the COMPILED graphs (HEAD / BLOCK / TAIL / lm_head / flush) with the numpy interpreter and the packed weights, following the runtime protocol:
-chunked prefill (one or several chunk sizes, the last chunk left-padded), decode with one of the KV protocols (staged / onehot / tensorScatter, see protocol.py).
+chunked prefill (one or several chunk sizes, the last chunk left-padded), decode with one of the KV protocols (staged / onehot / tensorScatter / scatterND, see protocol.py).
 It is the executable specification of the browser runtime and checks graphs + weights + per-layer-type masks / RoPE end to end on the CPU.
 
 Layer types: the BLOCK graph for layer i also holds the attention half of layer i+1, so rope_cos / rope_sin / attention_mask are bound with the tables of the type
@@ -218,9 +218,13 @@ class PackageRunner:
                 for i in range(valid):
                     hidden[0, pad + i] = self._embed_row(tokens[start + i])
                 rope = protocol.rope_tables(s, list(range(start, start + valid)), C, pad)
-                masks = protocol.prefill_masks(s, P, C, start, valid)
-                keep, selector = protocol.prefill_selectors(P, C, start, valid)
-                selectors = {"rows_to_keep": keep, "row_selector": selector}
+                if self.style == "scatterND":
+                    masks = protocol.scatternd_prefill_masks(s, P, C, start, valid)
+                    selectors = {"kv_indices": protocol.scatternd_prefill_indices(s.num_kv_heads, P, C, start, valid)}
+                else:
+                    masks = protocol.prefill_masks(s, P, C, start, valid)
+                    keep, selector = protocol.prefill_selectors(P, C, start, valid)
+                    selectors = {"rows_to_keep": keep, "row_selector": selector}
                 start += valid
             logits = self._chain(self.g["prefill"][C], False, hidden, rope, masks, selectors, last, self.prefill_group)
         self.base, self.filled, self.pad = n, 0, pad_total   # staged: the prompt is in the main cache, the staging buffer is empty
@@ -255,6 +259,9 @@ class PackageRunner:
             masks = protocol.decode_masks_onehot(s, P, pos)
             keep, selector = protocol.decode_selectors_onehot(P, pos)
             selectors = {"rows_to_keep": keep, "row_selector": selector}
+        elif self.style == "scatterND":
+            masks = protocol.scatternd_decode_masks(s, P, pos)
+            selectors = {"kv_indices": protocol.scatternd_decode_indices(s.num_kv_heads, pos)}
         else:
             masks = protocol.scatter_decode_masks(s, P, pos, self.pad)
             selectors = {"kv_write_index": np.array([self.pad + pos], np.dtype(self.opt.scatter_index_type))}

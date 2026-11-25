@@ -124,6 +124,10 @@ function emitNode(b: BuilderLike, n: IRNode, ref: Ref): OperandLike {
       if (typeof b.tensorScatter !== 'function') throw new Error('this browser has no MLGraphBuilder.tensorScatter');
       return b.tensorScatter(x, ref(n.inputs[1]), ref(n.inputs[2]), { axis: o.axis });
     }
+    case 'scatterND': {
+      if (typeof b.scatterND !== 'function') throw new Error('this browser has no MLGraphBuilder.scatterND');
+      return b.scatterND(x, ref(n.inputs[1]), ref(n.inputs[2]));
+    }
     default: throw new Error(`m2w-graph: unsupported operator '${n.op}'`);
   }
 }

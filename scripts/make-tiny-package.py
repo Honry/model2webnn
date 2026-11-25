@@ -17,6 +17,6 @@ out = root / "_out"
 golden = root.parent / "tests" / "golden"
 write_tiny_model(out / "tiny-hf", dtype="BF16")
 pkg = compile_model(str(out / "tiny-hf"), golden / "tiny-package", max_lengths=(max_length,), chunks=(chunk, small_chunk),
-                    kv_styles=("staged", "onehot", "tensorScatter"), staging_rows=(staging,), compute_types=("float32", "float16"), blocks_per_graph=(1, 2), prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
+                    kv_styles=("staged", "onehot", "tensorScatter", "scatterND"), staging_rows=(staging,), compute_types=("float32", "float16"), blocks_per_graph=(1, 2), prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
 ids = [int(t) for t in np.random.default_rng(0).integers(3, 300, 45)]
 sys.exit(verify_package(pkg, str(out / "tiny-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk]))

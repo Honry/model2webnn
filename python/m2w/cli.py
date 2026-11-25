@@ -106,7 +106,7 @@ def main(argv=None) -> int:
         """The graph variants of a package: kv style x staging rows (staged only) x compute type; the first of each list is the default. Weights are shared by all variants."""
         sp.add_argument("--max-length", type=int, nargs="+", default=[1152] if defaults else None, help="KV cache capacities to build graphs for (static shapes)")
         sp.add_argument("--chunk", type=int, nargs="+", default=[64] if defaults else None, help="prefill chunk sizes (several: the runtime plans the chunk sequence of a prompt)")
-        sp.add_argument("--kv-style", nargs="+", choices=["staged", "onehot", "tensorScatter"], default=["staged"], help="KV cache protocols (see plan.json kv_protocols)")
+        sp.add_argument("--kv-style", nargs="+", choices=["staged", "onehot", "tensorScatter", "scatterND"], default=["staged"], help="KV cache protocols (see plan.json kv_protocols)")
         sp.add_argument("--staging-rows", type=int, nargs="+", default=[64], help="rows of the staging buffer (staged only)")
         sp.add_argument("--compute-type", nargs="+", choices=["float32", "float16"], default=["float32"], help="type of the computation inside the graphs (the boundaries stay f16)")
         sp.add_argument("--blocks-per-graph", type=int, nargs="+", default=[1], help="also build decode graphs with K blocks each (fewer dispatches, longer compile)")
@@ -162,7 +162,7 @@ def main(argv=None) -> int:
     g.add_argument("--max-length", type=int, default=1152)
     g.add_argument("--chunk", type=int, default=64)
     g.add_argument("--staging-rows", type=int, default=64)
-    g.add_argument("--kv-style", choices=["staged", "onehot", "tensorScatter"], default="staged")
+    g.add_argument("--kv-style", choices=["staged", "onehot", "tensorScatter", "scatterND"], default="staged")
     g.add_argument("--compute-type", choices=["float32", "float16"], default="float32")
     g.add_argument("--blocks-per-graph", type=int, nargs="*", default=[])
     g.add_argument("--no-merge", action="store_true")

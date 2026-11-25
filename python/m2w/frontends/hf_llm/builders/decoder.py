@@ -57,7 +57,7 @@ class GraphOptions:
     compute_type: str = "float32"  # "float32" (the NPUW form) | "float16"
     zero_point: str = "const"  # "const": all-zero int4 constant (an optional-zero-point Chromium drops it) | "none"
     merge_projections: bool = True  # q/k/v -> one projection, gate/up -> one projection
-    kv_style: str = "staged"  # decode: "staged" | "onehot" | "tensorScatter";  prefill (S > 1) always one-hot (or tensorScatter)
+    kv_style: str = "staged"  # decode: "staged" | "onehot" | "tensorScatter" | "scatterND";  prefill (S > 1) always one-hot (or tensorScatter / scatterND)
     staging_rows: int = 64
     scatter_index_type: str = "int32"
     value_layout: str = "natural"  # "natural": value cache [1,kvHeads,P,128] like the key cache | "transposed": [1,kvHeads,128,P] (onehot only; faster than natural on the NPU for the one-hot update,
@@ -185,9 +185,13 @@ def repeat_kv(c: Ctx, x: Value, trailing) -> Value:
 def update_kv_cache(c: Ctx, past_key, past_value, key, value, past_len: int, seq: int, selector_prefix: str = "", style: str = "onehot", transposed_value: bool = False):
     """Write the new key / value rows into a fixed-size cache inside the graph. Returns (updated_key, updated_value).
     onehot       : past * rows_to_keep + row_selector @ new     (rows_to_keep [1,1,P,1], row_selector [1,1,P,S], both host inputs)
-    tensorScatter: tensorScatter(past, new, kv_write_index, axis=2)   (one start row; the S rows go in contiguously)"""
+    tensorScatter: tensorScatter(past, new, kv_write_index, axis=2)   (one start row; the S rows go in contiguously)
+    scatterND    : scatterND(past, kv_indices, new)                    (kv_indices int32 [1,kvHeads,S,3] = (0, head, cache row) of every new row)"""
     b, d = c.b, c.dims
     present_key, present_value = c.to_f16(key), c.to_f16(value)
+    if style == "scatterND":
+        indices = c.shared("kv_indices", "int32", [1, d.num_kv_heads, seq, 3], "control")
+        return b.scatter_nd(past_key, indices, present_key), b.scatter_nd(past_value, indices, present_value)
     if style == "tensorScatter":
         index = c.shared("kv_write_index", c.opt.scatter_index_type, [1], "control")
         return b.tensor_scatter(past_key, present_key, index, axis=2), b.tensor_scatter(past_value, present_value, index, axis=2)
@@ -205,11 +209,11 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
     """One layer's attention. Returns (attention_output f16 [1,S,attention_width], kv_outputs {name: Value})."""
     b, d, opt = c.b, c.dims, c.opt
     c.seq = seq
-    use_tensor_scatter = opt.kv_style == "tensorScatter" and past_len > 0
+    use_scatter = opt.kv_style in ("tensorScatter", "scatterND") and past_len > 0
     staged = past_len > 0 and seq == 1 and opt.kv_style == "staged"
     staging_rows = opt.staging_rows
-    # tensorScatter: attention reads the scattered cache itself (length P); staged: concat(main, staging); otherwise concat(past, new rows)
-    total = past_len if use_tensor_scatter else past_len + staging_rows if staged else past_len + seq
+    # tensorScatter / scatterND: attention reads the scattered cache itself (length P); staged: concat(main, staging); otherwise concat(past, new rows)
+    total = past_len if use_scatter else past_len + staging_rows if staged else past_len + seq
 
     control = prefix if c.per_block_controls else ""   # the rope tables / mask are shared by all blocks of a group, unless every block gets its own (layers of different types)
     cos = c.shared(control + "rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
@@ -247,8 +251,8 @@ def attention_half(c: Ctx, residual: Value, w: dict, seq: int, past_len: int, ma
     # 2. attention over [cache + new rows]; the cache update is part of the same graph
     to_c = c.to_compute
     kv_out: dict = {}
-    if use_tensor_scatter:
-        updated_key, updated_value = update_kv_cache(c, past_key, past_value, key, value, past_len, seq, style="tensorScatter")
+    if use_scatter:
+        updated_key, updated_value = update_kv_cache(c, past_key, past_value, key, value, past_len, seq, style=opt.kv_style)
         all_keys, all_values = to_c(updated_key), to_c(updated_value)
         kv_out = {"updated_key": updated_key, "updated_value": updated_value}
     elif staged:

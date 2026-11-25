@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { cosSin, invFreqFor } from './rope.js';
 import {
   decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, planPrefill, prefillMasks, prefillSelectors, ropeTables, scatterDecodeMasks, scatterPrefillMasks,
-  scatterPrefillRope, type LayoutSpec,
+  scatterNDDecodeIndices, scatterNDDecodeMasks, scatterNDPrefillIndices, scatterNDPrefillMasks, scatterPrefillRope, type LayoutSpec,
 } from './protocol.js';
 
 // vectors written by python/tests/test_protocol_golden.py from the Python reference
@@ -85,6 +85,14 @@ describe('protocol', () => {
     }
     const d = g.scatter_decode, masks = scatterDecodeMasks(spec, PS, d.pos, d.pad);
     for (const type of Object.keys(d.masks)) expect(visibleColumns(masks[type], 1)).toEqual(d.masks[type]);
+  });
+  it('scatterND KV: prefill masks / indices (pad rows parked behind the real rows) and decode masks / indices', () => {
+    const p = g.scatternd_prefill, masks = scatterNDPrefillMasks(spec, P, C, p.start, p.valid);
+    for (const type of Object.keys(p.masks)) expect(visibleColumns(masks[type], C)).toEqual(p.masks[type]);
+    expect(Array.from(scatterNDPrefillIndices(p.kv_heads, P, C, p.start, p.valid))).toEqual(p.indices);
+    const d = g.scatternd_decode, decode = scatterNDDecodeMasks(spec, P, d.pos);
+    for (const type of Object.keys(d.masks)) expect(visibleColumns(decode[type], 1)).toEqual(d.masks[type]);
+    expect(Array.from(scatterNDDecodeIndices(d.kv_heads, d.pos))).toEqual(d.indices);
   });
   it('prefill planning picks the same chunk sequences as the reference', () => {
     for (const v of g.plans) expect(planPrefill(v.sizes, v.tokens, v.fixed)).toEqual(v.plan);

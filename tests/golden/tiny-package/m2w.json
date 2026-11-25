@@ -23,7 +23,8 @@
     "transpose",
     "reshape",
     "cast",
-    "tensorScatter"
+    "tensorScatter",
+    "scatterND"
    ],
    "dataTypes": [
     "float16",
@@ -162,6 +163,136 @@
   },
   {
    "path": "graphs/onehot-float32/prefill_tail_C8.json",
+   "bytes": 5109,
+   "sha256": "693031d2454b67c0ae03b474c1f25b1cf6a356cdcb105d525d51dd1dee9ea5e1"
+  },
+  {
+   "path": "graphs/scatterND-float16/decode_block_L128.json",
+   "bytes": 10349,
+   "sha256": "2e0071ddeb9a3cf3b3cf80ba40c8d4c5142e3417defeece407dc801c93870a14"
+  },
+  {
+   "path": "graphs/scatterND-float16/decode_block_x2_L128.json",
+   "bytes": 19932,
+   "sha256": "2e319762f9f5f47392447f1bfa9ef18fd2e5e70652695ea1591ecf1d0ff7f391"
+  },
+  {
+   "path": "graphs/scatterND-float16/decode_head_L128.json",
+   "bytes": 7090,
+   "sha256": "93b4e038db24a342fd19fbcf3cbcd665139e93b788201e5fc8132e964b862366"
+  },
+  {
+   "path": "graphs/scatterND-float16/decode_tail.json",
+   "bytes": 4397,
+   "sha256": "4456ea8bd646179541c4073326b17a9dfb9bcc5f84d4003e630c27086941aa60"
+  },
+  {
+   "path": "graphs/scatterND-float16/lm_head.json",
+   "bytes": 837,
+   "sha256": "4107cf14972ae693c90e35d15b4ea833f7be9338566fefffce92aedaf2376abb"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_block_L128_C16.json",
+   "bytes": 10383,
+   "sha256": "8971e5d4a015a9f4ee1aa111a671c1a3190b09e7ab56ac6f55afc107de83d572"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_block_L128_C8.json",
+   "bytes": 10353,
+   "sha256": "3c3ff5b14ee1dee2a8eb25eab57a0899923dc5c87f56ba6422f569407b952f8a"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_block_x2_L128_C16.json",
+   "bytes": 19990,
+   "sha256": "0ff4294db9960d1514e4ce32b9016d49373deb031185e1dcd136cf8f4dcd240c"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_block_x2_L128_C8.json",
+   "bytes": 19936,
+   "sha256": "2457ee9c995541a6e93d983a4f1fe0fe82a0a299bc323e8f9195ea1ff0164e04"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_head_L128_C16.json",
+   "bytes": 7116,
+   "sha256": "df952774e5c1ce8286f6eac40273be8963e1dcdaa40517202963bc86966ca64c"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_head_L128_C8.json",
+   "bytes": 7094,
+   "sha256": "3a3a344b6472a76b64f8dda943125fd7c16357b25079175eb4aaad9bb68b5306"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_tail_C16.json",
+   "bytes": 4510,
+   "sha256": "f716b156af4908715ead0386ffcb8f9a1afc4e72ba2e389c634bb4ccb73546d0"
+  },
+  {
+   "path": "graphs/scatterND-float16/prefill_tail_C8.json",
+   "bytes": 4498,
+   "sha256": "d35dd8c33fc3374421d3be76b7d381cb441a64f4e3654714df3ef4ff0bc724e8"
+  },
+  {
+   "path": "graphs/scatterND-float32/decode_block_L128.json",
+   "bytes": 11992,
+   "sha256": "123e3caa397ed1ebc34e5ea20cfed3279614a97ea05d24f024ffdf135f377e7c"
+  },
+  {
+   "path": "graphs/scatterND-float32/decode_block_x2_L128.json",
+   "bytes": 23060,
+   "sha256": "7959f008d809d7982adda442f58fb717159e821e10817c63e146aa9f800d77d3"
+  },
+  {
+   "path": "graphs/scatterND-float32/decode_head_L128.json",
+   "bytes": 8199,
+   "sha256": "e8fc72694f6c11fd41e9512982a1a860d9650b113b28b9e96a037fb526135e85"
+  },
+  {
+   "path": "graphs/scatterND-float32/decode_tail.json",
+   "bytes": 5008,
+   "sha256": "5c058454ba659fc0683b237e12961772788a23e5f60a045cc4ca0fd7974a53e0"
+  },
+  {
+   "path": "graphs/scatterND-float32/lm_head.json",
+   "bytes": 1059,
+   "sha256": "7ccfd02f15048777ad2495041f35810cfb334ca90b437a071a507d302efc67db"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_block_L128_C16.json",
+   "bytes": 12026,
+   "sha256": "8a4a64a438563151719292c6b8e113e5a189761f87a867681ec3dd9b70861d51"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_block_L128_C8.json",
+   "bytes": 11996,
+   "sha256": "1d000e17baeb447f6c1b31f50829562b0a1ca321155f3cedaad67860d6486c3b"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_block_x2_L128_C16.json",
+   "bytes": 23118,
+   "sha256": "e0ea5372baa48c13c26ed1633a9bfa47ca71129b266506ea5f641f6d758c05bb"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_block_x2_L128_C8.json",
+   "bytes": 23064,
+   "sha256": "6f822c59818cc15714f1c225211a6599776946a101293e5972fe25d7ed780224"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_head_L128_C16.json",
+   "bytes": 8224,
+   "sha256": "694840aad592cd61717a41625c0bb858431989a0f24f77b51abb20a04defede8"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_head_L128_C8.json",
+   "bytes": 8203,
+   "sha256": "da8b21672b4eabbf2f2f0a2c4aaa2c9efbadbb063fe508d3e2745709fd60764b"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_tail_C16.json",
+   "bytes": 5121,
+   "sha256": "4e40e4e3529e7c8ef881c4b6fac702d0770e56a6961369f5f69ea9e42d4de0f8"
+  },
+  {
+   "path": "graphs/scatterND-float32/prefill_tail_C8.json",
    "bytes": 5109,
    "sha256": "693031d2454b67c0ae03b474c1f25b1cf6a356cdcb105d525d51dd1dee9ea5e1"
   },
@@ -442,8 +573,8 @@
   },
   {
    "path": "plan.json",
-   "bytes": 10600,
-   "sha256": "639d4c9009c73da5b64e6673e726b841e2c455fd5cdd957eadc7fc254151fcf2"
+   "bytes": 13213,
+   "sha256": "504e7a91f2e43b1ead1f823509dacf76de33cddb921b7d7be05968194c3f0d2c"
   },
   {
    "path": "weights/embed.safetensors",
@@ -496,7 +627,9 @@
    "onehot-float32",
    "onehot-float16",
    "tensorScatter-float32",
-   "tensorScatter-float16"
+   "tensorScatter-float16",
+   "scatterND-float32",
+   "scatterND-float16"
   ],
   "weights_bytes": 718616
  }

@@ -62,3 +62,26 @@ def test_tensor_scatter_writes_rows_at_index():
     rv = np.ones((1, 2, 2, 4), np.float16)
     out = run(g, {"cache": cv, "rows": rv, "index": np.array([3], np.int32)})["out"]
     assert out[0, :, 3:5].min() == 1 and out[0, :, :3].max() == 0 and out[0, :, 5:].max() == 0
+
+
+def test_scatter_nd_shape_rule_and_interpreter():
+    import numpy as np
+    import pytest
+
+    from m2w.ir.builder import GraphBuilder, GraphError
+    from m2w.ir.interpreter import run
+
+    b = GraphBuilder("scatter")
+    cache = b.input("cache", "float16", [1, 2, 6, 4])
+    indices = b.input("indices", "int32", [1, 2, 3, 3])
+    rows = b.input("rows", "float16", [1, 2, 3, 4])
+    b.output("out", b.scatter_nd(cache, indices, rows))
+    g = b.build()
+    new = np.arange(24, dtype=np.float16).reshape(1, 2, 3, 4) + 1
+    idx = np.array([[[[0, 0, 4], [0, 0, 1], [0, 0, 2]], [[0, 1, 0], [0, 1, 5], [0, 1, 3]]]], np.int32)   # (batch, head, row) of every new row, in any order
+    out = run(g, {"cache": np.zeros((1, 2, 6, 4), np.float16), "indices": idx, "rows": new})["out"]
+    assert (out[0, 0, 4] == new[0, 0, 0]).all() and (out[0, 0, 1] == new[0, 0, 1]).all() and (out[0, 1, 5] == new[0, 1, 1]).all()
+    assert (out[0, 0, 0] == 0).all() and (out[0, 1, 4] == 0).all()   # rows that are not indexed stay
+    b = GraphBuilder("bad")
+    with pytest.raises(GraphError):
+        b.scatter_nd(b.input("c", "float16", [1, 2, 6, 4]), b.input("i", "int32", [1, 2, 3, 3]), b.input("u", "float16", [1, 2, 3, 5]))   # updates must end with the head dim

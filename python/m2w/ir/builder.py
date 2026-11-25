@@ -153,6 +153,17 @@ def infer_node(graph: Graph, node: Node):
         if update.shape[axis] > inp.shape[axis]:
             raise GraphError("tensorScatter: update is longer than the input along the axis")
         return [(inp.dtype, inp.shape)]
+    if op == "scatterND":
+        inp, indices, updates = ins
+        if indices.dtype not in ("int32", "int64") or indices.rank < 1:
+            raise GraphError("scatterND: indices must be int32/int64 with rank >= 1")
+        k = indices.shape[-1]
+        if k > inp.rank:
+            raise GraphError(f"scatterND: index tuples of {k} values for an input of rank {inp.rank}")
+        expected = tuple(indices.shape[:-1]) + tuple(inp.shape[k:])
+        if tuple(updates.shape) != expected or updates.dtype != inp.dtype:
+            raise GraphError(f"scatterND: updates {updates.dtype}{tuple(updates.shape)} must be {inp.dtype}{expected} (indices shape without the last axis + the input shape after it)")
+        return [(inp.dtype, inp.shape)]
     raise GraphError(f"unsupported operator '{op}'")
 
 
@@ -240,6 +251,7 @@ class GraphBuilder:
         if a_transpose: options["aTranspose"] = True
         return self._emit("gemm", [a, b], options)
     def dequantize_linear(self, x, scale, zero_point=None): return self._emit("dequantizeLinear", [x, scale, zero_point])
+    def scatter_nd(self, x, indices, updates): return self._emit("scatterND", [x, indices, updates], {})
     def tensor_scatter(self, x, update, write_index, axis: int): return self._emit("tensorScatter", [x, update, write_index], {"axis": int(axis)})
 
     def build(self) -> Graph:

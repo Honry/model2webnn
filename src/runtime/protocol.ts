@@ -6,6 +6,8 @@
 //    prefill mask columns = [cache rows 0..P-1 | chunk rows 0..C-1];
 //  * decode (staged KV): mask columns = [main cache rows 0..P-1 | staging rows 0..R-1]; the new token goes into staging row `filled` = position base + filled;
 //  * decode (onehot KV): no staging buffer, the graph writes the new token into cache row `pos`; mask columns = [cache rows 0..P-1 | the new row];
+//  * scatterND KV (prefill and decode): the graph scatters the new rows into the cache at the rows of kv_indices and attends over the updated cache (mask columns = cache rows 0..P-1); the pad rows
+//    of the left-padded last chunk are parked behind the real rows (clamped to P-1), where they are masked;
 //  * tensorScatter KV (prefill and decode): the graph scatters the new rows into the cache at kv_write_index and attends over the updated cache (mask columns = cache rows 0..P-1);
 //    every prefill chunk is full, the padding of the prompt is in FRONT of it (`pad` rows), token i is in cache row pad + i, the decode step of position pos writes row pad + pos.
 import { cosSin, invFreqFor, type RopeEntry } from './rope.js';
@@ -179,5 +181,46 @@ export function scatterDecodeMasks(spec: LayoutSpec, P: number, pos: number, pad
     mask.fill(0, pad + firstVisible(spec, type, pos), pad + pos + 1);
     out[type] = mask;
   }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------- scatterND KV
+/** layer type -> mask float16 [C * P] of a chunk with `valid` real tokens at positions start .. start+valid-1: columns are cache rows; a pad row sees only the cache row it is parked in */
+export function scatterNDPrefillMasks(spec: LayoutSpec, P: number, C: number, start: number, valid: number): Record<string, Half> {
+  const pad = C - valid, out: Record<string, Half> = {};
+  for (const type of layerTypesOf(spec)) {
+    const mask = newHalf(C * P).fill(HIDDEN);
+    for (let row = 0; row < C; row++) {
+      const base = row * P;
+      if (row < pad) { mask[base + Math.min(P - 1, start + valid + row)] = 0; continue; }
+      const qPos = start + (row - pad);
+      mask.fill(0, base + firstVisible(spec, type, qPos), base + qPos + 1);
+    }
+    out[type] = mask;
+  }
+  return out;
+}
+
+/** int32 [kvHeads * C * 3] = (0, head, cache row) of every chunk row: real rows go to start .., pad rows are parked behind them (clamped to P-1) */
+export function scatterNDPrefillIndices(kvHeads: number, P: number, C: number, start: number, valid: number): Int32Array {
+  const pad = C - valid, out = new Int32Array(kvHeads * C * 3);
+  for (let h = 0; h < kvHeads; h++) for (let row = 0; row < C; row++) {
+    const at = (h * C + row) * 3;
+    out[at] = 0; out[at + 1] = h; out[at + 2] = row < pad ? Math.min(P - 1, start + valid + row) : start + (row - pad);
+  }
+  return out;
+}
+
+/** layer type -> mask float16 [P] for the token at position pos (cache row pos, written by the graph before attention) */
+export function scatterNDDecodeMasks(spec: LayoutSpec, P: number, pos: number): Record<string, Half> {
+  const out: Record<string, Half> = {};
+  for (const type of layerTypesOf(spec)) out[type] = newHalf(P).fill(HIDDEN).fill(0, firstVisible(spec, type, pos), pos + 1);
+  return out;
+}
+
+/** int32 [kvHeads * 3]: the new token goes to cache row `pos` of every head */
+export function scatterNDDecodeIndices(kvHeads: number, pos: number): Int32Array {
+  const out = new Int32Array(kvHeads * 3);
+  for (let h = 0; h < kvHeads; h++) { out[h * 3] = 0; out[h * 3 + 1] = h; out[h * 3 + 2] = pos; }
   return out;
 }

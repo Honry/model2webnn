@@ -12,16 +12,17 @@ from tiny_model import write_tiny_model
 
 def test_compile_a_local_model_into_a_package_and_verify_every_variant(tmp_path, capsys):
     write_tiny_model(tmp_path / "hf", dtype="BF16")
-    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(64,), chunks=(8, 16), kv_styles=("staged", "onehot", "tensorScatter"), staging_rows=(4, 8),
+    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(64,), chunks=(8, 16), kv_styles=("staged", "onehot", "tensorScatter", "scatterND"), staging_rows=(4, 8),
                           compute_types=("float32", "float16"), blocks_per_graph=(1, 2), prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
     index = json.loads((out / "m2w.json").read_text())
     assert index["format"] == "m2w-package" and index["target"] == "webnn-ov-npu" and index["chat_format"] is None   # the tiny model has no chat template
-    assert "tensorScatter" in index["requires"]["webnn"]["ops"]
+    assert "tensorScatter" in index["requires"]["webnn"]["ops"] and "scatterND" in index["requires"]["webnn"]["ops"]
     plan = json.loads((out / "plan.json").read_text())
     ids = [v["id"] for v in plan["variants"]]
     assert plan["default_variant"] == "staged-r4-float32" == ids[0]
     assert plan["block_group_controls"] == "per_block"   # the tiny model is hybrid: every block of a group gets its own rope / mask inputs
-    assert ids == ["staged-r4-float32", "staged-r8-float32", "staged-r4-float16", "staged-r8-float16", "onehot-float32", "onehot-float16", "tensorScatter-float32", "tensorScatter-float16"]
+    assert ids == ["staged-r4-float32", "staged-r8-float32", "staged-r4-float16", "staged-r8-float16", "onehot-float32", "onehot-float16", "tensorScatter-float32", "tensorScatter-float16",
+                   "scatterND-float32", "scatterND-float16"]
     table = plan["graphs"]["staged-r4-float32"]
     assert table["decode"]["64"]["block_groups"].keys() == {"2"} and table["prefill"]["64"]["8"]["block_groups"].keys() == {"2"} and "16" in table["prefill"]["64"]
     assert "flush" in table["decode"]["64"] and "flush" not in plan["graphs"]["onehot-float32"]["decode"]["64"]
@@ -55,7 +56,7 @@ def test_committed_tiny_package_is_what_the_compiler_writes_today(tmp_path):
 
     committed = Path(__file__).resolve().parents[2] / "tests" / "golden" / "tiny-package"
     write_tiny_model(tmp_path / "hf", dtype="BF16")
-    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(128,), chunks=(16, 8), kv_styles=("staged", "onehot", "tensorScatter"), staging_rows=(8,),
+    out = C.compile_model(str(tmp_path / "hf"), tmp_path / "pkg", max_lengths=(128,), chunks=(16, 8), kv_styles=("staged", "onehot", "tensorScatter", "scatterND"), staging_rows=(8,),
                           compute_types=("float32", "float16"), blocks_per_graph=(1, 2), prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
     fresh = {f["path"]: f["sha256"] for f in json.loads((out / "m2w.json").read_text())["files"]}
     old = {f["path"]: f["sha256"] for f in json.loads((committed / "m2w.json").read_text())["files"]}

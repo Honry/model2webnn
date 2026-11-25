@@ -70,6 +70,16 @@
    "kv_style": "tensorScatter",
    "compute_type": "float16",
    "scatter_index_type": "int32"
+  },
+  {
+   "id": "scatterND-float32",
+   "kv_style": "scatterND",
+   "compute_type": "float32"
+  },
+  {
+   "id": "scatterND-float16",
+   "kv_style": "scatterND",
+   "compute_type": "float16"
   }
  ],
  "default_variant": "staged-r8-float32",
@@ -289,6 +299,72 @@
      }
     }
    }
+  },
+  "scatterND-float32": {
+   "lm_head": "graphs/scatterND-float32/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/scatterND-float32/decode_head_L128.json",
+     "block": "graphs/scatterND-float32/decode_block_L128.json",
+     "tail": "graphs/scatterND-float32/decode_tail.json",
+     "block_groups": {
+      "2": "graphs/scatterND-float32/decode_block_x2_L128.json"
+     }
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/scatterND-float32/prefill_head_L128_C16.json",
+      "block": "graphs/scatterND-float32/prefill_block_L128_C16.json",
+      "tail": "graphs/scatterND-float32/prefill_tail_C16.json",
+      "block_groups": {
+       "2": "graphs/scatterND-float32/prefill_block_x2_L128_C16.json"
+      }
+     },
+     "8": {
+      "head": "graphs/scatterND-float32/prefill_head_L128_C8.json",
+      "block": "graphs/scatterND-float32/prefill_block_L128_C8.json",
+      "tail": "graphs/scatterND-float32/prefill_tail_C8.json",
+      "block_groups": {
+       "2": "graphs/scatterND-float32/prefill_block_x2_L128_C8.json"
+      }
+     }
+    }
+   }
+  },
+  "scatterND-float16": {
+   "lm_head": "graphs/scatterND-float16/lm_head.json",
+   "decode": {
+    "128": {
+     "head": "graphs/scatterND-float16/decode_head_L128.json",
+     "block": "graphs/scatterND-float16/decode_block_L128.json",
+     "tail": "graphs/scatterND-float16/decode_tail.json",
+     "block_groups": {
+      "2": "graphs/scatterND-float16/decode_block_x2_L128.json"
+     }
+    }
+   },
+   "prefill": {
+    "128": {
+     "16": {
+      "head": "graphs/scatterND-float16/prefill_head_L128_C16.json",
+      "block": "graphs/scatterND-float16/prefill_block_L128_C16.json",
+      "tail": "graphs/scatterND-float16/prefill_tail_C16.json",
+      "block_groups": {
+       "2": "graphs/scatterND-float16/prefill_block_x2_L128_C16.json"
+      }
+     },
+     "8": {
+      "head": "graphs/scatterND-float16/prefill_head_L128_C8.json",
+      "block": "graphs/scatterND-float16/prefill_block_L128_C8.json",
+      "tail": "graphs/scatterND-float16/prefill_tail_C8.json",
+      "block_groups": {
+       "2": "graphs/scatterND-float16/prefill_block_x2_L128_C8.json"
+      }
+     }
+    }
+   }
   }
  },
  "chain": {
@@ -317,6 +393,7 @@
   "description": "how the KV cache is written and attended, by the kv_style of a variant (cache rows P = max_length - 1; row j holds position j; protocol.py / protocol.ts)",
   "staged": "prefill: chunks of the chunk size, the last chunk is left-padded, one-hot row selectors write the real rows; decode: the new row goes into a staging buffer (staging_rows rows), attention reads concat(main cache, staging), the flush graph moves the staging rows into the main cache every staging_rows steps",
   "onehot": "prefill as staged; decode: the graph writes the new row into the main cache with one-hot selectors (rows_to_keep / row_selector), attention reads concat(cache, new row)",
+  "scatterND": "prefill and decode: scatterND(cache, kv_indices, new rows) with the (0, head, cache row) of every new row, attention reads the updated cache; the pad rows of the left-padded last chunk are parked behind the real rows",
   "tensorScatter": "prefill and decode: tensorScatter(cache, new rows, kv_write_index, axis 2), attention reads the updated cache; every chunk is full, the prompt padding is in FRONT of the prompt (cache rows 0..pad-1)"
  },
  "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",

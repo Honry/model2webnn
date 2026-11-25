@@ -8,6 +8,8 @@ Conventions:
     prefill mask columns = [cache rows 0..P-1 | chunk rows 0..C-1];
   * decode (staged KV): mask columns = [main cache rows 0..P-1 | staging rows 0..R-1]; the new token goes into staging row `filled`, which holds position base+filled;
   * decode (onehot KV): no staging buffer, the new token is written into cache row `pos` by the graph; mask columns = [cache rows 0..P-1 | the new row];
+  * scatterND KV (prefill and decode): the graph scatters the new rows into the cache at the rows of `kv_indices` and attends over the updated cache (mask columns = cache rows 0..P-1);
+    row j holds position j as in the one-hot protocol; the left-padded last chunk parks its pad rows in the cache rows behind the real rows (clamped to P-1), where they are masked;
   * tensorScatter KV (prefill and decode): the graph scatters the new rows into the cache at `kv_write_index` (the rows go in contiguously) and attends over the
     updated cache (mask columns = cache rows 0..P-1). Every prefill chunk is full: the padding of the prompt is in FRONT of it (`pad` rows, cache rows 0..pad-1),
     token i sits in cache row pad + i, and the decode step of position pos writes row pad + pos.
@@ -196,3 +198,55 @@ def scatter_decode_masks(spec: ModelSpec, P: int, pos: int, pad: int) -> dict:
                 mask[j] = 0
         masks[ltype] = mask.reshape(1, 1, 1, -1)
     return masks
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# scatterND KV
+# ---------------------------------------------------------------------------------------------------------------------
+def scatternd_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int) -> dict:
+    """layer type -> mask float16 [1,1,C,P] of the chunk that holds `valid` real tokens at positions start..start+valid-1: columns are cache rows (the chunk's rows are scattered in
+    before attention); a pad row sees only the cache row it is parked in."""
+    pad = C - valid
+    masks = {}
+    for ltype in sorted(set(spec.layer_types)):
+        mask = np.full((C, P), NEG, np.float16)
+        for row in range(C):
+            if row < pad:
+                mask[row, min(P - 1, start + valid + row)] = 0
+                continue
+            q_pos = start + (row - pad)
+            for j in range(q_pos + 1):
+                if visible(spec, ltype, q_pos, j):
+                    mask[row, j] = 0
+        masks[ltype] = mask[None, None]
+    return masks
+
+
+def scatternd_prefill_indices(num_kv_heads: int, P: int, C: int, start: int, valid: int) -> np.ndarray:
+    """int32 [1,kvHeads,C,3] = (0, head, cache row) of every chunk row: real rows go to start.., pad rows are parked behind them (clamped to P-1)."""
+    pad = C - valid
+    out = np.zeros((1, num_kv_heads, C, 3), np.int32)
+    for h in range(num_kv_heads):
+        for row in range(C):
+            out[0, h, row] = (0, h, min(P - 1, start + valid + row) if row < pad else start + (row - pad))
+    return out
+
+
+def scatternd_decode_masks(spec: ModelSpec, P: int, pos: int) -> dict:
+    """layer type -> mask float16 [1,1,1,P] for the token at position `pos` (cache row pos, written by the graph before attention)."""
+    masks = {}
+    for ltype in sorted(set(spec.layer_types)):
+        mask = np.full((P,), NEG, np.float16)
+        for j in range(pos + 1):
+            if visible(spec, ltype, pos, j):
+                mask[j] = 0
+        masks[ltype] = mask.reshape(1, 1, 1, -1)
+    return masks
+
+
+def scatternd_decode_indices(num_kv_heads: int, pos: int) -> np.ndarray:
+    """int32 [1,kvHeads,1,3]: the new token goes to cache row `pos` of every head."""
+    out = np.zeros((1, num_kv_heads, 1, 3), np.int32)
+    for h in range(num_kv_heads):
+        out[0, h, 0] = (0, h, pos)
+    return out

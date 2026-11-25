@@ -52,6 +52,11 @@ def build():
         tables = protocol.scatter_prefill_rope(spec, C, start, pad)
         out[f"scatter_prefill_rope_{name}"] = {"start": start, "pad": pad, **{t: {"cos": f(c), "sin": f(s_)} for t, (c, s_) in tables.items()}}
     out["scatter_decode"] = {"pos": 20, "pad": 3, "masks": {t: visible_columns(m) for t, m in protocol.scatter_decode_masks(spec, PS, 20, 3).items()}}
+    # scatterND KV: real rows go to their position, the pad rows of the last chunk are parked behind them (clamped to P-1)
+    out["scatternd_prefill"] = {"start": 16, "valid": 5, "kv_heads": 2, "masks": {t: visible_columns(m) for t, m in protocol.scatternd_prefill_masks(spec, P, C, 16, 5).items()},
+                                "indices": protocol.scatternd_prefill_indices(2, P, C, 16, 5).reshape(-1).tolist()}
+    out["scatternd_decode"] = {"pos": 20, "kv_heads": 2, "masks": {t: visible_columns(m) for t, m in protocol.scatternd_decode_masks(spec, P, 20).items()},
+                               "indices": protocol.scatternd_decode_indices(2, 20).reshape(-1).tolist()}
     # prefill planning
     out["plans"] = [{"sizes": sizes, "tokens": n, "fixed": fixed, "plan": protocol.plan_prefill(sizes, n, fixed)}
                     for sizes, n, fixed in (([64], 20, 200), ([64], 130, 200), ([64, 256], 20, 200), ([64, 256], 300, 200), ([64, 256], 200, 200), ([32, 64, 128], 95, 50), ([8, 16], 21, 2))]

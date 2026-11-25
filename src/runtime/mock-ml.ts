@@ -58,6 +58,7 @@ export class MockBuilder {
   };
   dequantizeLinear = (x: MockOperand, scale: MockOperand) => this.op(scale.dataType, x.shape);
   tensorScatter = (x: MockOperand) => this.op(x.dataType, x.shape);
+  scatterND = (x: MockOperand) => this.op(x.dataType, x.shape);
   async build(outputs: Record<string, MockOperand>) {
     for (const [name, o] of Object.entries(outputs)) if (o === undefined) throw new Error(`output ${name} is undefined`);
     return { inputs: this.inputs, outputs, destroyed: false, destroy() { this.destroyed = true; } };
@@ -70,6 +71,8 @@ export interface DispatchRecord { graph: any; inputs: Record<string, MockTensor>
 export class MockContext {
   tensors: MockTensor[] = [];
   dispatches: DispatchRecord[] = [];
+  /** kvInPlace: the same MLTensor as an input and an output of one dispatch (WebNN implementations may reject it) */
+  allowAlias = false;
   writes: { tensor: MockTensor; data: ArrayBufferView }[] = [];
   /** called by readTensor: fill the destination (a Float16Array of logits) */
   onRead: (tensor: MockTensor, destination: any) => void = () => {};
@@ -96,7 +99,7 @@ export class MockContext {
       }
     }
     const inputIds = new Set(Object.values(inputs).map((t) => t.id));
-    for (const [name, tensor] of Object.entries(outputs)) if (inputIds.has(tensor.id)) throw new Error(`dispatch: output '${name}' is also an input tensor (tensor ${tensor.id})`);
+    if (!this.allowAlias) for (const [name, tensor] of Object.entries(outputs)) if (inputIds.has(tensor.id)) throw new Error(`dispatch: output '${name}' is also an input tensor (tensor ${tensor.id})`);
     this.dispatches.push({ graph, inputs, outputs });
   }
   async readTensor(tensor: MockTensor, destination: any) {

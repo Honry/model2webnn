@@ -50,8 +50,8 @@ def expand_variants(kv_styles, staging_rows, compute_types) -> list:
     """The graph variants of a package: kv style x staging rows (staged only) x compute type. Weights are shared by all of them."""
     variants = []
     for kv in _sequence(kv_styles):
-        if kv not in ("staged", "onehot", "tensorScatter"):
-            raise ValueError(f"unknown kv style '{kv}' (staged | onehot | tensorScatter)")
+        if kv not in ("staged", "onehot", "tensorScatter", "scatterND"):
+            raise ValueError(f"unknown kv style '{kv}' (staged | onehot | tensorScatter | scatterND)")
         for ct in _sequence(compute_types):
             for rows in (_sequence(staging_rows) if kv == "staged" else (_sequence(staging_rows)[0],)):
                 v = {"id": variant_id(kv, rows, ct), "kv_style": kv, "compute_type": ct}
@@ -143,6 +143,8 @@ def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict
             "staged": "prefill: chunks of the chunk size, the last chunk is left-padded, one-hot row selectors write the real rows; decode: the new row goes into a staging buffer "
                       "(staging_rows rows), attention reads concat(main cache, staging), the flush graph moves the staging rows into the main cache every staging_rows steps",
             "onehot": "prefill as staged; decode: the graph writes the new row into the main cache with one-hot selectors (rows_to_keep / row_selector), attention reads concat(cache, new row)",
+            "scatterND": "prefill and decode: scatterND(cache, kv_indices, new rows) with the (0, head, cache row) of every new row, attention reads the updated cache; the pad rows of the "
+                         "left-padded last chunk are parked behind the real rows",
             "tensorScatter": "prefill and decode: tensorScatter(cache, new rows, kv_write_index, axis 2), attention reads the updated cache; every chunk is full, the prompt padding is in FRONT "
                              "of the prompt (cache rows 0..pad-1)",
         },
@@ -158,7 +160,8 @@ def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, 
         "model": "model.json", "plan": "plan.json", "chat_format": chat_file, "weights_manifest": "weights/manifest.json",
         "tokenizer": [f"tokenizer/{n}" for n in tokenizer_files],
         "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"]
-                               + (["tensorScatter"] if any(v["kv_style"] == "tensorScatter" for v in plan["variants"]) else []),
+                               + (["tensorScatter"] if any(v["kv_style"] == "tensorScatter" for v in plan["variants"]) else [])
+                               + (["scatterND"] if any(v["kv_style"] == "scatterND" for v in plan["variants"]) else []),
                                "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
         "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
         "summary": {"layers": spec.num_layers, "max_lengths": plan["max_lengths"], "prefill_chunks": plan["prefill_chunks"], "variants": [v["id"] for v in plan["variants"]],

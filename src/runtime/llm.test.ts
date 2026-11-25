@@ -19,6 +19,7 @@ const prompt: number[] = verification.prompt_ids;   // 45 tokens
 async function loaded(options: LoadOptions = {}) {
   installMockBuilder();
   const context = new MockContext();
+  context.allowAlias = !!options.kvInPlace;   // the mock rejects an output that is also an input of the dispatch, unless the test asks for it
   const llm = await LLM.load(fsSource, { context, cache: false, chunkSize: 16, ...options });
   context.onRead = (_t, destination) => { destination.fill(0); destination[7] = 5; };   // argmax = token 7
   return { llm, context };
@@ -104,7 +105,7 @@ describe('LLM scheduler on a validating mock of WebNN', () => {
 });
 
 describe('every variant of the package runs through the protocol with valid bindings', () => {
-  const variants = ['staged-r8-float32', 'staged-r8-float16', 'onehot-float32', 'onehot-float16', 'tensorScatter-float32', 'tensorScatter-float16'];
+  const variants = ['staged-r8-float32', 'staged-r8-float16', 'onehot-float32', 'onehot-float16', 'tensorScatter-float32', 'tensorScatter-float16', 'scatterND-float32', 'scatterND-float16'];
 
   it.each(variants)('%s: prefill + decode dispatch counts, flush graph only for staged, write index only for tensorScatter', async (variant) => {
     const { llm, context } = await loaded({ variant });
@@ -117,7 +118,8 @@ describe('every variant of the package runs through the protocol with valid bind
     const hasInput = (name: string) => context.dispatches.some((d) => name in d.inputs);
     expect(hasInput('kv_write_index')).toBe(variant.startsWith('tensorScatter'));
     expect(hasInput('staging_rows_to_keep')).toBe(staged);
-    expect(hasInput('rows_to_keep')).toBe(!variant.startsWith('tensorScatter'));
+    expect(hasInput('kv_indices')).toBe(variant.startsWith('scatterND'));
+    expect(hasInput('rows_to_keep')).toBe(!variant.startsWith('tensorScatter') && !variant.startsWith('scatterND'));
     expect((llm as any).decodeSet.flush !== null).toBe(staged);
   });
 
@@ -182,6 +184,46 @@ describe('one-hot variants store the value cache transposed', () => {
       const { llm } = await loaded({ variant });
       expect((llm as any).kv[0].value.shape).toEqual([1, llm.pkg.model.num_kv_heads, 127, llm.pkg.model.head_dim]);
     }
+  });
+});
+
+describe('scatterND and in-place KV updates', () => {
+  it('scatterND writes the indices of the cache rows (real rows at their position, pad rows parked behind them) for every kv head', async () => {
+    const { llm, context } = await loaded({ variant: 'scatterND-float32' });
+    await run(llm, prompt.slice(0, 21), 2);                      // chunk 16: the last chunk holds 5 real rows (position 16..20) and 11 pad rows
+    const set = (llm as any).prefillSets.get(16), heads = llm.pkg.model.num_kv_heads;
+    const prefill = context.writes.filter((w) => w.tensor === set.indices).map((w) => Array.from(w.data as unknown as ArrayLike<number>));
+    expect(prefill.length).toBe(2);
+    expect(prefill[0].filter((_, i) => i % 3 === 2).slice(0, 16)).toEqual(Array.from({ length: 16 }, (_, i) => i));                    // the first chunk is full: rows 0..15 of head 0
+    const second = prefill[1].filter((_, i) => i % 3 === 2).slice(0, 16);
+    expect(second.slice(11)).toEqual([16, 17, 18, 19, 20]);                                                                           // real rows
+    expect(second.slice(0, 11)).toEqual(Array.from({ length: 11 }, (_, i) => 21 + i));                                                // pad rows parked behind them
+    expect(prefill[1].filter((_, i) => i % 3 === 1).slice(16, 17)).toEqual([1 % heads]);                                              // head index of the second head's first row
+    const decode = context.writes.filter((w) => w.tensor === (llm as any).decodeIndices).map((w) => (w.data as unknown as number[])[2]);
+    expect(decode).toEqual([21]);                                // one decode step after the prompt of 21 tokens: row 21
+  });
+
+  it.each(['tensorScatter-float32', 'scatterND-float32'])('kvInPlace: %s writes the cache into the same tensor that is its input; no spare cache', async (variant) => {
+    const { llm, context } = await loaded({ variant, kvInPlace: true });
+    const internals = llm as any;
+    expect(internals.kvSpare.every((spare: any, l: number) => spare === internals.kv[l])).toBe(true);
+    const tensors = context.tensors.length;
+    await run(llm, prompt.slice(0, 21), 3);
+    const head = context.dispatches[0];
+    expect(head.outputs.updated_key).toBe(head.inputs.past_key);
+    expect(head.outputs.updated_value).toBe(head.inputs.past_value);
+    expect(context.dispatches.every((d) => !('updated_key' in d.outputs) || d.outputs.updated_key.id === d.inputs.past_key.id)).toBe(true);
+    const normal = await loaded({ variant });
+    expect(context.tensors.length).toBe(tensors);                 // nothing else was allocated while running
+    expect(normal.context.tensors.length).toBeGreaterThan(tensors);   // the double-buffered cache needs a second set of KV tensors
+  });
+
+  it('kvInPlace is ignored by the protocols that rewrite the whole cache, and the mock rejects an aliased dispatch unless asked for', async () => {
+    const { llm } = await loaded({ variant: 'onehot-float32', kvInPlace: true });
+    expect((llm as any).kvSpare[0]).not.toBe((llm as any).kv[0]);
+    const strict = await loaded({ variant: 'tensorScatter-float32', kvInPlace: true });
+    strict.context.allowAlias = false;
+    await expect(run(strict.llm, prompt.slice(0, 5), 1)).rejects.toThrow(/also an input tensor/);
   });
 });
 

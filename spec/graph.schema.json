@@ -47,7 +47,7 @@
       "properties": {
         "op": {
           "enum": ["add", "sub", "mul", "div", "pow", "sqrt", "sigmoid", "cast", "reshape", "transpose", "slice", "concat", "expand",
-                   "reduceMean", "reduceMax", "reduceSum", "softmax", "matmul", "gemm", "dequantizeLinear", "tensorScatter"]
+                   "reduceMean", "reduceMax", "reduceSum", "softmax", "matmul", "gemm", "dequantizeLinear", "tensorScatter", "scatterND"]
         },
         "inputs": { "type": "array", "items": { "type": ["string", "null"] }, "description": "operand names; null = an omitted optional operand (dequantizeLinear zero point)" },
         "outputs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 1 },

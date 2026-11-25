@@ -87,6 +87,13 @@ def _eval(op: str, ins: list, opt: dict, out_dtype: str):
         sel[axis] = slice(start, start + update.shape[axis])
         out[tuple(sel)] = update
         return out
+    if op == "scatterND":
+        inp, indices, updates = ins
+        out = inp.copy()
+        k = indices.shape[-1]
+        flat = indices.reshape(-1, k).astype(np.int64)
+        out[tuple(flat.T)] = updates.reshape((flat.shape[0],) + tuple(inp.shape[k:]))   # duplicate indices: the last one wins
+        return out
     raise NotImplementedError(op)
 
 

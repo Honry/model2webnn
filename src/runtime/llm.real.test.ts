@@ -23,9 +23,10 @@ describe.skipIf(!dir || !existsSync(path.join(dir, 'm2w.json')))('real package o
   it('loads, prefills, decodes through a flush and validates every dispatch', async () => {
     installMockBuilder();
     const context = new MockContext();
+    context.allowAlias = process.env.M2W_INPLACE === '1';
     const chunkSizes = process.env.M2W_CHUNKS ? process.env.M2W_CHUNKS.split(',').map(Number) : undefined;
     const llm = await LLM.load(fileSource, {
-      context, cache: false, maxLength: process.env.M2W_MAX_LENGTH ? +process.env.M2W_MAX_LENGTH : undefined, variant: process.env.M2W_VARIANT, chunkSizes,
+      context, cache: false, maxLength: process.env.M2W_MAX_LENGTH ? +process.env.M2W_MAX_LENGTH : undefined, variant: process.env.M2W_VARIANT, chunkSizes, kvInPlace: process.env.M2W_INPLACE === '1',
       blocksPerGraph: process.env.M2W_BPG ? +process.env.M2W_BPG : 1, prefillBlocksPerGraph: process.env.M2W_PBPG ? +process.env.M2W_PBPG : 0,
     });
     const m = llm.pkg.model, N = m.num_layers, R = llm.variant.staging_rows ?? 0, staged = llm.variant.kv_style === 'staged';

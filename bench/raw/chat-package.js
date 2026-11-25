@@ -40,7 +40,7 @@ export function setupPackageControls(pkg, c, initial = {}) {
     };
     fillBlocks();
     // KV protocol x compute type x staging rows: only the combinations the package contains
-    const kvLabels = { staged: "staged (staging buffer + flush)", onehot: "one-hot (whole cache every step)", tensorScatter: "tensorScatter (in-graph)" };
+    const kvLabels = { staged: "staged (staging buffer + flush)", onehot: "one-hot (whole cache every step)", tensorScatter: "tensorScatter (in-graph)", scatterND: "scatterND (in-graph)" };
     const kvStyles = [...new Set(variants.map((v) => v.kv_style))];
     replace(c.kvStyleSelect, kvStyles.map((k) => [k, kvLabels[k] ?? k]), initial.kvStyle ?? defaultVariant.kv_style);
     const fillVariantControls = () => {
@@ -86,9 +86,10 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         const prefillGroups = Object.keys(pkg.plan.graphs[pkg.plan.default_variant].prefill[String(maxLength)]?.[String(chunkSizes[0])]?.block_groups ?? {}).map(Number);
         const prefillBlocksPerGraph = options.prefillBlocksPerGraph || (blocksPerGraph === 1 || prefillGroups.includes(blocksPerGraph) ? blocksPerGraph : 1);
         const kvStyle = options.kvStyle, computeType = options.computeType, stagingRows = kvStyle === "staged" ? options.stagingRows : undefined;
-        const key = [maxLength, chunkSizes.join("+"), blocksPerGraph, prefillBlocksPerGraph, kvStyle, stagingRows, computeType].join("|");
+        const kvInPlace = new URLSearchParams(location.search).get("kvInPlace") === "1";   // scatterND / tensorScatter write the cache into the same tensor that is the input (page option, fixed at load)
+        const key = [maxLength, chunkSizes.join("+"), blocksPerGraph, prefillBlocksPerGraph, kvStyle, stagingRows, computeType, kvInPlace].join("|");
         if (current && current.key === key) return current;
-        const session = { maxLength, chunkSizes, blocksPerGraph, prefillBlocksPerGraph, kvStyle, computeType, ...(stagingRows ? { stagingRows } : {}), onProgress: (p) => {
+        const session = { maxLength, chunkSizes, blocksPerGraph, prefillBlocksPerGraph, kvStyle, computeType, kvInPlace, ...(stagingRows ? { stagingRows } : {}), onProgress: (p) => {
             setStatus(p.stage === "download" ? `downloading weights ${Math.round(p.loaded / 2 ** 20)} / ${Math.round(p.total / 2 ** 20)} MB` : `${p.stage}${p.message ? ": " + p.message : ""}`);
         } };
         const reused = !!llm;
