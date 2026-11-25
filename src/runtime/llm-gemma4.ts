@@ -6,7 +6,7 @@
 //  * the embedding is multiplied by sqrt(hidden) on the host.
 // Python counterpart (the executable specification): python/m2w/reference/gemma4_runner.py. Only the staged KV protocol exists; there are no block groups.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
-import { emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
+import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
 import { openPackage, type GemmaDecodeTable, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
@@ -100,6 +100,7 @@ export class Gemma4LLM {
   }
 
   private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
+    checkTensorSize(dataType, shape);
     const tensor = await this.ctx.createTensor({ dataType, shape, writable: flags.writable ?? false, readable: flags.readable ?? false });
     into.push(tensor);
     return tensor;

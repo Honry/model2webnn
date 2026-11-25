@@ -102,3 +102,14 @@ describe('protocol', () => {
     for (const v of g.plans) expect(planPrefill(v.sizes, v.tokens, v.fixed)).toEqual(v.plan);
   });
 });
+
+import { checkTensorSize, WEBNN_MAX_TENSOR_BYTES } from './llm-common.js';
+describe('WebNN tensor size limit', () => {
+  it('rejects a tensor above 2^31 - 1 bytes with a readable error and accepts the rest', () => {
+    expect(WEBNN_MAX_TENSOR_BYTES).toBe(2147483647);
+    expect(() => checkTensorSize('float32', [262144, 2560], 'dequantized lm_head')).toThrow(/dequantized lm_head float32\[262144,2560\] would be 2\.50 GiB.*2 GiB/);
+    expect(() => checkTensorSize('float16', [1, 2, 1151, 512])).not.toThrow();
+    expect(() => checkTensorSize('int4', [2 ** 32])).toThrow();          // 2^32 int4 values are 2^31 bytes: one byte over the limit
+    expect(() => checkTensorSize('int4', [2 ** 32 - 2])).not.toThrow();
+  });
+});

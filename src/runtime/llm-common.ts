@@ -2,6 +2,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type ML = any;
 
+/** WebNN (Chromium) rejects a tensor of more than 2^31 - 1 bytes (an MLTensor as well as an operand inside a graph). */
+export const WEBNN_MAX_TENSOR_BYTES = 2 ** 31 - 1;
+const BYTES_PER_ELEMENT: Record<string, number> = { float32: 4, float16: 2, int32: 4, uint32: 4, int64: 8, uint64: 8, int8: 1, uint8: 1, int4: 0.5, uint4: 0.5 };
+
+/** Throws a readable error before the browser's own when a tensor would be bigger than WebNN allows (a KV cache of a long max length, a huge activation of a big chunk). */
+export function checkTensorSize(dataType: string, shape: number[], what = 'tensor'): void {
+  const bytes = Math.ceil(shape.reduce((a, b) => a * b, 1) * (BYTES_PER_ELEMENT[dataType] ?? 4));
+  if (bytes > WEBNN_MAX_TENSOR_BYTES) {
+    throw new Error(`the ${what} ${dataType}[${shape}] would be ${(bytes / 2 ** 30).toFixed(2)} GiB; WebNN tensors are limited to ${WEBNN_MAX_TENSOR_BYTES} bytes (2 GiB): use a smaller max length or chunk size`);
+  }
+}
+
 export interface Built { name: string; graph: ML; inputs: string[]; outputs: string[] }
 
 /** Per decode step: host = writing the step inputs, enqueue = queueing the dispatches (incl. a flush when due), wait = reading the logits (the device finishing the chain), sampling = picking the token. */

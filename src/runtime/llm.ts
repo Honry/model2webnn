@@ -6,7 +6,7 @@
 // Session options (variant = KV protocol x compute type x staging rows, chunk sizes, blocks per graph, max length) can be changed with reconfigure(): the weights stay
 // on the device, the graphs are rebuilt and the state (KV cache, activations) is reallocated.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
-import { emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
+import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import { openPackage, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
   decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables,
@@ -156,6 +156,7 @@ export class LLM {
   }
 
   private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
+    checkTensorSize(dataType, shape);
     const tensor = await this.ctx.createTensor({ dataType, shape, writable: flags.writable ?? false, readable: flags.readable ?? false });
     into.push(tensor);
     return tensor;

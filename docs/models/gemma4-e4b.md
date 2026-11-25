@@ -33,6 +33,11 @@ PLE per layer, in the order the reference computes it:
     ... after the MLP of layer i:  x += post_per_layer_input_norm(per_layer_projection(gelu_tanh(per_layer_input_gate(x)) * per_layer_inputs[:, i]))
     x *= layer_scalar[i]
 
+## WebNN tensor limit
+
+The dequantized lm_head matrix (262144 x 2560) is 2.5 GiB in float32 and 1.25 GiB in float16; WebNN rejects tensors above 2^31 - 1 bytes (the browser error was *"The tensor size 2684354560 exceeds the size limit 2147483647"* at the cast),
+so the lm_head graph works on row blocks (4 in float32, 2 in float16; `lm_head_parts`). The compiler checks every graph (`check_tensor_limit`); the largest tensor of the package is 640 MiB.
+
 ## Size
 
 Text layers about 4 B parameters (int4: about 2 GB), tied embedding / lm_head 262144 x 2560 (int8: 671 MB), PLE table 2.8 B parameters (int8: 2.8 GB; int4: 1.4 GB).

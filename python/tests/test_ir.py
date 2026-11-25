@@ -85,3 +85,17 @@ def test_scatter_nd_shape_rule_and_interpreter():
     b = GraphBuilder("bad")
     with pytest.raises(GraphError):
         b.scatter_nd(b.input("c", "float16", [1, 2, 6, 4]), b.input("i", "int32", [1, 2, 3, 3]), b.input("u", "float16", [1, 2, 3, 5]))   # updates must end with the head dim
+
+
+def test_tensor_size_limit_of_webnn():
+    """WebNN rejects tensors above 2^31 - 1 bytes: the dequantized lm_head of a 262144-row vocabulary in float32 (2.7 GB) is caught when the graph is written."""
+    import pytest
+
+    from m2w.frontends.hf_llm.builders import decoder as D
+    from m2w.ir import GraphError, check_tensor_limit
+
+    dims = D.DecoderDims(hidden=2560, num_heads=8, num_kv_heads=2, head_dim=256, ffn=10240, vocab=262144)
+    with pytest.raises(GraphError, match=r"above the WebNN limit.*2\.5\d GiB"):
+        check_tensor_limit(D.build_lm_head_graph(dims, D.GraphOptions(compute_type="float32")))
+    check_tensor_limit(D.build_lm_head_graph(dims, D.GraphOptions(compute_type="float16")))   # 1.25 GiB: fine
+    check_tensor_limit(D.build_lm_head_graph(D.DecoderDims(hidden=2560, num_heads=8, num_kv_heads=2, head_dim=256, ffn=10240, vocab=151936), D.GraphOptions()))   # Qwen3: 1.45 GiB

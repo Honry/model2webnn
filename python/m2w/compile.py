@@ -22,7 +22,7 @@ from .frontends.hf_llm import arch, chat_format, hub, pack, pack_gemma4
 from .frontends.hf_llm.builders import decoder as D
 from .frontends.hf_llm.builders import gemma4 as G
 from .frontends.hf_llm.safetensors_io import TensorStore
-from .ir import serialize
+from .ir import check_tensor_limit, serialize
 
 TARGET = "webnn-ov-npu"
 PACKAGE_FORMAT = "m2w-package"
@@ -79,6 +79,7 @@ def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants,
         gdir.mkdir(parents=True, exist_ok=True)
 
         def emit(graph) -> str:
+            check_tensor_limit(graph)   # WebNN rejects tensors above 2 GiB
             serialize.dump(graph, gdir / f"{graph.name}.json")
             return f"graphs/{variant['id']}/{graph.name}.json"
 
@@ -124,6 +125,7 @@ def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, va
         gdir.mkdir(parents=True, exist_ok=True)
 
         def emit(graph) -> str:
+            check_tensor_limit(graph)
             serialize.dump(graph, gdir / f"{graph.name}.json")
             return f"graphs/{variant['id']}/{graph.name}.json"
 

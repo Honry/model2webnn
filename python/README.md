@@ -42,12 +42,23 @@ The JSON Schemas of all these files are in [`../spec/`](../spec) and are validat
 ## Supported architectures
 Described by data (`m2w/frontends/hf_llm/families/*.json`), not by classes. Today: the **qwen3-like** family — pre-norm decoder with GQA, SwiGLU, RMSNorm, per-head q/k RMSNorm, rotate-half
 RoPE, no biases, tied embedding: `Qwen3ForCausalLM`, `AionInstructForCausalLM`. Hybrid layers (sliding window + full attention) and per-layer-type RoPE (incl. YaRN) are supported through the
-graph inputs `attention_mask`, `rope_cos`, `rope_sin`, so one BLOCK graph serves every layer. Not yet: attention / MLP biases, other activations, partial rotary, untied lm_head, MoE.
+graph inputs `attention_mask`, `rope_cos`, `rope_sin`, so one BLOCK graph serves every layer. Not yet: attention / MLP biases, untied lm_head, MoE.
+
+The **gemma4** family (`Gemma4ForConditionalGeneration`; text decoder of E2B / E4B): sandwich norms, different head dims per layer type, KV sharing in the last layers, per-layer embeddings (an int8 table read one row per token),
+layer scalar, proportional RoPE with partial rotary, gelu-tanh, logit softcap. Staged KV only; details in [`../docs/models/gemma4-e4b.md`](../docs/models/gemma4-e4b.md).
+
+## Limits of the target (WebNN)
+- **A tensor may not be bigger than 2^31 - 1 bytes (2 GiB)** in Chromium's WebNN: neither an MLTensor (KV cache, activations) nor an operand inside a graph. The one that bites is the dequantized lm_head matrix:
+  `vocab x hidden` in float32 is 1.45 GiB for Qwen3 (151936 x 2560) and 1.53 GiB for Aion, but 2.5 GiB for Gemma 4 (262144 x 2560), where the browser fails with *"The tensor size 2684354560 exceeds the size limit 2147483647"*
+  at the cast. The Gemma 4 lm_head graph is therefore built in row blocks (`lm_head_parts`, `lm_head_weight_<i>` / `lm_head_scale_<i>` are contiguous views of the one table) and the logits are concatenated.
+- The compiler **checks every tensor of every graph it writes** (`m2w.ir.check_tensor_limit`, constant `WEBNN_MAX_TENSOR_BYTES`) and fails with the offending tensors and sizes; the runtime checks the state tensors it
+  creates (`checkTensorSize` in `src/runtime/llm-common.ts`) and names the option to lower (max length, chunk size). A new architecture with a big vocabulary or a very long cache has to split the operation the same way.
+- Other things the targets do not accept are listed with the operators they need in `m2w.json` (`requires`).
 
 ## Layout of the code
 | path | purpose |
 |---|---|
-| `m2w/ir/` | WebNN-level IR: graph, builder with shape / dtype inference (names follow the WebNN spec), numpy interpreter, JSON (de)serialization |
+| `m2w/ir/` | WebNN-level IR: graph, builder with shape / dtype inference (names follow the WebNN spec), numpy interpreter, JSON (de)serialization, the WebNN tensor size check (`validate.py`) |
 | `m2w/frontends/hf_llm/builders/decoder.py` | the NPUW-style subgraphs (HEAD / BLOCK / TAIL / lm_head / KV update), production options only |
 | `m2w/frontends/hf_llm/` | `arch.py` (config → ModelSpec), `rope.py`, `safetensors_io.py`, `pack.py`, `chat_format.py`, `hub.py` |
 | `m2w/quantize/` | int4 symmetric g128 (signed scale, optional error search), int8 per-row symmetric and uint8 per-row asymmetric (the lm_head table); a scale of 0 is never written (it can make the NPU lm_head dramatically slower) |
