@@ -508,7 +508,7 @@ def _vision_options(spec: arch.ModelSpec, weights: str, grids, compute_type: str
 
 def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
                   prefill_blocks_per_graph=(1,), merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4,
-                  endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print, vision: bool = True, vision_weights: str = "int8",
+                  endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print, vision: bool = True, vision_weights: str = "int8g128",
                   vision_grids=None, vision_compute_type: str = "float32") -> Path:
     """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants.
     A Qwen3.5 checkpoint with a vision tower gets the image tower too (images only): `vision_weights` int8 | int8g128 | int4 | float16, `vision_grids` the (grid_h, grid_w) presets in patches
@@ -585,7 +585,7 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     return out
 
 
-def add_vision(package_dir, model: str, *, vision_weights: str = "int8", vision_grids=None, vision_compute_type: str = "float32", search: bool = True, workers: int = 4,
+def add_vision(package_dir, model: str, *, vision_weights: str = "int8g128", vision_grids=None, vision_compute_type: str = "float32", search: bool = True, workers: int = 4,
                endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print) -> Path:
     """Add the image tower of the source checkpoint to an existing Qwen3.5 package (compiled without it, or with other options): vision weights + grid tables are packed, vision graphs and the plan are
     written, model.json / manifest / m2w.json are updated. The text weights and graphs stay (no text quantization)."""
