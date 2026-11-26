@@ -114,14 +114,14 @@
   /* tabs (packages with an image tower): Chat | Vision share one loaded model */
   #tabs { display: flex; gap: 4px; margin: 0 0 6px; border-bottom: 1px solid var(--line); }
   #tabs button { border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: transparent; padding: 7px 22px; color: var(--dim); font-size: 15px; }
-  #tabs button.active { background: var(--card); border-color: var(--line); color: var(--text); margin-bottom: -1px; }
-  #tabs button.active::after { content: ""; display: block; height: 2px; background: var(--accent); margin: 4px -22px -8px; }
+  #tabs button.on { background: var(--card); border-color: var(--line); color: var(--text); margin-bottom: -1px; }
+  #tabs button.on::after { content: ""; display: block; height: 2px; background: var(--accent); margin: 4px -22px -8px; }
 
   /* Vision tab */
   #dropZone { border: 2px dashed #3a4048; border-radius: 8px; padding: 18px 22px; color: var(--dim); cursor: pointer; min-width: 280px; text-align: center; }
   #dropZone.over, #dropZone:hover, #dropZone:focus { border-color: var(--accent); color: var(--text); outline: 0; }
   .visionview { display: grid; grid-template-columns: minmax(260px, 420px) 1fr; gap: 16px; margin-top: 12px; align-items: start; }
-  #modelView { max-width: 100%; max-height: 420px; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
+  #modelView { max-width: 100%; max-height: 420px; min-width: 128px; image-rendering: auto; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
   #visionCaption { color: #c3c9cf; font-size: 14.5px; line-height: 1.6; }
   #visionAnswer { white-space: pre-wrap; background: #14171a; border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-height: 80px; font-size: 16px; margin-top: 10px; }
   #visionTiming td:nth-child(2) { font-weight: 700; }
@@ -138,7 +138,7 @@
 </header>
 
 <!-- Chat | Vision: only for a package with an image tower; both tabs use the model loaded below (switching does not reload) -->
-<nav id="tabs" style="display:none"><button type="button" data-tab="chat" class="active">Chat</button><button type="button" data-tab="vision">Vision</button></nav>
+<nav id="tabs" style="display:none"><button type="button" data-tab="chat" class="on">Chat</button><button type="button" data-tab="vision">Vision</button></nav>
 
 <!-- ============ model: what to build ============ -->
 <section class="card">
@@ -311,6 +311,6 @@
   <summary>Log</summary>
   <div id="log"></div>
 </details>
-<script type="module" src="chat.js?v=20261126d"></script>
+<script type="module" src="chat.js?v=20261126e"></script>
 </body>
 </html>

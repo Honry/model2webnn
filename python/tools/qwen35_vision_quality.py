@@ -227,7 +227,7 @@ def answers_hf_package(ctx: Context, args, results: dict) -> None:
             t = time.time()
             ids = hf_generate(model, ctx, case, patches, grid, args.max_new)
             reference = reference_ids_of(results, case, args)
-            extra = {"ids": ids, **(teacher_forced(model, ctx, case, patches, grid, [i for i in reference if i not in ctx.spec.eos_token_ids]) if reference else {})}
+            extra = {"ids": ids, "grid": list(grid), **(teacher_forced(model, ctx, case, patches, grid, [i for i in reference if i not in ctx.spec.eos_token_ids]) if reference else {})}
             record(results, case, "hf-package", fmt, ctx.decode(ids), time.time() - t, args, extra)
     del model
     gc.collect()
@@ -287,7 +287,7 @@ def report(results: dict, formats) -> str:
             cells = []
             for c in cols:
                 x = a.get(c)
-                cells.append(f"{'-' if x['pass'] is None else 'PASS' if x['pass'] else 'FAIL'}: {x['answer'][:60]!r}" if x else "-")
+                cells.append(f"{'-' if x['pass'] is None else 'PASS' if x['pass'] else 'FAIL'}{' ' + 'x'.join(map(str, x['grid'])) if x and 'grid' in x else ''}: {x['answer'][:60]!r}" if x else "-")
                 if x and x["pass"] is not None:
                     total[c][0] += x["pass"]
                     total[c][1] += 1

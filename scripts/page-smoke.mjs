@@ -2,10 +2,10 @@
 // by name, shape and dtype; reads return zeros) and the transformers.js CDN import is replaced by a tiny stub tokenizer, so the page logic (DOM, tabs, URL parameters, runtime calls) runs end to end
 // on the tiny Qwen3.5 package (tests/golden/tiny-qwen35-package, linked as bench/packages/tiny-qwen35-pkg). It checks that the page does not crash; numbers and answers are meaningless.
 //
-//   node scripts/page-smoke.mjs "bench/raw/vision-suite.html?model=tiny-qwen35-pkg&maxNewTokens=3" --wait "Done" [--eval "js expression"]... [--browser path] [--timeout 120]
+//   node scripts/page-smoke.mjs "bench/raw/vision-suite.html?model=tiny-qwen35-pkg&maxNewTokens=3" --wait "Done" [--eval "js expression"]... [--screenshot out.png [--height 1600]] [--browser path] [--timeout 120]
 // prints the text of the page's #log / #out, the console errors, and the result of every --eval (run in the page after --wait matched; a string result is printed as is).
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve } from 'node:path';
@@ -87,6 +87,7 @@ await send('Fetch.enable', { patterns: [{ urlPattern: CDN }] });
 await send('Page.addScriptToEvaluateOnNewDocument', { source: `
   Object.defineProperty(navigator, 'ml', { configurable: true, value: { createContext: async () => { const m = await import('/__mock/mock-ml.js'); m.installMockBuilder(); const c = new m.MockContext(); window.__mockContext = c; return c; } } });
 ` });
+await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: +(option('height')[0] ?? 1600), deviceScaleFactor: 1, mobile: false });
 await send('Page.navigate', { url: `${origin}/${target}` });
 
 const text = () => evaluate(`(document.getElementById('log') || document.getElementById('out') || document.body).textContent`);
@@ -99,6 +100,8 @@ while (Date.now() - started < timeout) {
 }
 console.log(`--- page text after ${((Date.now() - started) / 1000).toFixed(1)} s ---\n${page.slice(-4000)}`);
 for (const expression of evals) console.log(`--- eval: ${expression}\n${await evaluate(expression)}`);
+const shot = option('screenshot')[0];
+if (shot) { const r = await send('Page.captureScreenshot', { format: 'png' }); writeFileSync(shot, Buffer.from(r.result.data, 'base64')); console.log(`--- screenshot: ${shot}`); }
 console.log(`--- ${errors.length} browser error(s) ---\n${errors.join('\n')}`);
 ws.close(); chrome.kill(); server.close();
 process.exit(errors.length || /FAILED|Failed:/.test(page) ? 1 : 0);

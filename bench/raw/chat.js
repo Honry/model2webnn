@@ -1046,7 +1046,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     const showTab = (tab, sync = true) => {   // switching tabs only shows / hides: the model and its session stay loaded
         activeTab = visionTab ? tab : "chat";
         byId("panel-chat").style.display = activeTab === "chat" ? "" : "none"; byId("panel-vision").style.display = activeTab === "vision" ? "" : "none";
-        for (const button of byId("tabs").children) button.classList.toggle("active", button.dataset.tab === activeTab);
+        for (const button of byId("tabs").children) button.classList.toggle("on", button.dataset.tab === activeTab);
         if (sync) syncUrl();
     };
     for (const button of byId("tabs").children) button.onclick = () => showTab(button.dataset.tab);
