@@ -160,7 +160,7 @@ def build_graph_like(graph, dtype):
     return build_core_graph(heads, DK, DV, tokens, graph.meta["sub"], dtype, base=graph.meta["base"], probe=True, solve=graph.meta["solve"])
 
 
-def export(directory: Path, heads, tokens, subs, regimes, seed):
+def export(directory: Path, heads, tokens, subs, regimes, seed, only=None):
     directory.mkdir(parents=True, exist_ok=True)
     index = {"graphs": [], "regimes": regimes}
     for regime in regimes:
@@ -171,10 +171,12 @@ def export(directory: Path, heads, tokens, subs, regimes, seed):
         decode_inputs = tuple(x[:, :1] for x in inputs)
         out1, state1 = recurrent(*decode_inputs, state0)
         for dtype in ("float32", "float16"):
-            cases = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base), inputs, out_ref, state_ref) for sub, base in subs] + [(build_recurrent_graph(heads, DK, DV, dtype, style=style), decode_inputs, out1, state1) for style in "ABCDEFG"] + [(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="substitution"), inputs, out_ref, state_ref) for sub in (16, 32)] + [(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="batched"), inputs, out_ref, state_ref) for sub in (16, 32, 64)]
+            cases = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base), inputs, out_ref, state_ref) for sub, base in subs] + [(build_recurrent_graph(heads, DK, DV, dtype, style=style), decode_inputs, out1, state1) for style in "ABCDEFG"] + [(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="substitution"), inputs, out_ref, state_ref) for sub in (16, 32)] + [(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="batched"), inputs, out_ref, state_ref) for sub in (16, 32, 64)] + [(build_core_graph(heads, DK, DV, tokens, 1, dtype, solve="recurrent"), inputs, out_ref, state_ref)]
             # probe graphs: the same graph with the intermediate results of the first sub-chunk as extra outputs; the expected values are the float32 interpreter's
             probes = [(build_core_graph(heads, DK, DV, tokens, sub, dtype, base=base, probe=True), inputs, out_ref, state_ref) for sub, base in subs[:1] + subs[-1:]] + [(build_recurrent_graph(heads, DK, DV, dtype, probe=True, style=style), decode_inputs, out1, state1) for style in "AB"] + [(build_core_graph(heads, DK, DV, tokens, 16, dtype, probe=True, solve="substitution"), inputs, out_ref, state_ref)]
             parts = [(g, None, None, None) for g in part_graphs(heads, dtype)]
+            if only:   # a selection of the graphs (the others are not even written)
+                cases, probes, parts = [c for c in cases if c[0].name in only], [], []
             for graph, ins, want_out, want_state in cases + probes + parts:
                 serialize.dump(graph, directory / f"{graph.name}.json")
                 if ins is None:   # a part: random inputs (strictly lower-triangular x, negative g), the expected results are the float32 interpreter's
@@ -209,6 +211,7 @@ def export(directory: Path, heads, tokens, subs, regimes, seed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--export")
+    ap.add_argument("--only", help="with --export: write only these graphs (comma separated names)")
     ap.add_argument("--heads", type=int, default=8)
     ap.add_argument("--tokens", type=int, default=128)
     ap.add_argument("--subs", default="16,32,64", help="sub-chunk sizes, each optionally with the size of the Neumann base blocks: 64:8")
@@ -219,7 +222,7 @@ def main():
     args = ap.parse_args()
     subs = [(int(x.split(":")[0]), int(x.split(":")[1]) if ":" in x else 16) for x in args.subs.split(",")]
     if args.export:
-        export(Path(args.export), 32, args.tokens, subs, ["mixed", "mixed-corr"], args.seed)
+        export(Path(args.export), 32, args.tokens, subs, ["mixed"] if args.only else ["mixed", "mixed-corr"], args.seed, set(args.only.split(",")) if args.only else None)
         return
     accuracy(args.heads, args.tokens, subs, args.regimes.split(","), args.seed)
     if args.long:

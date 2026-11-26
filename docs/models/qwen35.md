@@ -36,6 +36,27 @@ Gated DeltaNet for one head (state S [dk, dv], per token: L2-normalised q, k, q 
 * Accuracy (numpy interpreter against a float64 token loop, `python/tools/gdn_experiment.py`): float32 1e-7, float16 1e-3, also for nearly parallel keys and over twelve 128-token calls with the state
   kept in float16.
 
+## What OpenVINO's own IR does, and where this package differs (OpenVINO/Qwen3.5-4B-int4-ov, `openvino_language_model.xml`)
+
+The OV IR (made for the GPU) **does use control flow**: 24 `Loop` operators, one per Gated DeltaNet layer, and 64 `ReadValue` / `Assign` pairs (the stateful variables: 24 conv states, 24 recurrent states,
+16 K / V caches of the 8 full attention layers); its shapes are dynamic (`ShapeOf`, `Range`, `Gather`). The Loop has a **dynamic trip count = the number of tokens** (prefill and decode use the same loop): every
+iteration takes one token (q_t, k_t, v_t, g_t, beta_t sliced along the token axis, `part_size 1`), the state [B, 32, 128, 128] is loop-carried and the body is the recurrent update written with elementwise
+operators and `ReduceSum` (no `MatMul`): `S * exp(g)`; `ReduceSum(S * k)`; `(v - that) * beta`; `S + k (x) delta` (`Unsqueeze` + `Multiply` + `Add`); `ReduceSum(S * q)` written into the output buffer with
+`ScatterUpdate`. There is no chunkwise-parallel form in it (it is the torch fallback `torch_recurrent_gated_delta_rule` traced as it is). That is fine for a GPU plugin that runs a Loop; WebNN has no
+loop operator, and a per-token dispatch of the decode graph would make a prompt of N tokens cost N decode steps.
+
+| | OpenVINO IR (GPU) | this package (WebNN, static) |
+|---|---|---|
+| recurrence over the prompt | `Loop`, one iteration per token, dynamic trip count | none: chunk loop in the runtime (state in / out like a KV cache), inside a chunk the chunkwise-parallel form with the sub-chunks unrolled and the triangular solve as a 16-step substitution |
+| decode | the same Loop with one iteration | `gated_delta_step`: a few matmuls |
+| conv | `GroupConvolution` over `concat(conv_state, x)`, kernel quantized | 4 shifted multiply-adds over `concat(conv_state, x)`, kernel float16 |
+| state | `ReadValue` / `Assign` | graph inputs / outputs, swapped with a spare tensor by the runtime |
+| same in both | RMSNorm `pow, mean, add, sqrt, divide, mul` with `(1 + w)` folded, gated norm `norm(o) * w * silu(z)`, `SoftPlus`, `Swish`, key / query heads repeated with `repeat_interleave`, int4 projections |
+| l2norm | `ReduceSum`, `Add`, `Sqrt`, `Divide` | the RMS-norm pattern (the NPU compiler returned garbage for the key with the sum form) |
+| quantization | int4 **asymmetric**, group 128, also the conv kernel and in_proj_a / in_proj_b | int4 symmetric group 128, conv kernel / in_proj_a / in_proj_b float16 |
+
+So the pointwise parts, the projections and the norms follow the OV graph; the recurrence and the conv do not, on purpose.
+
 ## What the NPU compiler did (LNL, `bench/raw/gdn.html`, see also docs/npu-local)
 
 * f32 graphs run as f16 (identical results); everything is judged in f16.

@@ -1,6 +1,8 @@
 """Static-shape subgraphs of the Qwen3.5 text decoder (hybrid: Gated DeltaNet "linear attention" layers and full attention layers) in the NPUW-style split of decoder.py
 (HEAD / BLOCK / TAIL / lm_head / KV flush); see docs/models/qwen35.md.
 
+No loop operator is needed for the Gated DeltaNet layers (OpenVINO's IR uses a `Loop` per layer; WebNN has none): see the "WHY THERE IS NO LOOP" note in gated_delta.py and docs/models/qwen35.md.
+
 What differs from decoder.py:
   * the attention half ends with the output projection, the interface between the halves is `attention_output` [1,S,hidden] (like Gemma 4): x1 = residual + attention_output, then
     post_attention_layernorm -> gate / up -> silu -> down -> + x1;

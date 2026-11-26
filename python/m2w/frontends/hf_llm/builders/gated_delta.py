@@ -1,5 +1,10 @@
 """The Gated DeltaNet (linear attention of Qwen3.5 / Qwen3-Next) as a static WebNN graph: no loop, no scan.
 
+WHY THERE IS NO LOOP. OpenVINO's IR of Qwen3.5 runs this recurrence in a `Loop` operator with one iteration per token and a dynamic trip count (the traced torch fallback, elementwise ops + ReduceSum); WebNN has
+no loop or scan operator. Here (1) the loop over the chunks of a prompt is the runtime's chunk loop (the state is an input and an output of the graph, like a KV cache), (2) inside a chunk the chunkwise-parallel
+form below turns the per-token loop into matmuls over unrolled sub-chunks (the trip count is static), (3) the only sequential piece, the triangular solve, is a row-by-row substitution unrolled in the graph.
+`gated_delta_unrolled` is the OV-style token recurrence unrolled statically, kept as the baseline the chunkwise form is measured against (bench/raw/gdn.html). See docs/models/qwen35.md.
+
 The recurrence per head (state S [dk, dv], one token t with L2-normalised q, k, decay g <= 0, write strength beta in (0, 1)):
     S <- exp(g) S ;  S <- S + k (beta (v - S^T k))^T ;  o = S^T q
 Decode is that update on one token. Prefill uses the chunkwise-parallel form (flash-linear-attention, HF `torch_chunk_gated_delta_rule`): the state is carried from one
@@ -156,8 +161,8 @@ def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value,
 
 def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched"}[solve]
-    b = GraphBuilder(name or f"gdn_core_t{tokens}_c{sub}_{kind}_{dtype}{'_probe' if probe else ''}")
+    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "recurrent": "recur"}[solve]
+    b = GraphBuilder(name or (f"gdn_core_t{tokens}_{kind}_{dtype}" if solve == "recurrent" else f"gdn_core_t{tokens}_c{sub}_{kind}_{dtype}{'_probe' if probe else ''}"))
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
     v = b.input("v", dtype, [1, heads, tokens, dv])
@@ -165,7 +170,9 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     beta = b.input("beta", dtype, [1, heads, tokens, 1])
     state = b.input("state", dtype, [1, heads, dk, dv], role="kv")
     probes = {} if probe else None
-    if solve == "batched":
+    if solve == "recurrent":
+        out, new_state = gated_delta_unrolled(b, q, k, v, g, beta, state)
+    elif solve == "batched":
         out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype)
     else:
         out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
@@ -175,6 +182,18 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     b.output("out", out)
     b.output("new_state", new_state)
     return b.build()
+
+
+def gated_delta_unrolled(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value):
+    """The token-by-token recurrence of T tokens UNROLLED in the graph: what OpenVINO's IR of Qwen3.5 does with a Loop (one iteration per token; the loop body is the recurrent update), written without
+    a loop operator because WebNN has none. T dependent steps of the decode update: this is the baseline that the chunkwise form (gated_delta_batched) is compared with, not what the compiler emits."""
+    heads, total = q.shape[1], q.shape[2]
+    outs = []
+    for t in range(total):
+        at = lambda x: b.slice(x, [0, 0, t, 0], [1, heads, 1, x.shape[3]])  # noqa: E731
+        out, state = gated_delta_step(b, at(q), at(k), at(v), at(g), at(beta), state)
+        outs.append(out)
+    return b.concat(outs, 2), state
 
 
 def gated_delta_step(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value):
