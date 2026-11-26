@@ -1,5 +1,7 @@
 # Gated DeltaNet on the NPU: what NPUW and the NPU compiler do, and how it compares with this package
 
+(中文详细版：[qwen35-npuw.zh.md](qwen35-npuw.zh.md))
+
 Read from source (OpenVINO `src/plugins/intel_npu/src/plugin/npuw` at 8e3db2a6b5, the NPU compiler `src/vpux_compiler` at 0667892172). Nothing here was run through OpenVINO GenAI: the
 numbers below are from the numpy interpreter of this repository; the measurements on a device go to the local notes (`docs/npu-local`).
 
