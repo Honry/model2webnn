@@ -12,6 +12,7 @@
    ],
    "expect_any": [],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "large printed text: the baseline OCR case"
   },
   {
@@ -26,6 +27,7 @@
    ],
    "expect_any": [],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "small printed text lines: resolution test, a bigger grid helps (16x16 loses it)"
   },
   {
@@ -39,6 +41,7 @@
    ],
    "expect_any": [],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "one red circle on white"
   },
   {
@@ -53,6 +56,7 @@
     "five"
    ],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "five blue squares in a row"
   },
   {
@@ -66,6 +70,7 @@
    ],
    "expect_any": [],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "red square left, green square right"
   },
   {
@@ -79,6 +84,7 @@
    "expect_regex": [
     "\\bD\\b"
    ],
+   "xfail_at": [],
    "notes": "bars A B C D, D is the tallest"
   },
   {
@@ -92,6 +98,7 @@
    ],
    "expect_any": [],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "3:1 wide banner: tests the aspect-ratio preset choice"
   },
   {
@@ -106,7 +113,24 @@
    ],
    "expect_any": [],
    "expect_regex": [],
+   "xfail_at": [],
    "notes": "1:2 tall image with a green triangle"
+  },
+  {
+   "id": "ocr-micro",
+   "image": "ocr-micro.png",
+   "width": 768,
+   "height": 768,
+   "question": "What is the TOTAL on this order? Reply with the number only.",
+   "expect_all": [
+    "93.05"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "xfail_at": [
+    "low"
+   ],
+   "notes": "square slip with 11 px text: readable from 24x24 on, expected to FAIL at detail low (16x16): tells the detail levels apart"
   }
  ]
 }

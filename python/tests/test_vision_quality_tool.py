@@ -18,7 +18,7 @@ def test_score_rules():
 
 
 def test_every_suite_case_is_satisfiable_by_its_own_wording():
-    answers = {"ocr-large": "WebNN 2026", "ocr-small": "48213 and 127.50", "color-circle": "red", "count-squares": "5", "left-right": "Red", "bar-chart": "D", "banner-wide": "BANNER", "tall-triangle": "a green triangle"}
+    answers = {"ocr-large": "WebNN 2026", "ocr-small": "48213 and 127.50", "color-circle": "red", "count-squares": "5", "left-right": "Red", "bar-chart": "D", "banner-wide": "BANNER", "tall-triangle": "a green triangle", "ocr-micro": "93.05"}
     for case in Q.load_cases():
         assert Q.score(case, answers[case["id"]]), case["id"]
         assert not Q.score(case, "I do not know")

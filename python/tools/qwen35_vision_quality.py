@@ -92,7 +92,18 @@ def load_results(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def _merge(into: dict, new: dict) -> dict:
+    for key, value in new.items():
+        if isinstance(value, dict) and isinstance(into.get(key), dict):
+            _merge(into[key], value)
+        else:
+            into[key] = value
+    return into
+
+
 def save_results(path: Path, results: dict) -> None:
+    """merge into what is on disk (another run may be writing the same file at the same time: every run only adds its own records), then write"""
+    _merge(results, _merge(load_results(path), results))
     path.write_text(json.dumps(results, indent=1), encoding="utf-8", newline="\n")
 
 
@@ -197,12 +208,14 @@ def answers_hf_original(ctx: Context, args, results: dict) -> None:
     from transformers import Qwen3_5ForConditionalGeneration
 
     model = Qwen3_5ForConditionalGeneration.from_pretrained(str(SOURCE), dtype=torch.bfloat16 if args.hf_dtype == "bfloat16" else torch.float32).eval()
-    for case in load_cases(args.cases):
-        patches, grid = ctx.prepare(case, V.parse_grid(args.grid) if args.grid else None, args.detail)
-        t = time.time()
-        ids = hf_generate(model, ctx, case, patches, grid, args.max_new)
-        extra = {"ids": ids, **teacher_forced(model, ctx, case, patches, grid, [i for i in ids if i not in ctx.spec.eos_token_ids])}
-        record(results, case, "hf-original", "original", ctx.decode(ids), time.time() - t, args, extra)
+    for detail in args.details or [args.detail]:
+        args.detail = detail
+        for case in load_cases(args.cases):
+            patches, grid = ctx.prepare(case, V.parse_grid(args.grid) if args.grid else None, args.detail)
+            t = time.time()
+            ids = hf_generate(model, ctx, case, patches, grid, args.max_new)
+            extra = {"ids": ids, "grid": list(grid), **teacher_forced(model, ctx, case, patches, grid, [i for i in ids if i not in ctx.spec.eos_token_ids])}
+            record(results, case, "hf-original", "original", ctx.decode(ids), time.time() - t, args, extra)
     del model
     gc.collect()
 
@@ -222,13 +235,15 @@ def answers_hf_package(ctx: Context, args, results: dict) -> None:
         vision = {k: torch.from_numpy(np.ascontiguousarray(v)) for k, v in Qwen35PackageReader(ctx.spec, package_for(fmt) / "weights").vision_hf_state_dict().items()}
         missing = model.load_state_dict(vision, strict=False)
         assert not missing.unexpected_keys, missing.unexpected_keys
-        for case in load_cases(args.cases):
-            patches, grid = ctx.prepare(case, V.parse_grid(args.grid) if args.grid else None, args.detail)
-            t = time.time()
-            ids = hf_generate(model, ctx, case, patches, grid, args.max_new)
-            reference = reference_ids_of(results, case, args)
-            extra = {"ids": ids, "grid": list(grid), **(teacher_forced(model, ctx, case, patches, grid, [i for i in reference if i not in ctx.spec.eos_token_ids]) if reference else {})}
-            record(results, case, "hf-package", fmt, ctx.decode(ids), time.time() - t, args, extra)
+        for detail in args.details or [args.detail]:   # --details low auto high: one pass per detail level (the weights are loaded once)
+            args.detail = detail
+            for case in load_cases(args.cases):
+                patches, grid = ctx.prepare(case, V.parse_grid(args.grid) if args.grid else None, args.detail)
+                t = time.time()
+                ids = hf_generate(model, ctx, case, patches, grid, args.max_new)
+                reference = reference_ids_of(results, case, args)
+                extra = {"ids": ids, "grid": list(grid), **(teacher_forced(model, ctx, case, patches, grid, [i for i in reference if i not in ctx.spec.eos_token_ids]) if reference else {})}
+                record(results, case, "hf-package", fmt, ctx.decode(ids), time.time() - t, args, extra)
     del model
     gc.collect()
 
@@ -317,10 +332,11 @@ def main() -> int:
     ap.add_argument("--stage", choices=["tokens", "answers"])
     ap.add_argument("--formats", nargs="+", default=list(FORMATS), choices=list(FORMATS))
     ap.add_argument("--cases", nargs="+", help="case ids (default: all)")
-    ap.add_argument("--image", help="an extra picture (a real photo / screenshot) to measure next to the suite; with --question; its id is the file name")
+    ap.add_argument("--image", nargs="+", help="extra pictures (real photos / screenshots) to measure next to the suite; with --question; the id is the file name")
     ap.add_argument("--question", default="Describe this image in two sentences.")
     ap.add_argument("--grid", help="force a preset HxW instead of the automatic choice")
     ap.add_argument("--detail", choices=["low", "auto", "high"], default="auto", help="detail level of the automatic grid choice")
+    ap.add_argument("--details", nargs="+", choices=["low", "auto", "high"], help="hf-package: run these detail levels one after the other (results in 'hf-package@low' ...)")
     ap.add_argument("--answers", nargs="+", default=["hf-original", "hf-package"], choices=["hf-original", "hf-package", "numpy"])
     ap.add_argument("--max-new", type=int, default=24)
     ap.add_argument("--hf-dtype", choices=["float32", "bfloat16"], default="float32")
@@ -332,8 +348,8 @@ def main() -> int:
     if args.build:
         build_packages(args.build)
         return 0
-    if args.image:
-        EXTRA.append({"id": Path(args.image).stem[:24], "image": str(Path(args.image).resolve()), "question": args.question, "expect_all": [], "expect_any": [], "expect_regex": []})
+    for image in args.image or []:
+        EXTRA.append({"id": Path(image).stem[:24], "image": str(Path(image).resolve()), "question": args.question, "expect_all": [], "expect_any": [], "expect_regex": []})
     results = load_results(args.results)
     if args.report:
         print(report(results, args.formats))

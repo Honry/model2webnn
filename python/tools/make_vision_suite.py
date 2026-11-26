@@ -2,7 +2,7 @@
 
     python python/tools/make_vision_suite.py [out dir]        (default bench/raw/vision-suite)
 
-Every case: {id, image, question, expect_all: [substrings], expect_any: [substrings], expect_regex: [regexes], notes}; an answer PASSES when it contains every `expect_all` substring, at least one `expect_any`
+Every case: {id, image, question, expect_all: [substrings], expect_any: [substrings], expect_regex: [regexes], xfail_at: [detail levels where a FAIL is expected], notes}; an answer PASSES when it contains every `expect_all` substring, at least one `expect_any`
 substring (when the list is not empty) and matches every `expect_regex` (all case-insensitive). The same scoring is implemented by python/tools/qwen35_vision_quality.py and bench/raw/vision-suite.js.
 Fonts: Arial (Windows) when present, else DejaVu / the scalable default font of Pillow; the shapes do not depend on a font, the text cases do a little (the pixels differ, the content does not).
 """
@@ -100,6 +100,23 @@ def tall_triangle():
     return image
 
 
+def micro_text():
+    """a square order slip, 768 x 768 px with 11 px text: at 16x16 (256 px, the text is scaled by 0.33) the digits blur, from 24x24 on (0.5) they are readable: the case that tells `low` from `auto` / `high`"""
+    image, draw = canvas(768, 768)
+    f, bold = font(11), font(13, "bold")
+    draw.text((40, 40), "ORDER 61877", font=bold, fill=BLACK)
+    for i, (name, qty, amount) in enumerate([("Bolt M6", "4 x 2.50", "10.00"), ("Nut M6", "4 x 1.20", "4.80"), ("Washer", "10 x 0.45", "4.50"), ("Spring", "3 x 6.10", "18.30")]):
+        y = 110 + i * 24.2
+        draw.text((40, y), name, font=f, fill=BLACK)
+        draw.text((300, y), qty, font=f, fill=BLACK)
+        draw.text((620, y), amount, font=f, fill=BLACK)
+    draw.text((40, 110 + 4 * 24.2 + 30), "TOTAL USD", font=bold, fill=BLACK)
+    draw.text((600, 110 + 4 * 24.2 + 30), "93.05", font=bold, fill=BLACK)
+    return image
+
+
+XFAIL = {"ocr-micro": ["low"]}   # case -> detail levels at which a FAIL is expected (the resolution is not there): the suite page reports it as XFAIL and does not count it
+
 CASES = [
     ("ocr-large", large_text, "What text is written in the image? Reply with the text only.", ["webnn", "2026"], [], [], "large printed text: the baseline OCR case"),
     ("ocr-small", small_text, "What is the order number and what is the total? Reply briefly.", ["48213", "127.50"], [], [], "small printed text lines: resolution test, a bigger grid helps (16x16 loses it)"),
@@ -109,6 +126,7 @@ CASES = [
     ("bar-chart", bar_chart, "Which bar is the tallest? Answer with the letter only.", [], [], ["\\bD\\b"], "bars A B C D, D is the tallest"),
     ("banner-wide", banner, "What word is written on the banner? Reply with the word only.", ["banner"], [], [], "3:1 wide banner: tests the aspect-ratio preset choice"),
     ("tall-triangle", tall_triangle, "What shape is this and what color is it?", ["triangle", "green"], [], [], "1:2 tall image with a green triangle"),
+    ("ocr-micro", micro_text, "What is the TOTAL on this order? Reply with the number only.", ["93.05"], [], [], "square slip with 11 px text: readable from 24x24 on, expected to FAIL at detail low (16x16): tells the detail levels apart"),
 ]
 
 
@@ -120,7 +138,7 @@ def main() -> None:
         image = make()
         image.save(out / f"{case_id}.png", optimize=True)
         cases.append({"id": case_id, "image": f"{case_id}.png", "width": image.width, "height": image.height, "question": question, "expect_all": expect_all, "expect_any": expect_any,
-                      "expect_regex": expect_regex, "notes": notes})
+                      "expect_regex": expect_regex, "xfail_at": XFAIL.get(case_id, []), "notes": notes})
     (out / "cases.json").write_text(json.dumps({"cases": cases}, indent=1) + "\n", encoding="utf-8", newline="\n")
     print(f"wrote {len(cases)} cases to {out}")
 

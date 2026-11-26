@@ -75,12 +75,12 @@ async function run() {
                 for await (const token of llm.generate(ids, { maxNewTokens, images: [image], temperature: 0 })) { if (stop.has(token)) break; generated.push(token); }
                 const answer = tokenizer.decode(generated).trim(), s = llm.stats, steps = s.steps;
                 const tpot = steps.length ? steps.reduce((sum, step) => sum + step.totalMs, 0) / steps.length : 0;
-                const ok = scoreAnswer(c, answer);
-                const r = { id, case: c.id, ok, grid: image.grid.join("x"), pixels: `${image.grid[1] * pkg.model.vision.patch_size}x${image.grid[0] * pkg.model.vision.patch_size}`, imageTokens: s.imageTokens, visionMs: s.visionMs ?? 0, buildMs,
+                const passedExpectations = scoreAnswer(c, answer), expectedFail = (c.xfail_at ?? []).includes(detail), ok = passedExpectations;   // xfail_at: a FAIL at this detail level is expected (resolution), reported as XFAIL and not counted
+                const r = { id, case: c.id, ok, expectedFail, grid: image.grid.join("x"), pixels: `${image.grid[1] * pkg.model.vision.patch_size}x${image.grid[0] * pkg.model.vision.patch_size}`, imageTokens: s.imageTokens, visionMs: s.visionMs ?? 0, buildMs,
                     preprocessMs, ttftMs: s.prefillMs, tpotMs: tpot, answer };
                 results.push(r);
-                byId(`case-${c.id}`).style.outline = `3px solid ${ok ? "#7fcf8a" : "#ff7a7a"}`;
-                log("case", `${ok ? "PASS" : "FAIL"} ${id}: ${width}x${height} -> grid ${r.grid} (${r.pixels} px), ${r.imageTokens} image tokens, preprocess ${round(preprocessMs)} ms, graph build ${round(buildMs)} ms, vision encode ${round(r.visionMs)} ms, TTFT ${seconds(r.ttftMs)}, TPOT ${round(tpot)} ms | answer: ${JSON.stringify(answer)}`,
+                byId(`case-${c.id}`).style.outline = `3px solid ${ok ? "#7fcf8a" : expectedFail ? "#ffb454" : "#ff7a7a"}`;
+                log("case", `${ok ? (expectedFail ? "XPASS" : "PASS") : expectedFail ? "XFAIL" : "FAIL"} ${id}: ${width}x${height} -> grid ${r.grid} (${r.pixels} px), ${r.imageTokens} image tokens, preprocess ${round(preprocessMs)} ms, graph build ${round(buildMs)} ms, vision encode ${round(r.visionMs)} ms, TTFT ${seconds(r.ttftMs)}, TPOT ${round(tpot)} ms | answer: ${JSON.stringify(answer)}`,
                     { case: c.id, pass: ok, grid: r.grid, width, height, image_tokens: r.imageTokens, preprocess_ms: round(preprocessMs), build_ms: Math.round(buildMs), vision_ms: Math.round(r.visionMs), ttft_ms: Math.round(r.ttftMs),
                       tpot_ms: round(tpot), prompt_tokens: s.promptTokens, answer, question: c.question });
             } catch (error) {
@@ -89,8 +89,8 @@ async function run() {
             }
         }
     }
-    const passed = results.filter((r) => r.ok).length;
-    log("summary", `SUMMARY: ${passed}/${results.length} passed (detail ${detail}, weights ${pkg.plan.vision.weights}); failed: ${results.filter((r) => !r.ok).map((r) => r.id).join(", ") || "none"}`, { passed, total: results.length, detail, weights: pkg.plan.vision.weights });
+    const counted = results.filter((r) => !(r.expectedFail && !r.ok)), passed = counted.filter((r) => r.ok).length, xfail = results.length - counted.length;   // an expected failure (xfail_at) is neither a pass nor a failure
+    log("summary", `SUMMARY: ${passed}/${counted.length} passed (detail ${detail}, weights ${pkg.plan.vision.weights})${xfail ? `, ${xfail} expected failure(s) at this detail level not counted` : ""}; failed: ${counted.filter((r) => !r.ok).map((r) => r.id).join(", ") || "none"}`, { passed, total: counted.length, xfail, detail, weights: pkg.plan.vision.weights });
     const perGrid = new Map();
     for (const r of results.filter((x) => x.grid)) (perGrid.get(r.grid) ?? perGrid.set(r.grid, []).get(r.grid)).push(r);
     for (const [grid, list] of perGrid) {
@@ -98,7 +98,7 @@ async function run() {
         log("grid", `grid ${grid}: ${list.length} run(s), ${list[0].imageTokens} image tokens, vision encode ${round(mean("visionMs"))} ms, TTFT ${seconds(mean("ttftMs"))}, TPOT ${round(mean("tpotMs"))} ms, graph build ${round(built)} ms (first use), ${list.filter((r) => r.ok).length}/${list.length} passed`,
             { grid, runs: list.length, image_tokens: list[0].imageTokens, vision_ms: Math.round(mean("visionMs")), ttft_ms: Math.round(mean("ttftMs")), tpot_ms: round(mean("tpotMs")), build_ms: Math.round(built), passed: list.filter((r) => r.ok).length });
     }
-    setStatus(`done: ${passed}/${results.length} passed`);
+    setStatus(`done: ${passed}/${counted.length} passed`);
     log("done", "Done");
 }
 run().catch((error) => { log("fatal", "Failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); });

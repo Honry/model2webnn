@@ -17,7 +17,7 @@ SUITE = ROOT / "bench" / "raw" / "vision-suite"
 
 def test_cases_match_the_generator_and_the_images():
     cases = json.loads((SUITE / "cases.json").read_text(encoding="utf-8"))["cases"]
-    assert [c["id"] for c in cases] == [c[0] for c in M.CASES] and len(cases) == 8
+    assert [c["id"] for c in cases] == [c[0] for c in M.CASES] and len(cases) == 9
     for case in cases:
         with Image.open(SUITE / case["image"]) as image:
             assert image.size == (case["width"], case["height"]) and 256 <= max(image.size) <= 768
