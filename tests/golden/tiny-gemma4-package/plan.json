@@ -80,6 +80,7 @@
   "zero_point": "const",
   "merge_projections": true,
   "lm_head_format": "int8-sym",
+  "attn_split": false,
   "gqa": "repeat"
  },
  "variants": [
