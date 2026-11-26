@@ -79,23 +79,23 @@
   },
   {
    "path": "graphs/staged-r8-float16/prefill_block_linear_attention_L128_C16.json",
-   "bytes": 26736,
-   "sha256": "2b8a1dbd27dffe71124a07427dd187dda95d0932de313164a08b53e4d1b7097d"
+   "bytes": 22782,
+   "sha256": "673e028ee09d7c93fb946a012def0a5350d5e9d1a5bba4f6481b696b56d7a567"
   },
   {
    "path": "graphs/staged-r8-float16/prefill_block_linear_attention_L128_C32.json",
-   "bytes": 27929,
-   "sha256": "a111da08473b90e0cf5dfd359af5a9c470f403d3d8aa987c61fa01a64476fb38"
+   "bytes": 23975,
+   "sha256": "2ddb060a3c795771475d05b4c3adc6852650ea2d5c5a9df720ae77f30e526ca2"
   },
   {
    "path": "graphs/staged-r8-float16/prefill_head_L128_C16.json",
-   "bytes": 24070,
-   "sha256": "0993545e4b4c759dc08b1e4298d404a5b16789ee2e06fccf8364f4600da10e47"
+   "bytes": 20116,
+   "sha256": "37093c446600424d7ca46ba1e32eafd43e9d78ca3cebe052e977581e780dac05"
   },
   {
    "path": "graphs/staged-r8-float16/prefill_head_L128_C32.json",
-   "bytes": 25263,
-   "sha256": "fa476506c616949761dc1c90b76f2ecd126e35947a76fe090ece4f0301f52ede"
+   "bytes": 21309,
+   "sha256": "24cf225665c2160f1f97ee99dfa8f78313a48d1c3e47b5d95f66385783f8642d"
   },
   {
    "path": "graphs/staged-r8-float16/prefill_tail_C16.json",
@@ -149,23 +149,23 @@
   },
   {
    "path": "graphs/staged-r8-float32/prefill_block_linear_attention_L128_C16.json",
-   "bytes": 28686,
-   "sha256": "13ef89ead643877d98dae425a9a0adaa130e7113076f9b21daa8d9023be2f4bd"
+   "bytes": 24732,
+   "sha256": "1a95879bb569f7e22930e83c53ea1e2f060b9c665836f3c8f9aa02a4fd317767"
   },
   {
    "path": "graphs/staged-r8-float32/prefill_block_linear_attention_L128_C32.json",
-   "bytes": 29879,
-   "sha256": "7c9ee685609cf45abd77f1081ee1ed35360f209638aa3e3d4f0ff31b24fe81ac"
+   "bytes": 25925,
+   "sha256": "695bddde4eb823e20e4f98138065a19f2dee23f9b5ff4a7a648e66dab500525d"
   },
   {
    "path": "graphs/staged-r8-float32/prefill_head_L128_C16.json",
-   "bytes": 25599,
-   "sha256": "dddef459b2d0566c298575b2bb768d749fa448f8de18b787435fbfd325cb1a73"
+   "bytes": 21645,
+   "sha256": "761a2d219f5f4b84fa56eaf811ad70830624a8b23ee9507c78f7017db78c5671"
   },
   {
    "path": "graphs/staged-r8-float32/prefill_head_L128_C32.json",
-   "bytes": 26792,
-   "sha256": "936bae43d185ee82644267d93e0a7246253efb0e0717d817c0bacca71442feb7"
+   "bytes": 22838,
+   "sha256": "82f09abbdd30f632de05148c2d538f70acbe39174781a41392535d3156df6758"
   },
   {
    "path": "graphs/staged-r8-float32/prefill_tail_C16.json",
