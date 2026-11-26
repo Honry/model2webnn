@@ -78,3 +78,26 @@ text:   the same graphs as before; the 8 full attention layers get 3-position (t
 tables against the text model's own rotary embedding, prefill logits and ten decode steps (one image, two images with different grids, an image that straddles a prefill chunk boundary); a prompt without
 image is unchanged. `python/tools/qwen35_vl_check.py` does the same on the real 4B model with a real image (slow: the interpreter runs the whole model) and can also print the answer of the original bfloat16
 checkpoint.
+
+## The browser runtime (`src/runtime/vision.ts`, `llm-qwen35.ts`, `protocol.ts`)
+
+```ts
+const llm = await Qwen35LLM.load(url, { vision: { grids: [[24, 24], [16, 24]] } });   // vision: true = every preset of the package; absent = text only (nothing of the tower is loaded)
+const image = llm.prepareImage(await createImageBitmap(file));                       // preset by aspect ratio / size, canvas resize, normalise, patchify -> { patches, grid, tokens }
+const ids = tokenizer.encode(buildPrompt(format, [{ user: 'What is this?', images: 1 }], undefined, new Date(), llm.pkg.model.vision.image_prompt));
+for await (const token of llm.generate(ids, { images: [image] })) { ... }             // ONE <|image_pad|> in `ids` per image: the runtime expands it
+```
+
+* `VisionTower` (vision.ts): uploads `vision_head` / `vision_block_NNN` / `vision_merger` once, builds HEAD / BLOCK / MERGER of every requested preset (the grid tables are external constants read from the
+  `vision_grid` shard), and per image dispatches HEAD, the same BLOCK graph `depth` times with the weights of layer i bound by name, MERGER; the image tokens are read back as float16 rows. Two hidden-state
+  tensors take turns (all of them are kept readable with `VisionTower.debugReadback`, for `bench/raw/qwen35vision.html`).
+* `Qwen35LLM.prefill` expands the pad tokens (`protocol.ts expandImageTokens`), computes the positions (`mropePositions`), runs the tower, and writes the image rows into the prefill chunks in place of the
+  embedding rows (a run of image tokens may straddle chunk boundaries); the rope tables of the chunks are `ropeTablesMrope`; `step` uses `position + ropeDelta`. The same graphs, controls and states as for text.
+  Stats: `imageTokens`, `visionMs` (inside `prefillMs`).
+* `protocol.ts` mirrors `protocol.py` (`chooseGrid`, `expandImageTokens`, `mropePositions`, `mropeAxes`, `ropeTablesMrope`, `patchify`); `tests/golden/protocol_vectors.json` keeps the two identical.
+* Preprocessing in the browser (`prepareImage`): canvas `drawImage` to exactly `grid * 16` pixels with smoothing, RGBA -> `(v / 255 - mean) / std`, `patchify`. The Python reference resizes with PIL bicubic: the two differ a
+  little at the pixel level (the vision graphs are verified on the SAME pixels).
+* Pages: `bench/raw/chat.html` (package mode, a package with an image tower): an image picker and the grid presets to load (read at the first load); `bench/raw/qwen35vision.html` (+ `python/tools/qwen35_vision_check.py
+  --export`): the device against the interpreter, hidden state after HEAD and after every block, image tokens (relative error, max abs, non-finite values, cosine per token).
+* Tests: `src/runtime/llm-qwen35-vision.test.ts` on the validating mock of WebNN (every weight / table / activation of every dispatch is checked by name, shape and dtype; image rows at the right prompt positions
+  across a chunk boundary; MRoPE tables of the chunks; decode with `ropeDelta`; the canvas preprocessing with a stubbed `OffscreenCanvas`), `protocol.test.ts` (golden vectors).

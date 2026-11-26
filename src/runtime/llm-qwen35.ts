@@ -4,15 +4,20 @@
 //  * the states are zeroed at the start of every prompt; prefill graphs of linear layers take two controls built by protocol.linearPrefillControls (valid_mask, conv_perm) for the left-padded
 //    last chunk;
 //  * the embedding is not scaled; the lm_head is built in row blocks of the table (it is too big for one WebNN tensor).
+//  * images (a package with an image tower, LoadOptions.vision): `generate(tokens, { images })` with one <|image_pad|> per image in `tokens`: the pad is expanded to one token per merge block of the
+//    grid, the image tower (vision.ts) turns the patches into image tokens whose rows REPLACE the embedding rows of the pad tokens in the prefill chunks, the full attention layers get 3-position
+//    interleaved MRoPE tables (protocol.ts ropeTablesMrope) and decode token i has the rope position i + ropeDelta. Without images everything is as before.
 //  * decode block groups (blocksPerGraph = K > 1, a package built with --blocks-per-graph K): the N - 1 BLOCKs in runs of K, one dispatch per run (plan.chain.block_groups); the inputs of a group graph
 //    are bound by NAME: residual / attention_output of its first block, the shared controls of the full attention layers, and b<j>_ = the weights and the state / caches of block j. Prefill has no groups.
 // Python counterpart (the executable specification): python/m2w/reference/qwen35_runner.py. Only the staged KV protocol exists.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
+import { VisionTower, type PreparedImage } from './vision.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
 import { openPackage, type GemmaBlockGroup, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type QwenDecodeTable, type Variant } from './package.js';
 import {
-  decodeMasks, decodeSelectors, flushSelectors, layerTypesOf, linearPrefillControls, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables, type Half,
+  decodeMasks, decodeSelectors, expandImageTokens, flushSelectors, layerTypesOf, linearPrefillControls, mropePositions, newHalf, planPrefill, prefillMasks, prefillSelectors,
+  ropeTables, ropeTablesMrope, type Grid, type Half, type LayoutSpec,
 } from './protocol.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -49,7 +54,9 @@ export class Qwen35LLM {
   private logitsTensor!: ML; private logits!: Half;
   private embed!: { weight: Int8Array; scale: Half };
   private weightTensors: ML[] = []; private stateTensors: ML[] = []; private builtGraphs: ML[] = [];
-  private base = 0; private filled = 0; private position = 0;
+  private base = 0; private filled = 0; private position = 0; private ropeDelta = 0;
+  /** the image tower when the model was loaded with LoadOptions.vision */
+  vision: VisionTower | null = null;
   private busy = false;
   private lastStep = { hostMs: 0, enqueueMs: 0, waitMs: 0 };
   private queue: { label: string; run: () => void; sync?: ML }[] | null = null;   // debugTrace(stepwise): dispatches are collected and run one by one, each followed by a readback
@@ -75,6 +82,10 @@ export class Qwen35LLM {
     const llm = new Qwen35LLM(pkg);
     llm.adopt(llm.resolve(options));
     await llm.init(options, progress);
+    if (options.vision) {
+      const grids = typeof options.vision === 'object' ? options.vision.grids : undefined;
+      llm.vision = await VisionTower.create(llm.ctx, pkg, { grids: grids as Grid[] | undefined }, progress);
+    }
     llm.stats.loadMs = performance.now() - t0;
     return llm;
   }
@@ -346,6 +357,23 @@ export class Qwen35LLM {
   }
 
   // ------------------------------------------------------------------------------------------------------------------------------- host side
+  /** a picture -> the patches of the image tower (canvas resize to the best loaded grid preset, normalise, patchify); needs LoadOptions.vision */
+  prepareImage(image: { width: number; height: number }, grid?: Grid): PreparedImage {
+    if (!this.vision) throw new Error('this model was loaded without the image tower: pass { vision: true } to load()');
+    return this.vision.prepare(image, grid);
+  }
+
+  /** the prompt with its <|image_pad|> tokens expanded for these images */
+  expandPrompt(tokens: number[], images: PreparedImage[]): number[] {
+    return expandImageTokens(this.visionLayout(), tokens, images.map((i) => i.grid));
+  }
+
+  private visionLayout() {
+    const v = this.pkg.model.vision;
+    if (!v) throw new Error('this package has no image tower');
+    return { image_token_id: v.image_token_id, merge_size: v.merge_size };
+  }
+
   private embedRow(token: number, out: Half, offset: number) {
     const hidden = this.pkg.model.hidden, start = token * hidden, scale = this.embed.scale[token] * (this.pkg.model.embed_scale ?? 1);
     for (let i = 0; i < hidden; i++) out[offset + i] = this.embed.weight[start + i] * scale;
@@ -407,9 +435,27 @@ export class Qwen35LLM {
   private get cacheFull() { return this.position >= this.P; }
 
   // ------------------------------------------------------------------------------------------------------------------------------- generation
-  private async prefill(tokens: number[]): Promise<Half> {
-    const s = this.pkg.model, { P } = this, n = tokens.length;
+  private async prefill(tokens: number[], images: PreparedImage[] = []): Promise<Half> {
+    const s = this.pkg.model, { P } = this;
+    let positions: [Int32Array, Int32Array, Int32Array] | null = null, ropeDelta = 0, imageRows: Map<number, Half> | null = null, visionMs = 0;
+    if (images.length) {
+      if (!this.vision) throw new Error('this model was loaded without the image tower: pass { vision: true } to load()');
+      const layout = this.visionLayout(), grids = images.map((i) => i.grid);
+      tokens = expandImageTokens(layout, tokens, grids);
+      ({ positions, ropeDelta } = mropePositions(layout, tokens, grids));
+      const started = performance.now(), hidden = s.hidden, rows = new Map<number, Half>();
+      let at = 0;
+      const pads = tokens.flatMap((t, i) => (t === layout.image_token_id ? [i] : []));
+      for (const image of images) {
+        const embeds = await this.vision.encode(image);
+        for (let k = 0; k < image.tokens; k++) rows.set(pads[at++], embeds.subarray(k * hidden, (k + 1) * hidden));
+      }
+      imageRows = rows; visionMs = performance.now() - started;
+      this.stats.imageTokens = rows.size; this.stats.visionMs = visionMs;
+    }
+    const n = tokens.length;
     if (n === 0) throw new Error('empty prompt');
+    this.stats.promptTokens = n;
     const plan = this.planFor(n);
     if (n >= P) throw new Error(`the prompt has ${n} tokens but the KV cache holds ${P}: load the package with a larger max length`);
     this.stats.prefillPlan = plan;
@@ -418,9 +464,13 @@ export class Qwen35LLM {
     for (let index = 0; index < plan.length; index++) {
       const C = plan[index], last = index === plan.length - 1, set = this.prefillSets.get(C) as PrefillSet, a = set.act;
       const valid = Math.min(C, n - start), pad = C - valid, hidden = newHalf(C * s.hidden);
-      for (let i = 0; i < valid; i++) this.embedRow(tokens[start + i], hidden, (pad + i) * s.hidden);
+      for (let i = 0; i < valid; i++) {
+        const row = imageRows?.get(start + i);
+        if (row) hidden.set(row, (pad + i) * s.hidden); else this.embedRow(tokens[start + i], hidden, (pad + i) * s.hidden);
+      }
       this.ctx.writeTensor(a.hidden, hidden);
-      this.writeRope(ropeTables(s, Array.from({ length: valid }, (_, i) => start + i), C, pad), a);
+      this.writeRope(positions ? ropeTablesMrope(s as LayoutSpec & { mrope: { section: number[] } }, positions.map((p) => p.subarray(start, start + valid)), C, pad)
+        : ropeTables(s, Array.from({ length: valid }, (_, i) => start + i), C, pad), a);
       this.ctx.writeTensor(a.mask, prefillMasks(s, P, C, start, valid)[layerTypesOf(s)[0]]);
       const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
       this.ctx.writeTensor(set.sel.keep, rowsToKeep); this.ctx.writeTensor(set.sel.select, rowSelector);
@@ -430,7 +480,7 @@ export class Qwen35LLM {
       if (this.queue) await this.flushQueue();
       start += valid;
     }
-    this.base = n; this.filled = 0; this.position = n;
+    this.base = n; this.filled = 0; this.position = n; this.ropeDelta = ropeDelta;
     return this.readLogits();
   }
 
@@ -456,7 +506,7 @@ export class Qwen35LLM {
     const pos = this.position, a = this.dec, hidden = newHalf(s.hidden);
     this.embedRow(token, hidden, 0);
     this.ctx.writeTensor(a.hidden, hidden);
-    this.writeRope(ropeTables(s, [pos], 1, 0), a);
+    this.writeRope(ropeTables(s, [pos + this.ropeDelta], 1, 0), a);   // after an image the rope position is shifted by ropeDelta; the cache rows and masks use the sequence index
     this.ctx.writeTensor(a.mask, decodeMasks(s, P, R, pos, this.base, this.filled)[layerTypesOf(s)[0]]);
     const { rowsToKeep, rowSelector } = decodeSelectors(R, this.filled);
     this.ctx.writeTensor(this.decodeSel.keep, rowsToKeep); this.ctx.writeTensor(this.decodeSel.select, rowSelector);
@@ -497,9 +547,11 @@ export class Qwen35LLM {
     try {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
-      let logits = await this.prefill(tokens);
+      this.stats.imageTokens = undefined; this.stats.visionMs = undefined;
+      let logits = await this.prefill(tokens, options.images ?? []);
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
-        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
+        prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: this.stats.promptTokens, graphBuilds: this.stats.graphBuilds,
+        ...(options.images?.length ? { imageTokens: this.stats.imageTokens, visionMs: this.stats.visionMs } : {}) };
       t = performance.now();
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();
@@ -520,6 +572,7 @@ export class Qwen35LLM {
   }
 
   destroy() {
+    this.vision?.destroy(); this.vision = null;
     this.releaseSession();
     for (const t of this.weightTensors) t.destroy?.();
     this.weightTensors = []; this.weights = [];

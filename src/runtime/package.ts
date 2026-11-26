@@ -13,6 +13,19 @@ export interface ModelSpecJson {
   ple_dim?: number; embed_scale?: number; attention_scale?: number | null; logit_softcap?: number;
   linear?: { num_k_heads: number; num_v_heads: number; k_dim: number; v_dim: number; conv_kernel: number };   // Qwen3.5: the Gated DeltaNet (linear_attention) layers
   attn_output_gate?: boolean;
+  vision?: VisionSpecJson;                                                            // Qwen3.5: the image tower the package carries (images only)
+  mrope?: { section: number[]; interleaved: boolean };                                // Qwen3.5: 3-position rotary of the full attention layers (image tokens)
+}
+/** model.json `vision`: the image tower (python arch._qwen35_vision) */
+export interface VisionSpecJson {
+  depth: number; hidden: number; heads: number; ffn: number; out_hidden: number; patch_size: number; temporal_patch_size: number; merge_size: number; channels: number; pos_grid: number;
+  eps: number; image_mean: number[]; image_std: number[]; rescale_factor: number; image_token_id: number; vision_start_token_id: number; vision_end_token_id: number; image_prompt: string;
+}
+/** plan.json `vision`: one set of graphs per grid preset, independent of the text variants */
+export interface VisionPlan {
+  weights: 'int8' | 'int4' | 'float16'; compute_type: 'float32' | 'float16'; depth: number; image_token_id: number;
+  tensors: { head: string[]; block: string[]; merger: string[]; tables: string[] };
+  presets: { grid: [number, number]; patches: number; tokens: number; graphs: { head: string; block: string; merger: string } }[];
 }
 export interface GraphTable {
   head: string; block: string; tail: string; flush?: string; block_groups?: Record<string, string>;
@@ -34,11 +47,15 @@ export interface Plan {
   /** the session options the model family runs best with (families/*.json `recommended`): used when the caller does not choose; a group size the package does not contain is already 1 here */
   recommended?: { blocks_per_graph?: number; prefill_blocks_per_graph?: number; prefill_chunks?: number[] };
   architecture_kind?: 'gemma4' | 'qwen35';
+  vision?: VisionPlan;
   state?: { conv_channels: number; v_heads: number; k_dim: number; v_dim: number; layers: number[] };   // qwen35: the layers that carry a Gated DeltaNet state instead of a KV cache
   profile: { merge_projections: boolean; lm_head_format: string };
 }
 export interface ManifestTensor { name: string; dtype: string; shape: number[]; offset: number; bytes: number }
-export interface ManifestFile { file: string; role: 'layer' | 'final_norm' | 'embedding' | 'head_extra' | 'ple_table'; layer?: number; kind?: string; bytes: number; tensors: ManifestTensor[] }
+export interface ManifestFile {
+  file: string; role: 'layer' | 'final_norm' | 'embedding' | 'head_extra' | 'ple_table' | 'vision_head' | 'vision_block' | 'vision_merger' | 'vision_pos_embed' | 'vision_grid';
+  layer?: number; kind?: string; grid?: [number, number]; bytes: number; tensors: ManifestTensor[];
+}
 export interface WeightsManifest { quant: { group_size: number; merge_projections: boolean }; files: ManifestFile[] }
 export interface ChatFormat {
   template_kwargs: Record<string, unknown>; first_prefix: string; first_prefix_with_system: string; user_suffix_generation_prompt: string;

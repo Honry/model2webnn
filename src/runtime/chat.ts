@@ -6,7 +6,8 @@ export interface Tokenizer {
   encode(text: string): number[];
   decode(ids: number[]): string;
 }
-export interface Turn { user: string; assistant?: string }
+/** `images`: how many pictures this user turn carries (Qwen3.5 with an image tower): the model's image prompt (<|vision_start|><|image_pad|><|vision_end|>) is written in front of the text once per picture */
+export interface Turn { user: string; assistant?: string; images?: number }
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 /** strftime for the placeholders the compiler leaves in chat_format.json (<<date:%Y-%m-%d>> ...): %Y %m %d %H %M %S %% */
@@ -16,10 +17,10 @@ export function strftime(format: string, d: Date): string {
 export const fillPlaceholders = (text: string, now: Date) => text.replace(/<<date:([^>]*)>>/g, (_, f) => strftime(f, now));
 
 /** The text to feed the model: the turns so far, the last turn without an assistant answer (the model answers next). */
-export function buildPrompt(format: ChatFormat, turns: Turn[], system?: string, now = new Date()): string {
+export function buildPrompt(format: ChatFormat, turns: Turn[], system?: string, now = new Date(), imagePrompt = ''): string {
   let text = system ? format.first_prefix_with_system.replace('<<system>>', () => system) : format.first_prefix;
   turns.forEach((turn, i) => {
-    text += (i ? format.next_user_prefix : '') + turn.user;
+    text += (i ? format.next_user_prefix : '') + imagePrompt.repeat(turn.images ?? 0) + turn.user;
     text += turn.assistant === undefined ? format.user_suffix_generation_prompt : format.user_suffix_assistant_prefix + turn.assistant + format.assistant_suffix;
   });
   return fillPlaceholders(text, now);
@@ -35,7 +36,7 @@ export interface ChatOptions extends GenerateOptions { system?: string; now?: Da
 export async function* chat(llm: LLM, tokenizer: Tokenizer, turns: Turn[], options: ChatOptions = {}): AsyncGenerator<string> {
   const format = llm.pkg.chatFormat;
   if (!format) throw new Error('this package has no chat_format.json (the model has no usable chat template): use llm.generate() with your own prompt');
-  const ids = tokenizer.encode(buildPrompt(format, turns, options.system, options.now));
+  const ids = tokenizer.encode(buildPrompt(format, turns, options.system, options.now, llm.pkg.model.vision?.image_prompt));
   const stop = new Set(options.stopTokens ?? llm.pkg.model.eos_token_ids), generated: number[] = [];
   let shown = '';
   for await (const token of llm.generate(ids, options)) {

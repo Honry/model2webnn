@@ -3,7 +3,7 @@ packing must agree to float16 noise) and (b) the original checkpoint weights (th
 
     python tools/qwen35_vision_check.py <package> <hf checkpoint dir> <image> [--grid 24x16] [--out ../bench/data/qwen35_vision] [--export]
 
---export writes the patches, the grid and the hidden state after every block (float16) of the interpreter into --out: what bench/raw/qwen35vision.html compares the device with.
+--export writes the patches, the grid and the hidden state after HEAD and after every block (float16) of the interpreter into --out (trace.json + trace.bin): what bench/raw/qwen35vision.html compares the device with.
 """
 import argparse
 import json
@@ -66,15 +66,24 @@ def main() -> int:
                 a32 = a.astype(np.float32)
                 centered = b - b.mean(axis=-1, keepdims=True)
                 print(f"   block {i:2d}: {np.abs(b).max():8.2f}  {np.abs(a32 - b).max():8.4f}  {rel(a32, b):.5f}   {np.abs(centered).max():8.2f}  {np.sqrt((centered ** 2).mean()):6.2f}")
-    if args.export:
+    if args.export:   # the reference of bench/raw/qwen35vision.html: the patches the device is fed with and the hidden state after HEAD and after every block (float16), in one blob + a json index
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
-        np.save(out / "patches.npy", patches16)
+        blob, entries = bytearray(), {}
+
+        def add(name, array):
+            raw = np.ascontiguousarray(array, np.float16).tobytes()
+            entries[name] = {"shape": list(array.shape), "offset": len(blob), "bytes": len(raw)}
+            blob.extend(raw)
+
+        add("patches", patches16)
         for i, h in enumerate(runner.trace):
-            np.save(out / f"hidden_{i:02d}.npy", h)
-        np.save(out / "image_embeds.npy", got.astype(np.float16))
-        (out / "meta.json").write_text(json.dumps({"grid": list(grid), "depth": spec.vision["depth"], "weights": runner.plan["weights"], "image": Path(args.image).name}), encoding="utf-8", newline="\n")
-        print(f"\nwritten to {out}")
+            add(f"hidden_{i}", h)
+        add("image_embeds", got)
+        (out / "trace.bin").write_bytes(bytes(blob))
+        (out / "trace.json").write_text(json.dumps({"grid": list(grid), "depth": spec.vision["depth"], "hidden": spec.vision["hidden"], "out_hidden": spec.vision["out_hidden"], "weights": runner.plan["weights"],
+                                                    "compute_type": args.compute_type or runner.plan["compute_type"], "image": Path(args.image).name, "entries": entries}), encoding="utf-8", newline="\n")
+        print(f"\nwritten to {out}: {len(blob) / 2**20:.1f} MB")
     return 0
 
 

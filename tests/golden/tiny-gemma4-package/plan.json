@@ -79,7 +79,8 @@
  "profile": {
   "zero_point": "const",
   "merge_projections": true,
-  "lm_head_format": "int8-sym"
+  "lm_head_format": "int8-sym",
+  "gqa": "repeat"
  },
  "variants": [
   {

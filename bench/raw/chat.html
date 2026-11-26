@@ -154,6 +154,11 @@
     <label class="field"><span>Preset</span><select id="promptPreset" style="min-width:260px"></select></label>
     <span id="promptTokenCount" style="color:var(--good);font-size:14px;font-weight:600;padding-bottom:6px"></span>
   </div>
+  <div class="fields" id="imageRow" style="display:none;margin-bottom:8px">
+    <label class="field"><span>Image<i class="tip" data-tip="Qwen3.5 packages with an image tower: the picture is resized to the best grid preset in the browser (canvas), turned into image tokens by the vision graphs and written into the prompt in place of the &lt;|image_pad|&gt; token.\nNo file chosen = a text-only prompt.">i</i></span><input type="file" id="imageInput" accept="image/*"></label>
+    <label class="field"><span>Image grids<i class="tip" data-tip="The vision graph presets (patches of 16 px, HxW) to build and load: more presets = more compile time and memory, but a better fit for the pictures. 'none' loads no image tower. Read when the model is loaded.">i</i></span><input id="visionGridsInput" placeholder="24x24" style="min-width:160px"></label>
+    <img id="imagePreview" alt="" style="max-height:72px;display:none;border-radius:6px"><span id="imageInfo" style="font-size:13px;padding-bottom:6px"></span>
+  </div>
   <textarea id="prompt"></textarea>
   <div class="actions">
     <label>Max new tokens <input id="maxNewTokensInput" type="number" value="64"></label>
@@ -250,6 +255,6 @@
   <summary>Log</summary>
   <div id="log"></div>
 </details>
-<script type="module" src="chat.js?v=20261126a"></script>
+<script type="module" src="chat.js?v=20261126b"></script>
 </body>
 </html>

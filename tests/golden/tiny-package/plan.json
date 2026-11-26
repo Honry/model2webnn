@@ -32,7 +32,8 @@
   "zero_point": "const",
   "merge_projections": true,
   "value_layout": "natural",
-  "lm_head_format": "int8-sym"
+  "lm_head_format": "int8-sym",
+  "gqa": "repeat"
  },
  "variants": [
   {

@@ -4,6 +4,7 @@ import { cosSin, invFreqFor } from './rope.js';
 import {
   decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, planPrefill, prefillMasks, prefillSelectors, ropeTables, scatterDecodeMasks, scatterPrefillMasks,
   incachePrefillMasks, scatterNDDecodeIndices, scatterNDDecodeMasks, scatterNDPrefillIndices, scatterNDPrefillMasks, scatterPrefillRope, type LayoutSpec,
+  chooseGrid, expandImageTokens, mropeAxes, mropePositions, patchify, ropeTablesMrope, type Grid,
 } from './protocol.js';
 
 // vectors written by python/tests/test_protocol_golden.py from the Python reference
@@ -100,6 +101,37 @@ describe('protocol', () => {
   });
   it('prefill planning picks the same chunk sequences as the reference', () => {
     for (const v of g.plans) expect(planPrefill(v.sizes, v.tokens, v.fixed)).toEqual(v.plan);
+  });
+});
+
+describe('images (Qwen3.5 image tower)', () => {
+  const v = g.vision;
+  it('chooses the grid preset like the reference', () => {
+    for (const c of v.choose) expect(chooseGrid(c.grids, c.width, c.height, c.patch)).toEqual(c.grid);
+  });
+  it('expands the image pad tokens and gives the (t, h, w) positions and rope_delta of get_rope_index', () => {
+    const layout = { image_token_id: v.spec.image_token_id, merge_size: v.spec.merge_size }, grids = v.prompt.grids as Grid[];
+    const expanded = expandImageTokens(layout, v.prompt.short, grids);
+    expect(expanded).toEqual(v.prompt.expanded);
+    expect(expandImageTokens(layout, expanded, grids)).toEqual(expanded);   // already expanded
+    expect(() => expandImageTokens(layout, v.prompt.short, [grids[0]])).toThrow(/more <\|image_pad\|> tokens than images/);
+    expect(() => expandImageTokens(layout, v.prompt.short.filter((t: number) => t !== layout.image_token_id), grids)).toThrow(/images but 0/);
+    const { positions, ropeDelta } = mropePositions(layout, expanded, grids);
+    expect(positions.map((p) => Array.from(p))).toEqual(v.prompt.positions);
+    expect(ropeDelta).toBe(v.prompt.rope_delta);
+  });
+  it('builds the interleaved MRoPE tables of a left-padded chunk like the reference', () => {
+    expect(mropeAxes(v.axes.section, v.axes.count)).toEqual(v.axes.axes);
+    const c = v.rope_chunk, layout = { layer_types: ['full_attention'], sliding_window: null, head_dim: v.spec.head_dim, rope: v.spec.rope, mrope: v.spec.mrope } as LayoutSpec & { mrope: { section: number[] } };
+    const { positions } = mropePositions({ image_token_id: v.spec.image_token_id, merge_size: v.spec.merge_size }, v.prompt.expanded, v.prompt.grids);
+    const tables = ropeTablesMrope(layout, positions.map((p) => p.subarray(c.first, c.first + c.valid)), c.rows, c.pad);
+    close(Array.from(tables.full_attention.cos as ArrayLike<number>), c.cos, 2e-3);
+    close(Array.from(tables.full_attention.sin as ArrayLike<number>), c.sin, 2e-3);
+  });
+  it('patchifies like the reference (merge-block order, (channel, temporal, kh, kw) vectors)', () => {
+    const p = v.patchify, patches = patchify(Float32Array.from(p.pixels), p.grid, p.patch, p.temporal, p.merge);
+    expect(Array.from(patches)).toEqual(p.patches);
+    expect(() => patchify(new Float32Array(10), p.grid, p.patch, p.temporal, p.merge)).toThrow(/patchify/);
   });
 });
 

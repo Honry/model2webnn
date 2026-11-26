@@ -29,7 +29,7 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=3";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=4";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -953,7 +953,11 @@ async function run() {
     computeTypeSelect.value = computeType;
     kvStyleSelect.value = kvStyle; stagingRowsSelect.value = urlSessionOptions.stagingRows; blocksSelect.value = urlSessionOptions.blocksPerGraph;
     prefillBlocksSelect.value = urlSessionOptions.prefillBlocksPerGraph || 0; chunkSizesInput.value = urlSessionOptions.chunkSizes.join(",");
-    let packageControls = null;
+    let packageControls = null, imageFile = null;
+    const visionGrids = () => {   // "24x24,16x24" -> [[24, 24], [16, 24]]; empty / none: no image tower
+        const text = byId("visionGridsInput").value.trim().toLowerCase();
+        return !text || text === "none" ? null : text.split(/[\s,]+/).filter(Boolean).map((g) => g.split("x").map(Number));
+    };
     if (packageMode) {   // the options of a package are what it was compiled with: fill the selects from its plan and lock the rest
         const peek = await peekPackage(packageEntry.url);
         packageControls = setupPackageControls(peek, { maxLengthSelect, chunkSizeSelect, blocksSelect, prefillBlocksSelect, kvStyleSelect, stagingRowsSelect, computeTypeSelect, chunkSizesInput },
@@ -962,6 +966,20 @@ async function run() {
         const want = (select, value) => { if (value && [...select.options].some((option) => option.value === String(value))) select.value = value; };
         want(maxLengthSelect, query.get("maxLength")); maxLengthSelect.dispatchEvent(new Event("change"));
         want(chunkSizeSelect, query.get("prefillChunkSize") ?? query.get("chunk"));
+        if (peek.plan.vision) {   // Qwen3.5 with an image tower: a picture can go with the prompt; the grid presets to load are chosen here (read at the first load)
+            byId("imageRow").style.display = "";
+            const presets = peek.plan.vision.presets.map((p) => `${p.grid[0]}x${p.grid[1]}`);
+            byId("visionGridsInput").value = query.get("visionGrids") ?? (presets.includes("24x24") ? "24x24" : presets[0]);
+            byId("visionGridsInput").placeholder = presets.join(",");
+            byId("imageInput").onchange = () => {
+                imageFile = byId("imageInput").files[0] ?? null;
+                const preview = byId("imagePreview");
+                if (preview.src) URL.revokeObjectURL(preview.src);
+                preview.style.display = imageFile ? "" : "none"; preview.removeAttribute("src");
+                if (imageFile) preview.src = URL.createObjectURL(imageFile);
+                byId("imageInfo").textContent = imageFile ? `${imageFile.name}: the grid preset is chosen when the prompt is generated` : "";
+            };
+        }
         document.querySelector("header h1").childNodes[0].textContent = `${packageEntry.label} on WebNN `;
         document.querySelector("header h1 small").textContent = `model package · compiled by m2w (${peek.index.compiler}) · target ${peek.index.target}`;
     }
@@ -1021,7 +1039,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             const { maxLength, chunkSize, options } = selected();
             if (!packageMode) applySessionOptions(options);   // before the first load: lm_head is built with the compute type picked on the page
             const loadStart = performance.now(), firstLoad = !model, previousSession = model?.currentSession?.();   // startup time = this load only, not the time since the page was opened
-            if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded }, { url: packageEntry.url, deviceType })
+            if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded }, { url: packageEntry.url, deviceType, vision: byId("imageRow").style.display === "none" ? null : visionGrids() })
                 : await loadSharedModel();             // first time: tokenizer, weights, lm_head graph
             const session = await model.getSession(maxLength, chunkSize, options);   // builds the max-length / chunk-size / session-option specific graphs + KV cache
             const stagedNow = packageMode ? session.variant?.kv_style === "staged" : stagedKv;   // the flush box of the pipeline exists for the staged KV cache only
@@ -1038,7 +1056,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     };
     const generateOnce = async () => {
         const { maxLength, chunkSize, maxNewTokens, options } = selected();
-        await model.generate(await model.getSession(maxLength, chunkSize, options), byId("prompt").value, maxNewTokens);
+        await model.generate(await model.getSession(maxLength, chunkSize, options), byId("prompt").value, maxNewTokens, imageFile);
     };
     byId("loadButton").onclick = loadModel;
     byId("clearCacheButton").onclick = async () => { await (packageMode ? clearPackageCache(packageEntry.url) : clearWeightCache()); log("cache_cleared", "Weight cache (OPFS) cleared"); };

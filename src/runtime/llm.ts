@@ -5,6 +5,7 @@
 //
 // Session options (variant = KV protocol x compute type x staging rows, chunk sizes, blocks per graph, max length) can be changed with reconfigure(): the weights stay
 // on the device, the graphs are rebuilt and the state (KV cache, activations) is reallocated.
+import type { PreparedImage } from './vision.js';
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import { openPackage, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
@@ -37,15 +38,20 @@ export interface LoadOptions extends SessionOptions {
   parallelDownloads?: number;      // files downloaded at the same time (a window ahead of the consumer), default 4
   downloadSegments?: number;       // big files are fetched as this many parallel byte ranges (default 4; 1 = one request per file)
   onProgress?: Progress;
+  /** Qwen3.5 packages with an image tower: load it (weights + graphs of the grid presets; true = every preset of the package, or { grids: [[24, 24], ...] } the ones you want). Default: not loaded (text only). */
+  vision?: boolean | { grids?: [number, number][] };
 }
 export interface GenerateOptions {
   maxNewTokens?: number;
+  /** Qwen3.5 with an image tower: the images of the prompt, in the order of its <|image_pad|> tokens (one per image; the runtime expands each to one token per image patch group): Qwen35LLM.prepareImage() makes them */
+  images?: PreparedImage[];
   stopTokens?: number[];           // default: the model's eos tokens
   temperature?: number;            // 0 / undefined = greedy
   topK?: number;
   signal?: AbortSignal;
 }
 export type { StepTiming, Stats } from './llm-common.js';
+export type { PreparedImage } from './vision.js';
 
 interface Activations {
   hidden: ML; ropeCos: Record<string, ML>; ropeSin: Record<string, ML>; mask: Record<string, ML>;

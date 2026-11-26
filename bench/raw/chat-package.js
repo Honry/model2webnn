@@ -89,7 +89,7 @@ export function setupPackageControls(pkg, c, initial = {}) {
 }
 
 /** the model of the page: tokenizer + (lazily, per max length / chunk / blocks-per-graph) a loaded LLM */
-export async function loadPackageModel(ui, { url, deviceType }) {
+export async function loadPackageModel(ui, { url, deviceType, vision = null }) {   // vision: [[h, w], ...] grid presets of the image tower to load (a Qwen3.5 package with an image tower), or null
     const { byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded } = ui;
     setStatus("opening the package");
     const pkg = await openPackage(url, true);
@@ -141,7 +141,9 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         if (llm) await llm.reconfigure(session);
         else {
             const query = new URLSearchParams(location.search);   // ?parallelDownloads=4&downloadSegments=4: see download.html for good values
-            llm = await loadModel(url, { device: deviceType, parallelDownloads: +query.get("parallelDownloads") || undefined, downloadSegments: +query.get("downloadSegments") || undefined, ...session });
+            llm = await loadModel(url, { device: deviceType, parallelDownloads: +query.get("parallelDownloads") || undefined, downloadSegments: +query.get("downloadSegments") || undefined,
+                ...(vision && pkg.plan.vision ? { vision: { grids: vision } } : {}), ...session });
+            if (llm.vision) log("vision_ready", `Image tower ready: presets ${llm.vision.grids.map((g) => g.join("x")).join(", ")}; weights ${seconds(llm.vision.weightsMs)}, graph build ${seconds(llm.vision.buildMs)}`, { grids: llm.vision.grids, weights_ms: Math.round(llm.vision.weightsMs), build_ms: Math.round(llm.vision.buildMs) });
         }
         const variant = llm.variant, sizes = llm.chunkSizes.join("+");
         byId("pastLengthLabel").textContent = String(maxLength - 1); byId("chunkSizeLabel").textContent = sizes;
@@ -157,15 +159,25 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         return current;
     }
 
-    async function generate(session, userText, maxNewTokens) {
-        const ids = promptIds(userText);
-        if (ids.length >= session.maxLength - 1) throw new Error(`prompt has ${ids.length} tokens but max length is ${session.maxLength}`);
-        byId("answer").textContent = ""; byId("summaryLine").textContent = `prompt: ${ids.length} tokens …`;
-        const plan = llm.planFor(ids.length), chunks = plan.length;
-        log("generation_started", `Generation started: max length ${session.maxLength}, ${ids.length} prompt tokens in ${chunks} chunk(s) (${plan.join("+")}), up to ${maxNewTokens} new tokens`, { max_length: session.maxLength, prompt_tokens: ids.length, prefill_chunks: chunks, prefill_plan: plan, variant: session.variant.id });
+    async function generate(session, userText, maxNewTokens, imageFile = null) {
+        let ids, images = [];
+        if (imageFile) {   // a picture with the prompt: preprocessed in the browser (canvas -> the best loaded grid preset -> patches), the pad token is expanded by the runtime
+            if (!llm.vision) throw new Error("the image tower is not loaded: put grid presets (e.g. 24x24) into \"Image grids\" and reload the page");
+            const bitmap = await createImageBitmap(imageFile), started = performance.now();
+            images = [llm.prepareImage(bitmap)];
+            log("image_prepared", `Image ${bitmap.width}x${bitmap.height} -> grid ${images[0].grid.join("x")} (${images[0].tokens} image tokens), preprocessed in ${seconds(performance.now() - started)}`, { width: bitmap.width, height: bitmap.height, grid: images[0].grid, image_tokens: images[0].tokens });
+            bitmap.close?.();
+            ids = tokenizer.encode(buildPrompt(format, [{ user: userText, images: 1 }], undefined, new Date(), pkg.model.vision.image_prompt));
+            byId("imageInfo").textContent = `${imageFile.name}: grid ${images[0].grid.join("x")} = ${images[0].tokens} image tokens`;
+        } else ids = promptIds(userText);
+        const total = ids.length + images.reduce((n, image) => n + image.tokens - 1, 0);   // the pad token of every image becomes `tokens` tokens
+        if (total >= session.maxLength - 1) throw new Error(`prompt has ${total} tokens but max length is ${session.maxLength}`);
+        byId("answer").textContent = ""; byId("summaryLine").textContent = `prompt: ${total} tokens …`;
+        const plan = llm.planFor(total), chunks = plan.length;
+        log("generation_started", `Generation started: max length ${session.maxLength}, ${total} prompt tokens in ${chunks} chunk(s) (${plan.join("+")}), up to ${maxNewTokens} new tokens`, { max_length: session.maxLength, prompt_tokens: total, prefill_chunks: chunks, prefill_plan: plan, variant: session.variant.id, image_tokens: total - ids.length + images.length });
         setStatus("prefill");
         const start = performance.now(), generated = [];
-        for await (const token of llm.generate(ids, { maxNewTokens })) {
+        for await (const token of llm.generate(ids, { maxNewTokens, images })) {
             if (stop.has(token)) break;
             generated.push(token);
             byId("answer").textContent = tokenizer.decode(generated);
@@ -176,13 +188,13 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         const tpot = avg("totalMs"), tps = tpot ? 1000 / tpot : 0, prefillMs = s.prefillMs;
         const dispatches = 1 + Math.ceil((pkg.model.num_layers - 1) / session.blocksPerGraph) + 2, kv = session.variant.kv_style === "staged" ? `KV staged ${session.variant.staging_rows}` : `KV ${session.variant.kv_style}`;
         setCell("sum-build", seconds(session.buildMs), "graph build of this session (all graphs of the package variant)");
-        setCell("sum-prefill", seconds(prefillMs), `${ids.length} prompt tokens in ${chunks} chunk(s): ${plan.join("+")}`);
+        setCell("sum-prefill", seconds(prefillMs), `${total} prompt tokens in ${chunks} chunk(s): ${plan.join("+")}${images.length ? `; image tower ${seconds(llm.stats.visionMs ?? 0)} (inside)` : ""}`);
         setCell("sum-decode", `${rounded(tpot)} ms/token`, `${rounded(tps)} tokens/s over ${steps.length} decode steps`);
         setCell("sum-inference", seconds(inferenceMs));
-        setMetric("metric-ttft", (prefillMs / 1000).toFixed(2), "s", `${ids.length} prompt tokens · ${chunks} chunk${chunks > 1 ? "s" : ""}`);
+        setMetric("metric-ttft", (prefillMs / 1000).toFixed(2), "s", `${total} prompt tokens · ${chunks} chunk${chunks > 1 ? "s" : ""}`);
         setMetric("metric-tpot", rounded(tpot), "ms/token", `${steps.length} decode steps · ${dispatches} dispatches per step`);
         setMetric("metric-tps", rounded(tps), "tokens/s", `${kv} · blocks/graph ${session.blocksPerGraph} · ${s.flushes} flushes`);
-        byId("summaryLine").textContent = `max length ${session.maxLength} · prompt ${ids.length} tokens · ${generated.length} generated · total inference ${seconds(inferenceMs)}`;
+        byId("summaryLine").textContent = `max length ${session.maxLength} · prompt ${total} tokens · ${generated.length} generated · total inference ${seconds(inferenceMs)}`;
         fillTimingTable([
             ["Host: inputs", rounded(avg("hostMs")), "JavaScript work before the dispatches: writing the step inputs (embedding row, RoPE tables, masks, selectors)", "host"],
             ["Enqueue", rounded(avg("enqueueMs")), `${dispatches} dispatches queued per step (a flush of the staging buffer counts here when due)`, "enqueue"],
@@ -193,7 +205,7 @@ export async function loadPackageModel(ui, { url, deviceType }) {
         const answer = tokenizer.decode(generated);
         const first = s.stepMs.slice(0, 4).map(rounded).join(", ");
         log("generation_finished", `Generated ${generated.length} tokens: TTFT ${seconds(prefillMs)}, TPOT ${rounded(tpot)} ms/token (${rounded(tps)} tokens/s); first decode steps ms: ${first}`,
-            { max_length: session.maxLength, prefill_chunk_size: session.chunkSize, prefill_plan: plan, variant: session.variant.id, prompt_tokens: ids.length, prefill_chunks: chunks, ttft_ms: Math.round(prefillMs), tpot_ms: rounded(tpot),
+            { ...(images.length ? { image_tokens: llm.stats.imageTokens, vision_ms: Math.round(llm.stats.visionMs ?? 0) } : {}), max_length: session.maxLength, prefill_chunk_size: session.chunkSize, prefill_plan: plan, variant: session.variant.id, prompt_tokens: total, prefill_chunks: chunks, ttft_ms: Math.round(prefillMs), tpot_ms: rounded(tpot),
               tokens_per_second: rounded(tps), decode_steps: steps.length, inference_ms: Math.round(inferenceMs), generated_token_ids: generated, text: answer, kv_flushes: s.flushes, package: url });
         setStatus("ready");
     }

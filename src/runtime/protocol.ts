@@ -260,3 +260,102 @@ export function linearPrefillControls(C: number, valid: number): { validMask: Ha
   for (let r = 0; r < size; r++) convPerm[r * size + (r < pad ? 3 + r : r < pad + 3 ? r - pad : r)] = 1;
   return { validMask, convPerm };
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------- images (Qwen3.5 image tower)
+// Python: protocol.py (choose_grid is in frontends/hf_llm/vision.py). docs/models/qwen35-vision.md
+export type Grid = [number, number];   // (grid_h, grid_w) in patches
+export interface VisionLayout { image_token_id: number; merge_size: number }
+
+/** the image tokens of a grid: one per merge block */
+export const imageTokenCount = (grid: Grid, merge: number) => (grid[0] * grid[1]) / (merge * merge);
+
+/** The preset for an image of width x height pixels: the closest aspect ratio (log distance; within 0.1 of the best counts as the same), then the closest pixel count. */
+export function chooseGrid(grids: Grid[], width: number, height: number, patch = 16): Grid {
+  const aspect = (g: Grid) => Math.abs(Math.log(g[1] / g[0] / (width / height))), best = Math.min(...grids.map(aspect));
+  const size = (g: Grid) => Math.abs(Math.log((g[0] * g[1] * patch * patch) / (width * height)));
+  const near = grids.filter((g) => aspect(g) <= best + 0.1).sort((a, b) => size(a) - size(b) || a[0] - b[0] || a[1] - b[1]);
+  return near[0];
+}
+
+/** The prompt as the model sees it: every <|image_pad|> (one per image, in order) becomes imageTokenCount copies for the grid of its image; a run that already has that length stays. */
+export function expandImageTokens(spec: VisionLayout, tokens: number[], grids: Grid[]): number[] {
+  const out: number[] = [];
+  let k = 0, i = 0;
+  while (i < tokens.length) {
+    if (tokens[i] !== spec.image_token_id) { out.push(tokens[i++]); continue; }
+    if (k >= grids.length) throw new Error('the prompt has more <|image_pad|> tokens than images');
+    let run = i;
+    while (run < tokens.length && tokens[run] === spec.image_token_id) run++;
+    const want = imageTokenCount(grids[k], spec.merge_size);
+    if (run - i !== 1 && run - i !== want) throw new Error(`image ${k}: ${run - i} <|image_pad|> tokens in the prompt, expected 1 or ${want}`);
+    for (let j = 0; j < want; j++) out.push(spec.image_token_id);
+    i = run; k++;
+  }
+  if (k !== grids.length) throw new Error(`${grids.length} images but ${k} <|image_pad|> tokens in the prompt`);
+  return out;
+}
+
+/** The (t, h, w) position of every token of the EXPANDED prompt (transformers' get_rope_index): text t = h = w = running position; the tokens of an image of grid (gh, gw) get t = start,
+ *  h = start + row, w = start + column of their merge block, and the position continues at start + max(rows, columns) after the image. ropeDelta = max position + 1 - n: the decode token
+ *  at sequence index i has position i + ropeDelta (all three components). */
+export function mropePositions(spec: VisionLayout, tokens: number[], grids: Grid[]): { positions: [Int32Array, Int32Array, Int32Array]; ropeDelta: number } {
+  const n = tokens.length, positions: [Int32Array, Int32Array, Int32Array] = [new Int32Array(n), new Int32Array(n), new Int32Array(n)];
+  let current = 0, i = 0, k = 0, max = -1;
+  const put = (at: number, t: number, h: number, w: number) => { positions[0][at] = t; positions[1][at] = h; positions[2][at] = w; max = Math.max(max, t, h, w); };
+  while (i < n) {
+    if (tokens[i] !== spec.image_token_id) { put(i, current, current, current); current++; i++; continue; }
+    const h = grids[k][0] / spec.merge_size, w = grids[k][1] / spec.merge_size;
+    for (let j = 0; j < h * w; j++) {
+      if (tokens[i + j] !== spec.image_token_id) throw new Error(`image ${k}: the prompt does not have ${h * w} consecutive image tokens`);
+      put(i + j, current, current + Math.floor(j / w), current + (j % w));
+    }
+    current += Math.max(h, w); i += h * w; k++;
+  }
+  return { positions, ropeDelta: max + 1 - n };
+}
+
+/** which of the 3 positions (0 t, 1 h, 2 w) drives each of the `count` rotary frequencies in the INTERLEAVED layout (t, h, w, t, h, w ...; h only up to 3 * section[1], w up to 3 * section[2]) */
+export function mropeAxes(section: number[], count: number): number[] {
+  const axes = new Array<number>(count).fill(0);
+  for (const [axis, offset] of [[1, 1], [2, 2]]) for (let j = offset; j < Math.min(section[axis] * 3, count); j += 3) axes[j] = axis;
+  return axes;
+}
+
+/** The rope tables of a chunk with 3 positions per token (python rope_tables_mrope): positions [3][valid] -> layer type -> { cos, sin } float16 [rows * headDim]; the first `pad` rows reuse the first
+ *  real position. Frequency j of the first sum(section) takes its angle from position axes[j]; the other frequencies are 0 (cos 1, sin 0). */
+export function ropeTablesMrope(spec: LayoutSpec & { mrope: { section: number[] } }, positions: ArrayLike<number>[], rows: number, pad: number): Record<string, { cos: Half; sin: Half }> {
+  const out: Record<string, { cos: Half; sin: Half }> = {};
+  for (const type of layerTypesOf(spec)) {
+    const dim = headDimOf(spec, type), { invFreq, attentionFactor } = invFreqFor(spec.rope[type], dim), half = invFreq.length;
+    const axes = mropeAxes(spec.mrope.section, spec.mrope.section.reduce((a, b) => a + b, 0)), inv32 = invFreq.map(Math.fround), f32 = Math.fround;
+    const cos = newHalf(rows * dim), sin = newHalf(rows * dim);
+    for (let row = 0; row < rows; row++) {
+      const source = Math.max(0, row - pad);
+      for (let j = 0; j < half; j++) {
+        const angle = j < axes.length ? f32(f32(positions[axes[j]][source]) * inv32[j]) : 0;
+        const c = f32(Math.cos(angle) * attentionFactor), s = f32(Math.sin(angle) * attentionFactor);
+        cos[row * dim + j] = cos[row * dim + half + j] = c;
+        sin[row * dim + j] = sin[row * dim + half + j] = s;
+      }
+    }
+    out[type] = { cos, sin };
+  }
+  return out;
+}
+
+/** pixels [C, gridH * patch, gridW * patch] (rescaled and normalised) -> patches [N * C * temporal * patch * patch] float32 in merge-block order, each patch the (channel, temporal, kh, kw) vector of the
+ *  Conv3d kernel; a single image is repeated over the temporal patch (python vision.patchify) */
+export function patchify(pixels: Float32Array, grid: Grid, patch: number, temporal: number, merge: number, channels = 3): Float32Array {
+  const [gh, gw] = grid, height = gh * patch, width = gw * patch, vector = channels * temporal * patch * patch;
+  if (pixels.length !== channels * height * width) throw new Error(`patchify: ${pixels.length} values for ${channels} x ${height} x ${width}`);
+  const out = new Float32Array(gh * gw * vector);
+  let n = 0;
+  for (let bh = 0; bh < gh / merge; bh++) for (let bw = 0; bw < gw / merge; bw++) for (let mh = 0; mh < merge; mh++) for (let mw = 0; mw < merge; mw++, n++) {
+    let at = n * vector;
+    for (let c = 0; c < channels; c++) for (let t = 0; t < temporal; t++) for (let ph = 0; ph < patch; ph++) {
+      const row = c * height * width + ((bh * merge + mh) * patch + ph) * width + (bw * merge + mw) * patch;
+      for (let pw = 0; pw < patch; pw++) out[at++] = pixels[row + pw];
+    }
+  }
+  return out;
+}

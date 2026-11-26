@@ -3,7 +3,8 @@ export { LLM, resolveVariant, type LoadOptions, type SessionOptions, type Genera
 export { Gemma4LLM } from './llm-gemma4.js';
 export { Qwen35LLM } from './llm-qwen35.js';
 export { loadModel, type Model } from './model.js';
-export { planPrefill } from './protocol.js';
+export { planPrefill, chooseGrid, expandImageTokens, imageTokenCount, type Grid } from './protocol.js';
+export { VisionTower, prepareImage, pixelsFromRGBA, type PreparedImage } from './vision.js';
 export { buildPrompt, chat, countPromptTokens, fillPlaceholders, strftime, tokenizerFromTransformersJs, type ChatOptions, type Tokenizer, type Turn } from './chat.js';
 export { CachedSource, DirectorySource, UrlSource, openPackage, sourceFrom, type ModelPackage, type PackageSource, type Progress, type Plan, type UrlSourceOptions, type Variant } from './package.js';
 export { buildGraph, loadGraph, parseGraphDoc, type GraphDoc } from './ir-loader.js';
