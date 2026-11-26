@@ -134,7 +134,11 @@ export class LLM {
     const available = Object.keys(table.prefill[key]).map(Number).sort((a, b) => a - b);
     const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
     for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
-    const group = o.blocksPerGraph ?? 1, prefillGroup = o.prefillBlocksPerGraph || group;
+    // not chosen by the caller: the recommended group sizes of the package (when this variant / max length / chunk has them)
+    const rec = plan.recommended ?? {}, groupsOfTable = (t: GraphTable) => Object.keys(t.block_groups ?? {}).map(Number);
+    let group = o.blocksPerGraph ?? rec.blocks_per_graph ?? 1, prefillGroup = o.prefillBlocksPerGraph || (o.blocksPerGraph !== undefined ? group : rec.prefill_blocks_per_graph ?? group);
+    if (o.blocksPerGraph === undefined && group > 1 && !groupsOfTable(table.decode[key]).includes(group)) group = 1;
+    if (!o.prefillBlocksPerGraph && prefillGroup > 1 && sizes.some((size) => !groupsOfTable(table.prefill[key][String(size)]).includes(prefillGroup)) && o.blocksPerGraph === undefined) prefillGroup = 1;
     if ((group > 1 || prefillGroup > 1) && this.types.length > 1 && plan.block_group_controls !== 'per_block') {
       throw new Error('blocksPerGraph > 1 needs a model with one layer type, or a package whose block groups take a mask and RoPE table per block (m2w compile of a newer version)');
     }

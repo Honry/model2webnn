@@ -184,8 +184,8 @@
   },
   {
    "path": "plan.json",
-   "bytes": 6620,
-   "sha256": "cdd769f9f9a0f61bc2a65627b29e7afc3e6ff8e9ae974d92e13b55b6cc5d44e6"
+   "bytes": 6699,
+   "sha256": "70cad701a5343430a5941d2ce6d5082d2eed8c3f1ddda03aba8130b646e33e1e"
   },
   {
    "path": "weights/embed.safetensors",

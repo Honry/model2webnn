@@ -32,6 +32,13 @@ def families() -> dict:
     return out
 
 
+def recommended_session(spec_or_family) -> dict:
+    """The session options a model family runs best with ("recommended" in families/*.json: blocks_per_graph = decode blocks per graph, prefill_blocks_per_graph): measured on Intel NPUs, the
+    package's plan.json carries them (plan.recommended) and the runtime / pages use them when the caller does not choose. {} for a family without a recommendation."""
+    name = spec_or_family if isinstance(spec_or_family, str) else spec_or_family.family
+    return dict(families().get(name, {}).get("recommended", {}))
+
+
 def family_for(architecture: str) -> dict:
     for family in families().values():
         if architecture in family["architectures"]:

@@ -40,6 +40,8 @@
     "prefill_chunks": { "type": "array", "items": { "type": "integer" } },
     "blocks_per_graph": { "type": "array", "items": { "type": "integer" }, "description": "decode block groups the package contains" },
     "prefill_blocks_per_graph": { "type": "array", "items": { "type": "integer" } },
+    "recommended": { "type": "object", "description": "the session options the model family runs best with (decode blocks per graph ...): the runtime and the pages use them when the caller does not choose",
+                     "properties": { "blocks_per_graph": { "type": "integer" }, "prefill_blocks_per_graph": { "type": "integer" } } },
     "weights": {
       "type": "object",
       "description": "tensor names of the weights manifest by the half of the layer they feed: a graph input with such a name is bound to that tensor of the layer",

@@ -62,6 +62,13 @@ export function setupPackageControls(pkg, c, initial = {}) {
     fillVariantControls();
     c.kvStyleSelect.addEventListener("change", fillVariantControls);   // registered before the page's own listeners: they see the refilled selects
     c.maxLengthSelect.addEventListener("change", () => { fillChunks(); fillBlocks(); });
+    // not chosen in the URL: the recommended group sizes of the package (plan.recommended: the best known for the model family) and say so in the option text
+    const recommended = plan.recommended ?? {};
+    const mark = (select, value) => { for (const o of select.options) if (+o.value === +value && !o.text.includes("recommended")) o.text += " (recommended)"; };
+    if (!initial.blocksPerGraph && recommended.blocks_per_graph > 1 && [...c.blocksSelect.options].some((o) => +o.value === recommended.blocks_per_graph)) c.blocksSelect.value = String(recommended.blocks_per_graph);
+    if (!initial.prefillBlocksPerGraph && recommended.prefill_blocks_per_graph && [...c.prefillBlocksSelect.options].some((o) => +o.value === recommended.prefill_blocks_per_graph)) c.prefillBlocksSelect.value = String(recommended.prefill_blocks_per_graph);
+    if (recommended.blocks_per_graph) mark(c.blocksSelect, recommended.blocks_per_graph);
+    if (recommended.prefill_blocks_per_graph) mark(c.prefillBlocksSelect, recommended.prefill_blocks_per_graph);
     if (initial.blocksPerGraph) replace(c.blocksSelect, [...c.blocksSelect.options].map((o) => [o.value, o.text]), initial.blocksPerGraph);
     if (initial.prefillBlocksPerGraph) replace(c.prefillBlocksSelect, [...c.prefillBlocksSelect.options].map((o) => [o.value, o.text]), initial.prefillBlocksPerGraph);
     c.chunkSizesInput.placeholder = `optional, e.g. ${plan.prefill_chunks.join(",")}`;

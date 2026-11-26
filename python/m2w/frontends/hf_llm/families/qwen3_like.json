@@ -3,6 +3,7 @@
   "description": "Llama-style pre-norm decoder with per-head RMSNorm on q and k (Qwen3, Aion-1.0-Instruct): GQA, SwiGLU, RMSNorm, rotate-half RoPE, no biases",
   "architectures": ["Qwen3ForCausalLM", "AionInstructForCausalLM"],
   "qk_norm": true,
+  "recommended": {"blocks_per_graph": 5, "prefill_blocks_per_graph": 1},
   "chat_template_kwargs": { "Qwen3ForCausalLM": { "enable_thinking": false } },
   "tensors": {
     "embed": "model.embed_tokens.weight",

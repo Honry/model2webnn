@@ -305,7 +305,29 @@ def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
     }
 
 
+def resolve_blocks_per_graph(spec: arch.ModelSpec, blocks_per_graph) -> tuple:
+    """--blocks-per-graph not given: the single blocks and the recommended group size of the model family (so that the package contains the graphs the runtime defaults to)."""
+    if blocks_per_graph is not None:
+        return _sequence(blocks_per_graph)
+    k = int(arch.recommended_session(spec).get("blocks_per_graph", 1))
+    return (1, k) if k > 1 else (1,)
+
+
+def recommended_for(spec: arch.ModelSpec, plan: dict) -> dict:
+    """plan.recommended: the family's recommendation, restricted to what this package contains (a group size that was not built falls back to 1)."""
+    rec = arch.recommended_session(spec)
+    built = set(plan.get("blocks_per_graph", [1]))
+    k = int(rec.get("blocks_per_graph", 1))
+    return {"blocks_per_graph": k if k in built else 1, "prefill_blocks_per_graph": int(rec.get("prefill_blocks_per_graph", 1)) if int(rec.get("prefill_blocks_per_graph", 1)) in set(plan.get("prefill_blocks_per_graph", [1])) else 1}
+
+
 def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
+    graphs, plan = _graphs_and_plan_core(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    plan["recommended"] = recommended_for(spec, plan)
+    return graphs, plan
+
+
+def _graphs_and_plan_core(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
     if spec.builder == "qwen35":
         if any(v["kv_style"] != "staged" for v in variants):
             raise ValueError("Qwen3.5 packages support the staged KV protocol only")
@@ -402,7 +424,7 @@ def _check_lengths(spec: arch.ModelSpec, max_lengths, progress) -> None:
             raise ValueError(f"max length {L} exceeds the model's max_position_embeddings {spec.max_position_embeddings}")
 
 
-def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=(1,),
+def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
                   prefill_blocks_per_graph=(1,), merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4,
                   endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print) -> Path:
     """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants."""
@@ -414,6 +436,7 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     config = json.loads((source / "config.json").read_text(encoding="utf-8"))
     generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
     spec = arch.spec_from_config(config, generation_config)
+    blocks_per_graph = resolve_blocks_per_graph(spec, blocks_per_graph)
     _check_lengths(spec, max_lengths, progress)
     if spec.builder == "gemma4" and any(k > 1 for k in prefill_blocks_per_graph):   # before the (long) quantization
         raise ValueError("block groups of Gemma 4 packages are for decode only: prefill blocks per graph must be 1")
@@ -448,7 +471,7 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     return out
 
 
-def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=(1,),
+def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
                    prefill_blocks_per_graph=(1,), progress: Callable[[str], None] = print) -> Path:
     """Rewrite graphs/, plan.json and the file index of an existing package with other graph variants; the weights, tokenizer and model.json stay (no quantization).
     max_lengths / chunks default to those of the package."""
@@ -458,6 +481,7 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text(encoding="utf-8")))
     manifest = json.loads((out / "weights" / "manifest.json").read_text(encoding="utf-8"))
     max_lengths, chunks = tuple(max_lengths or old["max_lengths"]), tuple(chunks or old["prefill_chunks"])
+    blocks_per_graph = tuple(blocks_per_graph) if blocks_per_graph is not None else tuple(old.get("blocks_per_graph", [1]))   # not given: keep the groups the package has
     _check_lengths(spec, max_lengths, progress)
     opt = D.GraphOptions(**{k: v for k, v in old["profile"].items() if k in D.GraphOptions.__dataclass_fields__})
     variants = expand_variants(kv_styles, staging_rows, compute_types)
@@ -467,6 +491,20 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     tokenizer_files = [Path(f).name for f in index_old.get("tokenizer", [])]
     index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), tokenizer_files)
     progress(f"rewrote the graphs of {out}: variants {', '.join(index['summary']['variants'])}")
+    return out
+
+
+def set_recommended(package_dir, progress: Callable[[str], None] = print) -> Path:
+    """Write plan.recommended of an existing package from the family's recommendation (no graph is rebuilt) and refresh the file index."""
+    out = Path(package_dir)
+    spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text(encoding="utf-8")))
+    plan = json.loads((out / "plan.json").read_text(encoding="utf-8"))
+    plan["recommended"] = recommended_for(spec, plan)
+    (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
+    index_old = json.loads((out / "m2w.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "weights" / "manifest.json").read_text(encoding="utf-8"))
+    _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), [Path(f).name for f in index_old.get("tokenizer", [])])
+    progress(f"{out}: recommended {plan['recommended']} (family {spec.family}; groups in the package: {plan.get('blocks_per_graph')})")
     return out
 
 

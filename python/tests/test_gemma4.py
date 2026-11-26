@@ -213,5 +213,5 @@ def test_compile_with_block_groups_writes_the_schedule_and_the_compiled_groups_r
     assert rebuilt["blocks_per_graph"] == [1, 3] and set(rebuilt["graphs"]["staged-r4-float32"]["decode"]["64"]["block_groups"]) == {"3"}
     assert [e["key"] for e in rebuilt["graphs"]["staged-r4-float32"]["decode"]["64"]["block_groups"]["3"]] == ["so-fo-so", "fs-ss"]
     assert not (out / "graphs" / "staged-r4-float32" / "decode_group_so-fo_L64.json").exists()
-    C.rebuild_graphs(out, staging_rows=(4,), progress=lambda m: None)
+    C.rebuild_graphs(out, staging_rows=(4,), blocks_per_graph=(1,), progress=lambda m: None)   # --blocks-per-graph 1 drops the groups (not given: the package keeps its groups)
     assert "block_groups" not in json.loads((out / "plan.json").read_text())["graphs"]["staged-r4-float32"]["decode"]["64"]

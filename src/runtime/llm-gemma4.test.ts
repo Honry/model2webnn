@@ -25,7 +25,7 @@ const N = 6;
 async function loaded(options: LoadOptions = {}) {
   installMockBuilder();
   const context = new MockContext();
-  const llm = await Gemma4LLM.load(fsSource, { context, cache: false, ...options });
+  const llm = await Gemma4LLM.load(fsSource, { context, cache: false, blocksPerGraph: 1, ...options });   // the plan recommends groups of 3: the tests of the single-block protocol ask for 1
   context.onRead = (_t, destination) => { destination.fill(0); destination[7] = 5; };   // argmax = token 7
   sliceCalls.length = 0;
   return { llm, context };
@@ -213,5 +213,21 @@ describe('Gemma 4 per-graph build times', () => {
     expect(labels).toContain('kv flush sliding_attention');
     expect(labels).toContain('prefill c16 tail');
     expect(labels[0]).toBe('lm_head');
+  });
+});
+
+describe('Gemma 4 recommended session options of the plan', () => {
+  const withRecommended = (recommended: object): PackageSource => ({
+    ...fsSource, text: async (path) => (path === 'plan.json' ? JSON.stringify({ ...JSON.parse(await fsSource.text(path)), recommended }) : fsSource.text(path)),
+  });
+
+  it('decode block groups of the recommended size unless the caller chooses', async () => {
+    installMockBuilder();
+    const groupOf = async (source: PackageSource, extra: LoadOptions = {}) => (internals(await Gemma4LLM.load(source, { context: new MockContext(), cache: false, ...extra })) as any).groupSize;
+    expect(await groupOf(fsSource)).toBe(3);                                  // the committed package carries the recommendation of the Gemma 4 family
+    expect(await groupOf(withRecommended({}))).toBe(1);                       // a plan without one: single blocks
+    expect(await groupOf(withRecommended({ blocks_per_graph: 3 }))).toBe(3);
+    expect(await groupOf(withRecommended({ blocks_per_graph: 3 }), { blocksPerGraph: 1 })).toBe(1);
+    expect(await groupOf(withRecommended({ blocks_per_graph: 9 }))).toBe(1);   // not in the package: a default falls back to single blocks
   });
 });

@@ -291,3 +291,21 @@ describe('per-graph build times', () => {
     expect(llm.stats.graphBuilds.map((g) => g.label)).toEqual(['lm_head', 'decode head', 'decode block', 'decode tail', 'prefill c16 head', 'prefill c16 block', 'prefill c16 tail']);
   });
 });
+
+describe('recommended session options of the plan', () => {
+  const withRecommended = (recommended: object): PackageSource => ({
+    ...fsSource, id: 'tiny-recommended',
+    text: async (path) => (path === 'plan.json' ? JSON.stringify({ ...JSON.parse(await fsSource.text(path)), recommended }) : fsSource.text(path)),
+  });
+
+  it('are used when the caller does not choose; an explicit choice wins; a group size the variant lacks falls back to single blocks', async () => {
+    installMockBuilder();
+    const options = { context: new MockContext(), cache: false, chunkSize: 16 };
+    const group = async (source: PackageSource, extra: LoadOptions = {}) => { const llm = await LLM.load(source, { ...options, context: new MockContext(), ...extra }); return [(llm as any).groupSize, (llm as any).prefillGroupSize]; };
+    expect(await group(fsSource)).toEqual([1, 1]);                                                                       // a plan without recommendation: single blocks
+    expect(await group(withRecommended({ blocks_per_graph: 2, prefill_blocks_per_graph: 1 }))).toEqual([2, 1]);          // decode groups of 2, single prefill blocks
+    expect(await group(withRecommended({ blocks_per_graph: 2, prefill_blocks_per_graph: 1 }), { blocksPerGraph: 1 })).toEqual([1, 1]);   // the caller chose
+    expect(await group(withRecommended({ blocks_per_graph: 5, prefill_blocks_per_graph: 1 }))).toEqual([1, 1]);          // the package has no groups of 5: no error for a default
+    await expect(LLM.load(withRecommended({ blocks_per_graph: 5 }), { ...options, context: new MockContext(), blocksPerGraph: 5 })).rejects.toThrow(/no decode graph with 5 blocks/);   // but one the caller asks for is an error
+  });
+});

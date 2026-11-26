@@ -31,6 +31,8 @@ export interface Plan {
   block_group_controls?: 'shared' | 'per_block';   // block groups: one rope / mask for all blocks (single layer type), or b<j>_rope_cos / b<j>_attention_mask per block (hybrid models)
   graphs: Record<string, VariantGraphs>;
   weights: { attention: string[] | Record<string, string[]>; ffn: string[]; final_norm: string[]; embedding: string[]; head_extra?: string[]; ple_table?: string[] };
+  /** the session options the model family runs best with (families/*.json `recommended`): used when the caller does not choose; a group size the package does not contain is already 1 here */
+  recommended?: { blocks_per_graph?: number; prefill_blocks_per_graph?: number };
   architecture_kind?: 'gemma4' | 'qwen35';
   state?: { conv_channels: number; v_heads: number; k_dim: number; v_dim: number; layers: number[] };   // qwen35: the layers that carry a Gated DeltaNet state instead of a KV cache
   profile: { merge_projections: boolean; lm_head_format: string };

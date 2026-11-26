@@ -187,5 +187,9 @@
   "padded_vocab": 384,
   "vocab": 300,
   "note": "argmax / sampling over the first `vocab` entries only"
+ },
+ "recommended": {
+  "blocks_per_graph": 1,
+  "prefill_blocks_per_graph": 1
  }
 }

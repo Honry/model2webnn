@@ -94,7 +94,9 @@ export class Gemma4LLM {
     const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
     for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
     if ((o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('Gemma 4 packages have block groups for decode only: prefillBlocksPerGraph must be 1');
-    const group = o.blocksPerGraph ?? 1, groupSizes = Object.keys((table.decode[key] as unknown as GemmaDecodeTable).block_groups ?? {}).join(', ') || 'none';
+    let group = o.blocksPerGraph ?? plan.recommended?.blocks_per_graph ?? 1;   // not chosen by the caller: the recommended group size, when this variant has it
+    if (o.blocksPerGraph === undefined && group > 1 && !(table.decode[key] as unknown as GemmaDecodeTable).block_groups?.[String(group)]) group = 1;
+    const groupSizes = Object.keys((table.decode[key] as unknown as GemmaDecodeTable).block_groups ?? {}).join(', ') || 'none';
     if (group > 1 && !(table.decode[key] as unknown as GemmaDecodeTable).block_groups?.[String(group)]) throw new Error(`the package has no decode block groups of ${group} blocks (it has ${groupSizes})`);
     return { maxLength: +key, variant, sizes, group, fixedTokens: o.prefillFixedTokens ?? 200 };
   }

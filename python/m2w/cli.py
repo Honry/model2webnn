@@ -29,6 +29,13 @@ def cmd_rebuild_graphs(args) -> int:
     return 0
 
 
+def cmd_recommend(args) -> int:
+    from .compile import set_recommended
+
+    set_recommended(args.package)
+    return 0
+
+
 def cmd_repack(args) -> int:
     from .compile import repack_package
 
@@ -113,7 +120,8 @@ def main(argv=None) -> int:
         sp.add_argument("--kv-style", nargs="+", choices=["staged", "onehot", "tensorScatter", "scatterND"], default=["staged"], help="KV cache protocols (see plan.json kv_protocols)")
         sp.add_argument("--staging-rows", type=int, nargs="+", default=[64], help="rows of the staging buffer (staged only)")
         sp.add_argument("--compute-type", nargs="+", choices=["float32", "float16"], default=["float32"], help="type of the computation inside the graphs (the boundaries stay f16)")
-        sp.add_argument("--blocks-per-graph", type=int, nargs="+", default=[1], help="also build decode graphs with K blocks each (fewer dispatches, longer compile; Gemma 4 too: groups are cut per sequence of attention kinds)")
+        sp.add_argument("--blocks-per-graph", type=int, nargs="+", default=None, help="also build decode graphs with K blocks each (fewer dispatches, longer compile; Gemma 4 too: groups are cut per sequence of "
+                        "attention kinds); default: the single blocks and the recommended K of the model family (rebuild-graphs: the groups the package has)")
         sp.add_argument("--prefill-blocks-per-graph", type=int, nargs="+", default=[1], help="the same for the prefill graphs (not for Gemma 4)")
 
     def source_args(sp):
@@ -135,6 +143,10 @@ def main(argv=None) -> int:
     rb.add_argument("package")
     graph_options(rb, defaults=False)
     rb.set_defaults(func=cmd_rebuild_graphs)
+
+    rc = sub.add_parser("recommend", help="write plan.recommended (the best session options of the model family, e.g. decode blocks per graph) into an existing package (no graph is rebuilt)")
+    rc.add_argument("package")
+    rc.set_defaults(func=cmd_recommend)
 
     rp = sub.add_parser("repack", help="convert the weight shards of an older package (*.bin) to .safetensors files (no quantization)")
     rp.add_argument("package")
