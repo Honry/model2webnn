@@ -131,6 +131,18 @@ def infer_node(graph: Graph, node: Node):
         if k != k2:
             raise GraphError(f"gemm: inner dimensions differ {a.shape} x {b.shape} (aT={opt.get('aTranspose')}, bT={opt.get('bTranspose')})")
         return [(a.dtype, (m, n))]
+    if op == "conv2d":
+        x, w = ins[0], ins[1]
+        groups = opt.get("groups", 1)
+        strides, dilations, padding = opt.get("strides", [1, 1]), opt.get("dilations", [1, 1]), opt.get("padding", [0, 0, 0, 0])
+        if x.rank != 4 or w.rank != 4 or x.dtype != w.dtype:
+            raise GraphError("conv2d: input and filter must be float tensors of rank 4 (nchw / oihw) of the same type")
+        if x.shape[1] != w.shape[1] * groups or w.shape[0] % groups:
+            raise GraphError(f"conv2d: input channels {x.shape[1]} vs filter {w.shape} with {groups} groups")
+        out_hw = [(x.shape[2 + i] + padding[2 * i] + padding[2 * i + 1] - dilations[i] * (w.shape[2 + i] - 1) - 1) // strides[i] + 1 for i in range(2)]
+        if min(out_hw) < 1:
+            raise GraphError("conv2d: the filter is bigger than the padded input")
+        return [(x.dtype, (x.shape[0], w.shape[0], out_hw[0], out_hw[1]))]
     if op == "dequantizeLinear":
         q, scale, zp = ins
         if q.dtype not in ("int4", "uint4", "int8", "uint8", "int32"):
@@ -254,6 +266,9 @@ class GraphBuilder:
         if b_transpose: options["bTranspose"] = True
         if a_transpose: options["aTranspose"] = True
         return self._emit("gemm", [a, b], options)
+    def conv2d(self, x, w, *, groups=1, strides=(1, 1), dilations=(1, 1), padding=(0, 0, 0, 0)):
+        """nchw input, oihw filter (WebNN defaults); depthwise = groups == channels with a filter [channels, 1, kh, kw]. padding = [begin height, end height, begin width, end width]."""
+        return self._emit("conv2d", [x, w], {"groups": int(groups), "strides": list(strides), "dilations": list(dilations), "padding": list(padding)})
     def dequantize_linear(self, x, scale, zero_point=None): return self._emit("dequantizeLinear", [x, scale, zero_point])
     def scatter_nd(self, x, indices, updates): return self._emit("scatterND", [x, indices, updates], {})
     def tensor_scatter(self, x, update, write_index, axis: int): return self._emit("tensorScatter", [x, update, write_index], {"axis": int(axis)})

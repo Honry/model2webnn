@@ -60,6 +60,12 @@ export class MockBuilder {
     if (k !== k2) throw new Error(`gemm [${a.shape}] x [${b.shape}]`);
     return this.op(a.dataType, [m, n]);
   };
+  conv2d = (x: MockOperand, w: MockOperand, o: { groups?: number; strides?: number[]; dilations?: number[]; padding?: number[] } = {}) => {
+    const g = o.groups ?? 1, s = o.strides ?? [1, 1], d = o.dilations ?? [1, 1], p = o.padding ?? [0, 0, 0, 0];
+    if (x.shape[1] !== w.shape[1] * g) throw new Error(`conv2d: input channels ${x.shape[1]} vs filter [${w.shape}] with ${g} groups`);
+    const hw = [0, 1].map((i) => Math.floor((x.shape[2 + i] + p[2 * i] + p[2 * i + 1] - d[i] * (w.shape[2 + i] - 1) - 1) / s[i]) + 1);
+    return this.op(x.dataType, [x.shape[0], w.shape[0], hw[0], hw[1]]);
+  };
   dequantizeLinear = (x: MockOperand, scale: MockOperand) => this.op(scale.dataType, x.shape);
   tensorScatter = (x: MockOperand) => this.op(x.dataType, x.shape);
   scatterND = (x: MockOperand) => this.op(x.dataType, x.shape);

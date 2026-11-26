@@ -79,6 +79,21 @@ def _eval(op: str, ins: list, opt: dict, out_dtype: str):
         if opt.get("aTranspose"): a = a.T
         if opt.get("bTranspose"): b = b.T
         return (a @ b).astype(np_dtype(out_dtype))
+    if op == "conv2d":
+        a, w = _f32(ins[0]), _f32(ins[1])
+        groups, (sh, sw), (dh, dw), pad = opt.get("groups", 1), opt.get("strides", [1, 1]), opt.get("dilations", [1, 1]), opt.get("padding", [0, 0, 0, 0])
+        a = np.pad(a, ((0, 0), (0, 0), (pad[0], pad[1]), (pad[2], pad[3])))
+        n, c, _, _ = a.shape
+        o, ci, kh, kw = w.shape
+        oh, ow = (a.shape[2] - dh * (kh - 1) - 1) // sh + 1, (a.shape[3] - dw * (kw - 1) - 1) // sw + 1
+        out = np.zeros((n, o, oh, ow), np.float32)
+        og = o // groups
+        for g in range(groups):
+            for i in range(kh):
+                for j in range(kw):
+                    window = a[:, g * ci:(g + 1) * ci, i * dh: i * dh + sh * (oh - 1) + 1: sh, j * dw: j * dw + sw * (ow - 1) + 1: sw]   # [n, ci, oh, ow]
+                    out[:, g * og:(g + 1) * og] += np.einsum("nchw,oc->nohw", window, w[g * og:(g + 1) * og, :, i, j])
+        return out.astype(np_dtype(out_dtype))
     if op == "dequantizeLinear":
         q, scale, zp = ins
         qf = q.astype(np.float32)

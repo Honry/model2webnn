@@ -100,7 +100,7 @@ while ((Get-Date) -lt $deadline) {
         ("{0},{1},{2},{3}" -f [math]::Round(((Get-Date) - $t0).TotalSeconds), $ws, $pv, $ids.Count) | Out-File $memcsv -Append -Encoding ascii
     } elseif ($proc.HasExited) { "chrome exited"; break }
     if (Test-Path $jsonl) {
-        if (Select-String -Path $jsonl -Pattern '"event":"done"' -Quiet) { $done = $true; break }
+        if (Select-String -Path $jsonl -Pattern '"event":"done"|"message":"DONE"|"message":"ERROR' -Quiet) { $done = $true; break }   # bench.html / chat.js write event done; the pages of bench/raw (gdn, m2wgraphs, qwen35check ...) log DONE or ERROR
     }
     Start-Sleep -Seconds 1
 }

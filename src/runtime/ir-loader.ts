@@ -119,6 +119,7 @@ function emitNode(b: BuilderLike, n: IRNode, ref: Ref): OperandLike {
       if (o.aTranspose) opts.aTranspose = true;
       return b.gemm(x, ref(n.inputs[1]), opts);
     }
+    case 'conv2d': return b.conv2d(x, ref(n.inputs[1]), { groups: o.groups ?? 1, strides: o.strides, dilations: o.dilations, padding: o.padding, inputLayout: 'nchw', filterLayout: 'oihw' });
     case 'dequantizeLinear': return b.dequantizeLinear(x, ref(n.inputs[1]), n.inputs[2] === null ? null : ref(n.inputs[2]));
     case 'tensorScatter': {
       if (typeof b.tensorScatter !== 'function') throw new Error('this browser has no MLGraphBuilder.tensorScatter');
