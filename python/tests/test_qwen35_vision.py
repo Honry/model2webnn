@@ -84,16 +84,42 @@ def test_image_embeddings_match_transformers(package, grid):
         assert np.abs(a.astype(np.float32) - b).max() < 0.01 * np.abs(b).max() + 1e-3, (i, np.abs(a.astype(np.float32) - b).max(), np.abs(b).max())
 
 
-@pytest.mark.parametrize("weights", ["float16", "int4"])
+@pytest.mark.parametrize("weights", ["float16", "int4", "int8g128"])
 def test_other_weight_formats(tmp_path_factory, weights):
-    """--vision-weights float16 / int4: the same graphs with the other weight inputs, equal to the reference on the dequantized weights"""
+    """--vision-weights float16 / int4 / int8g128: the same graphs with the other weight inputs, equal to the reference on the dequantized weights"""
     out, spec = build(tmp_path_factory, weights)
+    if weights == "int8g128":   # int8 data in the group-major layout of the int4 path, one float16 scale per block of 128 input channels, an int8 zero point of 0 in the graph
+        manifest = json.loads((out / "weights" / "manifest.json").read_text())
+        assert manifest["quant"]["vision"]["weights"] == "int8g128" and manifest["quant"]["vision"]["granularity"] == "group"
+        block = next(f for f in manifest["files"] if f["role"] == "vision_block")
+        qkv, scale = (next(t for t in block["tensors"] if t["name"] == n) for n in ("qkv_weight", "qkv_scale"))
+        assert qkv["dtype"] == "int8" and qkv["shape"] == [1, 384, 128] and scale["dtype"] == "float16" and scale["shape"] == [1, 384, 1]
+        fc2 = next(t for t in block["tensors"] if t["name"] == "fc2_weight")
+        assert fc2["shape"] == [2, 128, 128]   # ffn 256 = 2 groups of 128
     runner = Qwen35VisionRunner(out, spec)
     reference = Qwen35VisionHF(T.VISION, runner.reader.vision_hf_state_dict())
     grid = T.GRIDS[1]
     patches = V.patchify(pixels(grid, 3), grid[0], grid[1], PATCH, 2, 2).astype(np.float16)
     got, (want, _) = runner.encode(patches, grid).astype(np.float32), reference.forward(patches.astype(np.float32), grid)
     assert np.abs(got - want).max() < 0.02 * np.abs(want).max() + 1e-3
+
+
+def test_int8_grouped_quantizer():
+    """int8g128: scale = max|w| / 127 per block of 128 input channels (float16), q in [-127, 127]; never worse than int8 per row, and a row with one outlier keeps its other blocks fine"""
+    from m2w.quantize import dequantize_i8_symmetric_rowwise, dequantize_int4, quantize_i8_symmetric_grouped, quantize_i8_symmetric_rowwise
+
+    rng = np.random.default_rng(1)
+    w = rng.standard_normal((64, 512)).astype(np.float32) * 0.05
+    w[3, 5] = 4.0   # an outlier in the first block of row 3
+    q, s = quantize_i8_symmetric_grouped(w)
+    assert q.shape == (4, 64, 128) and q.dtype == np.int8 and s.shape == (4, 64, 1) and s.dtype == np.float16 and np.abs(q).max() <= 127
+    grouped = dequantize_int4(q, s)
+    qr, sr = quantize_i8_symmetric_rowwise(w)
+    rowwise = dequantize_i8_symmetric_rowwise(qr, sr)
+    err = lambda x: np.square(x - w).sum(axis=1)   # noqa: E731
+    assert err(grouped)[3] < 0.5 * err(rowwise)[3] and err(grouped).sum() <= err(rowwise).sum()
+    with pytest.raises(ValueError):
+        quantize_i8_symmetric_grouped(np.zeros((4, 100), np.float32))
 
 
 def test_float16_compute_type_stays_close(tmp_path_factory):

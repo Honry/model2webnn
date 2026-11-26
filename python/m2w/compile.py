@@ -509,7 +509,7 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
                   endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print, vision: bool = True, vision_weights: str = "int8",
                   vision_grids=None, vision_compute_type: str = "float32") -> Path:
     """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants.
-    A Qwen3.5 checkpoint with a vision tower gets the image tower too (images only): `vision_weights` int8 | int4 | float16, `vision_grids` the (grid_h, grid_w) presets in patches
+    A Qwen3.5 checkpoint with a vision tower gets the image tower too (images only): `vision_weights` int8 | int8g128 | int4 | float16, `vision_grids` the (grid_h, grid_w) presets in patches
     (default vision.DEFAULT_GRIDS), `vision_compute_type` of its graphs; vision=False leaves it out."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

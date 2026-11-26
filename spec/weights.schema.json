@@ -21,8 +21,8 @@
         },
         "vision": {
           "type": "object",
-          "description": "Qwen3.5 image tower: the format of the linear weights of the vision_* files (int8: weight [out, in] + scale [out, 1] per row symmetric; int4: group 128 like the text layers; float16: weight only)",
-          "properties": { "weights": { "enum": ["int8", "int4", "float16"] }, "granularity": { "enum": ["row", "group", "none"] }, "scale_dtype": { "const": "float16" }, "bias_dtype": { "const": "float16" }, "conv3d": { "type": "string" } }
+          "description": "Qwen3.5 image tower: the format of the linear weights of the vision_* files (int8: weight [out, in] + scale [out, 1] per row symmetric; int8g128: int8 data [in/128, out, 128] + a scale per block [in/128, out, 1], the int4 layout; int4: group 128 like the text layers; float16: weight only)",
+          "properties": { "weights": { "enum": ["int8", "int8g128", "int4", "float16"] }, "granularity": { "enum": ["row", "group", "none"] }, "scale_dtype": { "const": "float16" }, "bias_dtype": { "const": "float16" }, "conv3d": { "type": "string" } }
         }
       }
     },

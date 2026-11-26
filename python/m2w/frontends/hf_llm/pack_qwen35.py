@@ -10,7 +10,7 @@ Transformations done here so that the graphs stay plain:
     `decay_rate` = exp(A_log).
 The image tower (`pack_vision`, only when model.json has a `vision` entry): weights/vision_head.safetensors, vision_block_NNN.safetensors (one per ViT block), vision_merger.safetensors, one
 vision_grid_<h>x<w>.safetensors per grid preset (the position embedding interpolated to the grid, the rotary cos / sin) and vision_pos_embed.safetensors (the learned table itself: only the Python
-reference reads it). Linear weights are int8 per row symmetric by default (`vision_weights`: int8 | int4 | float16), the Conv3d kernel is a [hidden, 1536] matrix in the (channel, temporal, kh, kw)
+reference reads it). Linear weights are int8 per row symmetric by default (`vision_weights`: int8 | int8g128 | int4 | float16), the Conv3d kernel is a [hidden, 1536] matrix in the (channel, temporal, kh, kw)
 order of the patch vector, biases and LayerNorm are float16.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from ...quantize import DEFAULT_GRID, dequantize_i8_symmetric_rowwise, dequantize_int4, pack_int4, quantize_i8_symmetric_rowwise, quantize_int4_symmetric
+from ...quantize import DEFAULT_GRID, dequantize_i8_symmetric_rowwise, dequantize_int4, pack_int4, quantize_i8_symmetric_grouped, quantize_i8_symmetric_rowwise, quantize_int4_symmetric
 from . import pack, vision as V
 from .arch import ModelSpec
 from .builders import decoder as D
@@ -103,10 +103,14 @@ def pack_layer(spec: ModelSpec, store: TensorStore, layer: int, out: Path, grid=
 
 
 def _vision_linear(name: str, matrix: np.ndarray, weights: str, grid, errors: dict) -> dict:
-    """matrix [out, in] -> {tensor name: array} of the weight format (int8 per row symmetric | int4 group 128 | float16); the relative quantization error goes to `errors`."""
+    """matrix [out, in] -> {tensor name: array} of the weight format (int8 per row symmetric | int8g128 = int8 with a scale per block of 128 input channels | int4 group 128 | float16); the relative quantization error goes to `errors`."""
     if weights == "int8":
         q, scale = quantize_i8_symmetric_rowwise(matrix)
         errors[name] = float(np.square(dequantize_i8_symmetric_rowwise(q, scale) - matrix).sum() / max(np.square(matrix).sum(), 1e-30))
+        return {f"{name}_weight": q, f"{name}_scale": scale}
+    if weights == "int8g128":
+        q, scale = quantize_i8_symmetric_grouped(matrix, 128)
+        errors[name] = float(np.square(dequantize_int4(q, scale) - matrix).sum() / max(np.square(matrix).sum(), 1e-30))   # dequantize_int4 = q * scale per block, any integer q
         return {f"{name}_weight": q, f"{name}_scale": scale}
     if weights == "int4":
         q, scale = quantize_int4_symmetric(matrix, 128, grid)
@@ -173,7 +177,7 @@ def pack_vision(spec: ModelSpec, store: TensorStore, out: Path, weights: str = "
 
 
 def vision_quant_entry(weights: str) -> dict:
-    return {"weights": weights, "granularity": {"int8": "row", "int4": "group"}.get(weights, "none"), "scale_dtype": "float16", "bias_dtype": "float16",
+    return {"weights": weights, "granularity": {"int8": "row", "int8g128": "group", "int4": "group"}.get(weights, "none"), "scale_dtype": "float16", "bias_dtype": "float16",
             "conv3d": "reshaped to a [hidden, channels * temporal * patch * patch] matrix"}
 
 
@@ -193,7 +197,7 @@ def pack_model(spec: ModelSpec, store: TensorStore, out_dir, opt: Optional[D.Gra
     final.add("final_norm_gamma", "float16", (1, 1, spec.hidden), _f16(1.0 + store.read(spec.tensors["final_norm"]).astype(np.float32)).reshape(1, 1, spec.hidden))
     files = layer_entries + [{**final.close(), "role": "final_norm"}] + pack.pack_embedding(spec, store, out, opt)
     log("embedding quantized")
-    if vision:   # {"weights": "int8" | "int4" | "float16", "grids": [(h, w), ...]}
+    if vision:   # {"weights": "int8" | "int8g128" | "int4" | "float16", "grids": [(h, w), ...]}
         files += pack_vision(spec, store, out, vision["weights"], vision["grids"], grid, workers, progress)
     manifest = {
         "format": pack.WEIGHTS_FORMAT, "version": pack.WEIGHTS_VERSION, "container": "safetensors",

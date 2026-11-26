@@ -126,6 +126,24 @@ def quantize_i8_symmetric_rowwise(weight: np.ndarray, rows_per_chunk: int = 8192
     return q, scale
 
 
+def quantize_i8_symmetric_grouped(weight: np.ndarray, group_size: int = 128, rows_per_chunk: int = 2048):
+    """weight [N, K] -> (q [G, N, group] int8 in [-127, 127], scale [G, N, 1] float16): symmetric per block of `group_size` input channels, scale = max|w| / 127, W[n, g*group + k] ~ q[g, n, k] * scale[g, n].
+    The layout of the int4 path (group-major, dequantizeLinear with a block scale) with int8 data: the vision tower's `int8g128` format (a few outlier rows / blocks do not spoil whole rows)."""
+    n, k = weight.shape
+    if k % group_size:
+        raise ValueError(f"input channels {k} is not a multiple of the group size {group_size}")
+    groups = k // group_size
+    q_out, s_out = np.empty((groups, n, group_size), np.int8), np.empty((groups, n, 1), np.float16)
+    for start in range(0, n, rows_per_chunk):
+        w = np.ascontiguousarray(weight[start:start + rows_per_chunk], dtype=np.float32).reshape(-1, groups, group_size)
+        s = (np.abs(w).max(axis=-1, keepdims=True) / 127.0).astype(np.float16)
+        s = np.where(s == 0, np.float16(ZERO_SCALE_REPLACEMENT), s)
+        q = np.clip(np.rint(w / s.astype(np.float32)), -127, 127).astype(np.int8)
+        q_out[:, start:start + w.shape[0]] = q.transpose(1, 0, 2)
+        s_out[:, start:start + w.shape[0]] = s.transpose(1, 0, 2)
+    return q_out, s_out
+
+
 def dequantize_i8_symmetric_rowwise(q, scale) -> np.ndarray:
     return (q.astype(np.float32) * scale.astype(np.float32)).astype(np.float32)
 

@@ -42,12 +42,12 @@ class Qwen35PackageReader(Gemma4PackageReader):
         raise KeyError(f"the package has no {role} shard (layer {layer}, grid {grid})")
 
     def vision_linear(self, shard: dict, name: str) -> np.ndarray:
-        """[out, in] float32 of a linear weight of the image tower as the graph sees it: dequantizeLinear gives float16 (scale dtype), int8: q * scale, int4: group-wise."""
+        """[out, in] float32 of a linear weight of the image tower as the graph sees it: dequantizeLinear gives float16 (scale dtype), int8: q * scale, int8g128 / int4: group-wise."""
         mode = self.manifest["quant"]["vision"]["weights"]
         weight = self.raw(shard, name + "_weight")
         if mode == "int8":
             return (weight.astype(np.float32) * self.raw(shard, name + "_scale").astype(np.float32)).astype(np.float16).astype(np.float32)
-        if mode == "int4":
+        if mode in ("int4", "int8g128"):
             return dequantize_int4(weight, self.raw(shard, name + "_scale"))
         return weight.astype(np.float32)
 

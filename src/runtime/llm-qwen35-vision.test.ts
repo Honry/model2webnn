@@ -17,6 +17,28 @@ const fsSource: PackageSource = {
 };
 const PAD = 290, START = 288, END = 289;
 
+// the same package with its image tower in the int8g128 weight format (scripts/make-tiny-vision-overlay.py): the plan's vision section, the vision_* manifest entries and the vision files come from the overlay
+const overlayRoot = new URL('../../tests/golden/tiny-qwen35-vision-int8g128/', import.meta.url);
+const overlay = JSON.parse(readFileSync(new URL('vision.json', overlayRoot), 'utf8'));
+const g128Source: PackageSource = {
+  id: 'tiny-qwen35-vision-g128',
+  text: async (path) => {
+    if (path.startsWith('graphs/vision/')) return readFileSync(new URL(path, overlayRoot), 'utf8');
+    const text = await fsSource.text(path);
+    if (path === 'plan.json') return JSON.stringify({ ...JSON.parse(text), vision: overlay.plan });
+    if (path === 'weights/manifest.json') {
+      const manifest = JSON.parse(text);
+      return JSON.stringify({ ...manifest, quant: { ...manifest.quant, vision: overlay.quant }, files: [...manifest.files.filter((f: { role: string }) => !f.role.startsWith('vision_')), ...overlay.files] });
+    }
+    return text;
+  },
+  bytes: async (path) => {
+    if (!path.startsWith('weights/vision_')) return fsSource.bytes(path);
+    const b = readFileSync(new URL(path, overlayRoot));
+    return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  },
+};
+
 async function loaded(options: LoadOptions = {}) {
   installMockBuilder();
   const context = new MockContext();
@@ -71,6 +93,23 @@ describe('Qwen3.5 image tower on a validating mock of WebNN', () => {
     expect(dispatched[3].inputs.hidden_states).toBe(dispatched[2].outputs.next_hidden_states);
     await expect(tower.encode(fakeImage([6, 4]))).rejects.toThrow(/no preset 6x4 loaded/);
     expect(tower.buildMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('int8g128 weights: int8 blocks [in/128, out, 128] with a block scale are uploaded and bound by name to every dispatch (same loader as the other formats)', async () => {
+    installMockBuilder();
+    const context = new MockContext();
+    const llm = await Qwen35LLM.load(g128Source, { context, cache: false, blocksPerGraph: 1, chunkSizes: [16], vision: { grids: [[4, 4]] } });
+    expect(llm.pkg.plan.vision!.weights).toBe('int8g128');
+    const shapes = (dataType: string) => context.tensors.filter((t) => t.dataType === dataType).map((t) => t.shape.join('x'));
+    expect(shapes('int8').filter((s) => s === '1x384x128').length).toBe(2);   // qkv of the two blocks: one block of 128 input channels, 384 output rows
+    expect(shapes('int8').filter((s) => s === '2x128x128').length).toBe(2);   // fc2: ffn 256 = 2 groups
+    context.onRead = (_t: MockTensor, d: any) => { d.fill(0.25); };
+    const before = context.dispatches.length;
+    expect((await llm.vision!.encode(fakeImage([4, 4]))).length).toBe(4 * 128);
+    const dispatched = context.dispatches.slice(before);
+    expect(dispatched.length).toBe(4);
+    expect(dispatched[1].inputs.qkv_weight.dataType).toBe('int8');
+    expect(dispatched[1].inputs.qkv_scale.shape).toEqual([1, 384, 1]);
   });
 
   it('debug mode: the hidden state after HEAD and after every block is read back, every dispatch is named first and awaited', async () => {

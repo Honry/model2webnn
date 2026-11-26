@@ -1,0 +1,769 @@
+{
+ "plan": {
+  "description": "the image tower in the NPUW-style split, one set of graphs per grid preset (grid = patches in height x width): HEAD (patches [N, patch_vector] -> hidden_states [1,N,hidden]: patch matmul + bias + the position embedding of the grid), BLOCK x depth (ONE graph, weights bound per layer: hidden_states -> next_hidden_states), MERGER (hidden_states -> image_embeds [1,N/4,out_hidden]). Patches are in merge-block order and in the (channel, temporal, kh, kw) order of the Conv3d kernel (protocol patchify). The external constants pos_embed (HEAD) and rope_cos / rope_sin (BLOCK) are the tensors of the manifest file with role vision_grid and this grid; the weights are the manifest files vision_head / vision_block (layer i) / vision_merger.",
+  "weights": "int8g128",
+  "compute_type": "float32",
+  "depth": 2,
+  "image_token_id": 290,
+  "tensors": {
+   "head": [
+    "patch_embed_weight",
+    "patch_embed_scale",
+    "patch_embed_bias"
+   ],
+   "block": [
+    "norm1_gamma",
+    "norm1_beta",
+    "qkv_weight",
+    "qkv_scale",
+    "qkv_bias",
+    "proj_weight",
+    "proj_scale",
+    "proj_bias",
+    "norm2_gamma",
+    "norm2_beta",
+    "fc1_weight",
+    "fc1_scale",
+    "fc1_bias",
+    "fc2_weight",
+    "fc2_scale",
+    "fc2_bias"
+   ],
+   "merger": [
+    "merger_norm_gamma",
+    "merger_norm_beta",
+    "merger_fc1_weight",
+    "merger_fc1_scale",
+    "merger_fc1_bias",
+    "merger_fc2_weight",
+    "merger_fc2_scale",
+    "merger_fc2_bias"
+   ],
+   "tables": [
+    "pos_embed",
+    "rope_cos",
+    "rope_sin"
+   ]
+  },
+  "presets": [
+   {
+    "grid": [
+     4,
+     4
+    ],
+    "patches": 16,
+    "tokens": 4,
+    "graphs": {
+     "head": "graphs/vision/4x4_head.json",
+     "block": "graphs/vision/4x4_block.json",
+     "merger": "graphs/vision/4x4_merger.json"
+    }
+   },
+   {
+    "grid": [
+     4,
+     6
+    ],
+    "patches": 24,
+    "tokens": 6,
+    "graphs": {
+     "head": "graphs/vision/4x6_head.json",
+     "block": "graphs/vision/4x6_block.json",
+     "merger": "graphs/vision/4x6_merger.json"
+    }
+   },
+   {
+    "grid": [
+     6,
+     4
+    ],
+    "patches": 24,
+    "tokens": 6,
+    "graphs": {
+     "head": "graphs/vision/6x4_head.json",
+     "block": "graphs/vision/6x4_block.json",
+     "merger": "graphs/vision/6x4_merger.json"
+    }
+   }
+  ]
+ },
+ "quant": {
+  "weights": "int8g128",
+  "granularity": "group",
+  "scale_dtype": "float16",
+  "bias_dtype": "float16",
+  "conv3d": "reshaped to a [hidden, channels * temporal * patch * patch] matrix"
+ },
+ "files": [
+  {
+   "file": "vision_block_000.safetensors",
+   "bytes": 138128,
+   "sha256": "5cf3d6ef60b08f369925656bfcda7a62809a0798b8f7a0330dfa57097b975ab9",
+   "tensors": [
+    {
+     "name": "norm1_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2192,
+     "bytes": 256
+    },
+    {
+     "name": "norm1_beta",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2448,
+     "bytes": 256
+    },
+    {
+     "name": "qkv_weight",
+     "dtype": "int8",
+     "shape": [
+      1,
+      384,
+      128
+     ],
+     "offset": 2704,
+     "bytes": 49152
+    },
+    {
+     "name": "qkv_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      384,
+      1
+     ],
+     "offset": 51856,
+     "bytes": 768
+    },
+    {
+     "name": "qkv_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      384
+     ],
+     "offset": 52624,
+     "bytes": 768
+    },
+    {
+     "name": "proj_weight",
+     "dtype": "int8",
+     "shape": [
+      1,
+      128,
+      128
+     ],
+     "offset": 53392,
+     "bytes": 16384
+    },
+    {
+     "name": "proj_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      128,
+      1
+     ],
+     "offset": 69776,
+     "bytes": 256
+    },
+    {
+     "name": "proj_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 70032,
+     "bytes": 256
+    },
+    {
+     "name": "norm2_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 70288,
+     "bytes": 256
+    },
+    {
+     "name": "norm2_beta",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 70544,
+     "bytes": 256
+    },
+    {
+     "name": "fc1_weight",
+     "dtype": "int8",
+     "shape": [
+      1,
+      256,
+      128
+     ],
+     "offset": 70800,
+     "bytes": 32768
+    },
+    {
+     "name": "fc1_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      256,
+      1
+     ],
+     "offset": 103568,
+     "bytes": 512
+    },
+    {
+     "name": "fc1_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      256
+     ],
+     "offset": 104080,
+     "bytes": 512
+    },
+    {
+     "name": "fc2_weight",
+     "dtype": "int8",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 104592,
+     "bytes": 32768
+    },
+    {
+     "name": "fc2_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 137360,
+     "bytes": 512
+    },
+    {
+     "name": "fc2_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 137872,
+     "bytes": 256
+    }
+   ],
+   "role": "vision_block",
+   "layer": 0,
+   "relative_error": {
+    "qkv": 4.2e-05,
+    "proj": 4.2e-05,
+    "fc1": 4.1e-05,
+    "fc2": 4.2e-05
+   }
+  },
+  {
+   "file": "vision_block_001.safetensors",
+   "bytes": 138128,
+   "sha256": "980a6aa42a13209ce821fbd2664c7809329eb60741871a988757bee70724c158",
+   "tensors": [
+    {
+     "name": "norm1_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2192,
+     "bytes": 256
+    },
+    {
+     "name": "norm1_beta",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 2448,
+     "bytes": 256
+    },
+    {
+     "name": "qkv_weight",
+     "dtype": "int8",
+     "shape": [
+      1,
+      384,
+      128
+     ],
+     "offset": 2704,
+     "bytes": 49152
+    },
+    {
+     "name": "qkv_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      384,
+      1
+     ],
+     "offset": 51856,
+     "bytes": 768
+    },
+    {
+     "name": "qkv_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      384
+     ],
+     "offset": 52624,
+     "bytes": 768
+    },
+    {
+     "name": "proj_weight",
+     "dtype": "int8",
+     "shape": [
+      1,
+      128,
+      128
+     ],
+     "offset": 53392,
+     "bytes": 16384
+    },
+    {
+     "name": "proj_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      128,
+      1
+     ],
+     "offset": 69776,
+     "bytes": 256
+    },
+    {
+     "name": "proj_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 70032,
+     "bytes": 256
+    },
+    {
+     "name": "norm2_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 70288,
+     "bytes": 256
+    },
+    {
+     "name": "norm2_beta",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 70544,
+     "bytes": 256
+    },
+    {
+     "name": "fc1_weight",
+     "dtype": "int8",
+     "shape": [
+      1,
+      256,
+      128
+     ],
+     "offset": 70800,
+     "bytes": 32768
+    },
+    {
+     "name": "fc1_scale",
+     "dtype": "float16",
+     "shape": [
+      1,
+      256,
+      1
+     ],
+     "offset": 103568,
+     "bytes": 512
+    },
+    {
+     "name": "fc1_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      256
+     ],
+     "offset": 104080,
+     "bytes": 512
+    },
+    {
+     "name": "fc2_weight",
+     "dtype": "int8",
+     "shape": [
+      2,
+      128,
+      128
+     ],
+     "offset": 104592,
+     "bytes": 32768
+    },
+    {
+     "name": "fc2_scale",
+     "dtype": "float16",
+     "shape": [
+      2,
+      128,
+      1
+     ],
+     "offset": 137360,
+     "bytes": 512
+    },
+    {
+     "name": "fc2_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 137872,
+     "bytes": 256
+    }
+   ],
+   "role": "vision_block",
+   "layer": 1,
+   "relative_error": {
+    "qkv": 4.1e-05,
+    "proj": 4.3e-05,
+    "fc1": 4.2e-05,
+    "fc2": 4.1e-05
+   }
+  },
+  {
+   "file": "vision_head.safetensors",
+   "bytes": 50704,
+   "sha256": "c6fa1c4844b5f9b27e215524f5a73d08b7f316f341f6ed368ceb6a03428fa31b",
+   "tensors": [
+    {
+     "name": "patch_embed_weight",
+     "dtype": "int8",
+     "shape": [
+      3,
+      128,
+      128
+     ],
+     "offset": 528,
+     "bytes": 49152
+    },
+    {
+     "name": "patch_embed_scale",
+     "dtype": "float16",
+     "shape": [
+      3,
+      128,
+      1
+     ],
+     "offset": 49680,
+     "bytes": 768
+    },
+    {
+     "name": "patch_embed_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 50448,
+     "bytes": 256
+    }
+   ],
+   "role": "vision_head",
+   "relative_error": {
+    "patch_embed": 4.2e-05
+   }
+  },
+  {
+   "file": "vision_merger.safetensors",
+   "bytes": 335880,
+   "sha256": "77801d17d100ac8d872c8ee8ea0382500a14d9ff438ba49fb42e468354f87f38",
+   "tensors": [
+    {
+     "name": "merger_norm_gamma",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 1288,
+     "bytes": 256
+    },
+    {
+     "name": "merger_norm_beta",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 1544,
+     "bytes": 256
+    },
+    {
+     "name": "merger_fc1_weight",
+     "dtype": "int8",
+     "shape": [
+      4,
+      512,
+      128
+     ],
+     "offset": 1800,
+     "bytes": 262144
+    },
+    {
+     "name": "merger_fc1_scale",
+     "dtype": "float16",
+     "shape": [
+      4,
+      512,
+      1
+     ],
+     "offset": 263944,
+     "bytes": 4096
+    },
+    {
+     "name": "merger_fc1_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      512
+     ],
+     "offset": 268040,
+     "bytes": 1024
+    },
+    {
+     "name": "merger_fc2_weight",
+     "dtype": "int8",
+     "shape": [
+      4,
+      128,
+      128
+     ],
+     "offset": 269064,
+     "bytes": 65536
+    },
+    {
+     "name": "merger_fc2_scale",
+     "dtype": "float16",
+     "shape": [
+      4,
+      128,
+      1
+     ],
+     "offset": 334600,
+     "bytes": 1024
+    },
+    {
+     "name": "merger_fc2_bias",
+     "dtype": "float16",
+     "shape": [
+      1,
+      1,
+      128
+     ],
+     "offset": 335624,
+     "bytes": 256
+    }
+   ],
+   "role": "vision_merger",
+   "relative_error": {
+    "merger_fc1": 4.1e-05,
+    "merger_fc2": 4.2e-05
+   }
+  },
+  {
+   "file": "vision_pos_embed.safetensors",
+   "bytes": 9424,
+   "sha256": "4f5ceebfdb25dd44161c664d3481590cbe2b909baa7dd711c1bc7450cc89072b",
+   "tensors": [
+    {
+     "name": "pos_embed_table",
+     "dtype": "float16",
+     "shape": [
+      36,
+      128
+     ],
+     "offset": 208,
+     "bytes": 9216
+    }
+   ],
+   "role": "vision_pos_embed"
+  },
+  {
+   "file": "vision_grid_4x4.safetensors",
+   "bytes": 5552,
+   "sha256": "7849ebaf1434d06a9157f5d7416247e3a2815b4493f1532a3c86604b7c1d9dbe",
+   "tensors": [
+    {
+     "name": "pos_embed",
+     "dtype": "float16",
+     "shape": [
+      16,
+      128
+     ],
+     "offset": 432,
+     "bytes": 4096
+    },
+    {
+     "name": "rope_cos",
+     "dtype": "float16",
+     "shape": [
+      16,
+      16
+     ],
+     "offset": 4528,
+     "bytes": 512
+    },
+    {
+     "name": "rope_sin",
+     "dtype": "float16",
+     "shape": [
+      16,
+      16
+     ],
+     "offset": 5040,
+     "bytes": 512
+    }
+   ],
+   "role": "vision_grid",
+   "grid": [
+    4,
+    4
+   ]
+  },
+  {
+   "file": "vision_grid_4x6.safetensors",
+   "bytes": 8112,
+   "sha256": "927a40815654fffa10d6efd2ae3f79add6bb56aba2c7584be4a58050a9a01462",
+   "tensors": [
+    {
+     "name": "pos_embed",
+     "dtype": "float16",
+     "shape": [
+      24,
+      128
+     ],
+     "offset": 432,
+     "bytes": 6144
+    },
+    {
+     "name": "rope_cos",
+     "dtype": "float16",
+     "shape": [
+      24,
+      16
+     ],
+     "offset": 6576,
+     "bytes": 768
+    },
+    {
+     "name": "rope_sin",
+     "dtype": "float16",
+     "shape": [
+      24,
+      16
+     ],
+     "offset": 7344,
+     "bytes": 768
+    }
+   ],
+   "role": "vision_grid",
+   "grid": [
+    4,
+    6
+   ]
+  },
+  {
+   "file": "vision_grid_6x4.safetensors",
+   "bytes": 8112,
+   "sha256": "8d8fb6f2256c207ee87ed9f08cf14a5dbaa382b7ffadc85b13b17387b8055ffc",
+   "tensors": [
+    {
+     "name": "pos_embed",
+     "dtype": "float16",
+     "shape": [
+      24,
+      128
+     ],
+     "offset": 432,
+     "bytes": 6144
+    },
+    {
+     "name": "rope_cos",
+     "dtype": "float16",
+     "shape": [
+      24,
+      16
+     ],
+     "offset": 6576,
+     "bytes": 768
+    },
+    {
+     "name": "rope_sin",
+     "dtype": "float16",
+     "shape": [
+      24,
+      16
+     ],
+     "offset": 7344,
+     "bytes": 768
+    }
+   ],
+   "role": "vision_grid",
+   "grid": [
+    6,
+    4
+   ]
+  }
+ ]
+}

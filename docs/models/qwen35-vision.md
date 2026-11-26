@@ -28,8 +28,9 @@ text:   the same graphs as before; the 8 full attention layers get 3-position (t
 | `weights/vision_grid_<h>x<w>.safetensors` | per preset the tables that depend on the grid only: `pos_embed` [N, 1024], `rope_cos` / `rope_sin` [N, 64] (the external constants of HEAD / BLOCK: no gather and no data-dependent shape in a graph) |
 | `weights/vision_pos_embed.safetensors` | the learned 2304 x 1024 table itself (only the Python reference reads it) |
 
-* Weights: `m2w compile ... --vision-weights int8|int4|float16` (default **int8**: per output row symmetric, `dequantizeLinear` with scale [out, 1] and a zero point of 0: the path the lm_head runs on the NPU;
-  int4: group 128 like the text layers; float16: no quantization). Biases, LayerNorm and the patch-embed bias are float16, the Conv3d kernel is a [1024, 1536] matrix in the (channel, temporal, kh, kw) order.
+* Weights: `m2w compile ... --vision-weights int8|int8g128|int4|float16` (default **int8**: per output row symmetric, `dequantizeLinear` with scale [out, 1] and a zero point of 0: the path the lm_head runs on the NPU;
+  **int8g128**: int8 data in the layout of the int4 path, `[in/128, out, 128]` with a float16 scale `[in/128, out, 1]` per block of 128 input channels (`dequantizeLinear` with an int8 zero point of 0): the
+  same size as int8 plus the block scales, a few outlier rows / blocks no longer spoil a whole row; int4: group 128 like the text layers; float16: no quantization). Biases, LayerNorm and the patch-embed bias are float16, the Conv3d kernel is a [1024, 1536] matrix in the (channel, temporal, kh, kw) order.
   About 300 MB with int8.
 * Presets: `--vision-grids 16x16 24x24 ...` (default 16x16 24x24 32x32 16x24 24x16 24x32 32x24; multiples of 2 patches). `--vision-compute-type float32|float16` (graph interior; default float32),
   `--no-vision` leaves the tower out. `m2w add-vision <package> --model <hf dir>` adds the tower to an existing package without quantizing the text again; `m2w rebuild-graphs` keeps it.
@@ -48,8 +49,8 @@ text:   the same graphs as before; the 8 full attention layers get 3-position (t
 * Rotary: `cos` / `sin` [1,1,N,64] = `[row | col | row | col]` angles (16 + 16 + 16 + 16), `apply_rotary` of the text decoder (rotate half). No permutation of the weights is needed.
 * NPU pitfalls of the text path that apply here and how they are respected: activation x activation matmuls have all dims >= 16 (head dim 64, N >= 64); the residual feeds the LayerNorm and the add (both
   elementwise), never a matmul and an add; no eps below 6e-5 matters (flushed to 0 on the NPU: only a row without variance would notice).
-* `vision_weights=int8` is the NPU-friendly default but the least accurate of the three on this model (see the local notes for numbers: the `fc2` of the blocks suffers most because of the register tokens);
-  `float16` keeps the reference quality, `int4` is clearly worse.
+* `vision_weights=int8` is the NPU-friendly default but the least accurate of the int8 variants on this model (see the local notes for numbers: the `fc2` of the blocks suffers most because of the register tokens);
+  `int8g128` removes most of that loss at the same size, `float16` keeps the reference quality, `int4` is clearly worse.
 
 ## Verification (no device)
 

@@ -7,7 +7,7 @@
 
 What is different from the text blocks (qwen35.py): LayerNorm (mean subtracted, with a bias) instead of RMSNorm, biases everywhere, a 2-D rotary on the patch row / column, no KV cache and no mask.
 The tables that depend on the grid only (the interpolated position embedding of HEAD, the rotary cos / sin of BLOCK) are EXTERNAL constants (frontends/hf_llm/vision.py computes them, the package
-stores them per grid). Linear weights: int8 per row symmetric (`dequantizeLinear`, the path the lm_head runs on the NPU; scale [out, 1]), int4 group 128 or float16 (compile option
+stores them per grid). Linear weights: int8 per row symmetric (`dequantizeLinear`, the path the lm_head runs on the NPU; scale [out, 1]), int8g128 (int8 with a scale per block of 128 input channels), int4 group 128 or float16 (compile option
 --vision-weights); biases, LayerNorm and the patch-embed bias are float16.
 
 NPU notes (carried over from the text path; the numerics have to be checked on the device, bench/raw/qwen35vision.html): float32 graphs run as float16 there, and the activations of this ViT leave
@@ -30,7 +30,7 @@ from .decoder import Ctx, DecoderDims, GraphOptions, apply_rotary
 VISION_NORM_SCALE = 1.0 / 16.0          # LayerNorm of the blocks: the input is scaled by this first (and eps by its square); the result does not depend on it, the float16 range of the mean / squares does
 VISION_MERGER_NORM_SCALE = 1.0 / 64.0   # the merger's LayerNorm sees the output of the last block (|x| up to 5300, row rms 2 .. 166)
 GELU_CLAMP = 8.0                        # the polynomial of the tanh GELU is formed on x clamped to +-GELU_CLAMP (x^3 overflows float16 above 40; tanh is 1 for |inner| > 5)
-WEIGHT_FORMATS = ("int8", "int4", "float16")
+WEIGHT_FORMATS = ("int8", "int8g128", "int4", "float16")   # int8: per output row; int8g128: int8 with a scale per block of 128 input channels (the int4 layout); int4: group 128; float16: as is
 TABLES = ("pos_embed", "rope_cos", "rope_sin")   # the per-grid tensors of the package (weights/vision_grid_<grid>.safetensors), the external constants of HEAD (pos_embed) and BLOCK (rope_*)
 
 
@@ -53,11 +53,13 @@ def _ctx(b: GraphBuilder, spec, compute_type: str) -> Ctx:
 def linear_specs(name: str, in_ch: int, out_ch: int, weights: str, group: int = 128) -> list:
     if weights == "int8":
         return [(f"{name}_weight", "int8", (out_ch, in_ch)), (f"{name}_scale", "float16", (out_ch, 1))]
-    if weights == "int4":
-        return [(f"{name}_weight", "int4", (in_ch // group, out_ch, group)), (f"{name}_scale", "float16", (in_ch // group, out_ch, 1))]
+    if weights in ("int4", "int8g128"):
+        if in_ch % group:
+            raise ValueError(f"{name}: {in_ch} input channels is not a multiple of the group size {group}")
+        return [(f"{name}_weight", "int4" if weights == "int4" else "int8", (in_ch // group, out_ch, group)), (f"{name}_scale", "float16", (in_ch // group, out_ch, 1))]
     if weights == "float16":
         return [(f"{name}_weight", "float16", (out_ch, in_ch))]
-    raise ValueError(f"unknown vision weight format '{weights}' (int8 | int4 | float16)")
+    raise ValueError(f"unknown vision weight format '{weights}' ({' | '.join(WEIGHT_FORMATS)})")
 
 
 def _norm_specs(name: str, width: int) -> list:
@@ -101,9 +103,10 @@ def linear(c: Ctx, x: Value, w: dict, name: str, in_ch: int, out_ch: int, rows: 
     elif weights == "int8":
         zero_point = b.constant("int8", (out_ch, 1), fill=0, cache_key=("zp", "int8", out_ch))
         matrix = c.to_compute(b.dequantize_linear(w[f"{name}_weight"], w[f"{name}_scale"], zero_point))
-    else:
+    else:   # int4 | int8g128: blocks [groups, out, 128], one scale per block
         groups = in_ch // c.dims.group_size
-        dequantized = b.dequantize_linear(w[f"{name}_weight"], w[f"{name}_scale"], c.zero_point((groups, out_ch, 1)))
+        zero_point = c.zero_point((groups, out_ch, 1)) if weights == "int4" else b.constant("int8", (groups, out_ch, 1), fill=0, cache_key=("zp", "int8", groups, out_ch))
+        dequantized = b.dequantize_linear(w[f"{name}_weight"], w[f"{name}_scale"], zero_point)
         matrix = c.to_compute(b.reshape(b.transpose(dequantized, [1, 0, 2]), [out_ch, in_ch]))
     y = b.reshape(b.gemm(b.reshape(x, [rows, in_ch]), matrix, b_transpose=True), [1, rows, out_ch])
     return b.add(y, c.to_compute(w[f"{name}_bias"]))
