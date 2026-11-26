@@ -34,8 +34,40 @@ text:   the same graphs as before; the 8 full attention layers get 3-position (t
   About 300 MB with int8.
 * Presets: `--vision-grids 16x16 24x24 ...` (default 16x16 24x24 32x32 16x24 24x16 24x32 32x24; multiples of 2 patches). `--vision-compute-type float32|float16` (graph interior; default float32),
   `--no-vision` leaves the tower out. `m2w add-vision <package> --model <hf dir>` adds the tower to an existing package without quantizing the text again; `m2w rebuild-graphs` keeps it.
-* The preset for an image: `choose_grid` (python `frontends/hf_llm/vision.py`, TS `chooseGrid`): the closest aspect ratio first (log distance; within 0.1 of the best counts as the same), then the closest
-  pixel count. The image is resized to exactly `grid * 16` pixels (PIL bicubic in the Python reference, a canvas in the browser; the vision graphs are verified on the SAME pixels).
+* The preset for an image is chosen AUTOMATICALLY (`choose_grid`, python `frontends/hf_llm/vision.py`, TS `chooseGrid`; see "Choosing the grid" below): nobody has to know the preset names. The image is resized to
+  exactly `grid * 16` pixels (PIL bicubic in the Python reference, a canvas in the browser; the vision graphs are verified on the SAME pixels).
+
+## Choosing the grid
+
+The graphs are static, so a picture is resized to one of the package's presets (`--vision-grids`). Which one is decided by the runtime from the width and height of the picture and a **detail level**
+(`chooseGrid(grids, width, height, patch, detail)` in `protocol.ts`, `choose_grid` in `vision.py`; `tests/golden/protocol_vectors.json` keeps the two identical):
+
+1. **size**: `target = min(patches of the picture, budget)` with the budget of the detail level: `low` 256 patches (16x16, 64 image tokens, fastest), `auto` 576 (24x24, 144 tokens, the default), `high` 1024 (32x32, 256 tokens: text,
+   small details). Presets with more than 1.5 x `target` patches are out (a picture is never blown up far beyond its own size; the smallest preset always stays, so a 200 x 150 thumbnail gets 16x16);
+2. **aspect ratio**: of the rest the closest log aspect ratio (presets within 0.1 of the best count as equal): the picture is stretched a little to the preset's ratio, never cropped or padded;
+3. of those the one whose patch count is closest to the `target` (ties go to the larger).
+
+The graphs of a preset are built **lazily** on its first use (three graphs, a few seconds on a device; the weights are shared by all presets, so nothing is loaded or compiled for presets that are never used), so the
+package should simply offer every preset it can; the page's grid field is gone. `?visionGrids=24x24,16x24` is an advanced URL override that only restricts the candidates (one preset = forced), `?detail=auto|low|high` sets the level.
+
+| preset (h x w) | patches | image tokens | resized pixels (w x h) | aspect (w:h) | vision cost (estimated from the MAC count, 16x16 = 1) | chosen for |
+|---|---|---|---|---|---|---|
+| 16x16 | 256 | 64 | 256 x 256 | 1.00 | 1.0 | square pictures at `low`; any square picture below ~ 310 x 310 px (a thumbnail is never blown up) |
+| 16x24 | 384 | 96 | 384 x 256 | 1.50 | 1.5 | landscape 3:2 and wider (16:9, banners 3:1 are stretched to 3:2); everything wide at `low` |
+| 24x16 | 384 | 96 | 256 x 384 | 0.67 | 1.5 | portrait 2:3 and taller |
+| 24x24 | 576 | 144 | 384 x 384 | 1.00 | 2.4 | square pictures from ~ 310 x 310 px up at `auto`, and at `high` below ~ 520 x 520 px |
+| 24x32 | 768 | 192 | 512 x 384 | 1.33 | 3.2 | 4:3 landscape at `auto` / `high` from ~ 370 x 280 px up (screenshots, scans, documents); smaller ones get 16x24 |
+| 32x24 | 768 | 192 | 384 x 512 | 0.75 | 3.2 | 3:4 portrait at `auto` / `high` (phone screenshots, pages) |
+| 32x32 | 1024 | 256 | 512 x 512 | 1.00 | 4.5 | square pictures of ~ 520 x 520 px and more at `high` only |
+
+The cost class is the order of magnitude of the vision encode (24 blocks over N patches: linear in N plus a small N^2 attention term, about 14 % of the work at N = 1024), not a prediction; the language model then
+prefills `prompt + image tokens` (prefill chunks of 64 / 128 tokens: 64 image tokens fill one chunk, 256 fill two to four). Examples of what the rule picks (low / auto / high): 1000 x 1000 -> 16x16 / 24x24 / 32x32;
+1500 x 1000 and 1920 x 1080 -> 16x24 at every level; 1280 x 960 -> 16x24 / 24x32 / 24x32; 1824 x 2358 -> 24x16 / 32x24 / 32x24; 400 x 400 -> 16x16 / 24x24 / 24x24; 200 x 150 -> 16x16.
+
+Guidance: a package should offer all seven default presets (compile default; the cost of an unused preset is its three small graph JSON files). Small text needs resolution, not a bigger model: use `high` for OCR (a 4:3 page still
+tops out at 24x32 = 512 x 384 pixels, so for dense text prefer a portrait / landscape scan that matches a preset closely). A wide picture (16:9, 3:1) is stretched to 3:2 by the shipped presets; if wide pictures matter,
+add presets with `m2w add-vision <package> --model <hf dir> --vision-grids 16x16 24x24 32x32 16x24 24x16 24x32 32x24 16x32 32x16 24x36 36x24` (2:1 pictures get 16x32 = 128 tokens, 3:2 pictures at `high` get 24x36 =
+216 tokens; `add-vision` repacks the weights, the text is untouched). The test suite `bench/raw/vision-suite.html` runs every case at a chosen detail level and reports the grid per case.
 
 ## The vision graphs (`builders/qwen35_vision.py`)
 
@@ -83,22 +115,27 @@ checkpoint.
 ## The browser runtime (`src/runtime/vision.ts`, `llm-qwen35.ts`, `protocol.ts`)
 
 ```ts
-const llm = await Qwen35LLM.load(url, { vision: { grids: [[24, 24], [16, 24]] } });   // vision: true = every preset of the package; absent = text only (nothing of the tower is loaded)
-const image = llm.prepareImage(await createImageBitmap(file));                       // preset by aspect ratio / size, canvas resize, normalise, patchify -> { patches, grid, tokens }
+const llm = await Qwen35LLM.load(url, { vision: true });                             // true = the tower; a picture may get any preset of the package ({ grids: [...] } restricts them, { preload: [...] } builds some now); absent = text only
+const image = llm.prepareImage(await createImageBitmap(file), undefined, 'auto');    // preset from the size / aspect ratio / detail (low | auto | high), canvas resize, normalise, patchify -> { patches, grid, tokens }
 const ids = tokenizer.encode(buildPrompt(format, [{ user: 'What is this?', images: 1 }], undefined, new Date(), llm.pkg.model.vision.image_prompt));
 for await (const token of llm.generate(ids, { images: [image] })) { ... }             // ONE <|image_pad|> in `ids` per image: the runtime expands it
 ```
 
-* `VisionTower` (vision.ts): uploads `vision_head` / `vision_block_NNN` / `vision_merger` once, builds HEAD / BLOCK / MERGER of every requested preset (the grid tables are external constants read from the
-  `vision_grid` shard), and per image dispatches HEAD, the same BLOCK graph `depth` times with the weights of layer i bound by name, MERGER; the image tokens are read back as float16 rows. Two hidden-state
+* `VisionTower` (vision.ts): uploads `vision_head` / `vision_block_NNN` / `vision_merger` once; HEAD / BLOCK / MERGER of a preset are built on its first use (`ensure(grid)`, called by `encode`; progress
+  `build vision 24x16 head | block | merger`; the grid tables are external constants read from the `vision_grid` shard), and per image dispatches HEAD, the same BLOCK graph `depth` times with the weights of layer i bound by name, MERGER; the image tokens are read back as float16 rows. Two hidden-state
   tensors take turns (all of them are kept readable with `VisionTower.debugReadback`, for `bench/raw/qwen35vision.html`).
 * `Qwen35LLM.prefill` expands the pad tokens (`protocol.ts expandImageTokens`), computes the positions (`mropePositions`), runs the tower, and writes the image rows into the prefill chunks in place of the
   embedding rows (a run of image tokens may straddle chunk boundaries); the rope tables of the chunks are `ropeTablesMrope`; `step` uses `position + ropeDelta`. The same graphs, controls and states as for text.
-  Stats: `imageTokens`, `visionMs` (inside `prefillMs`).
+  Stats: `imageTokens`, `visionMs`, `visionBuildMs` (both inside `prefillMs`; the first use of a preset builds its graphs, `visionMs` is the encode alone).
 * `protocol.ts` mirrors `protocol.py` (`chooseGrid`, `expandImageTokens`, `mropePositions`, `mropeAxes`, `ropeTablesMrope`, `patchify`); `tests/golden/protocol_vectors.json` keeps the two identical.
 * Preprocessing in the browser (`prepareImage`): canvas `drawImage` to exactly `grid * 16` pixels with smoothing, RGBA -> `(v / 255 - mean) / std`, `patchify`. The Python reference resizes with PIL bicubic: the two differ a
   little at the pixel level (the vision graphs are verified on the SAME pixels).
-* Pages: `bench/raw/chat.html` (package mode, a package with an image tower): an image picker and the grid presets to load (read at the first load); `bench/raw/qwen35vision.html` (+ `python/tools/qwen35_vision_check.py
+* Pages: `bench/raw/chat.html` (package mode, a package with an image tower) has two tabs sharing ONE loaded model: **Chat** (text only) and **Vision** (picture from a file / drop / paste / the suite's samples, the
+  picture drawn at the pixels of the preset the runtime chose with its image-token blocks and a caption saying why, the Detail select, a question box with quick questions, the answer, the time split preprocess / graph build /
+  vision encode / prefill / TTFT / TPOT); URL: `tab=vision`, `detail=auto|low|high`, `visionGrids=` (advanced restriction), `vision=0` (no tower), with autoRun `image=<url>&question=<text>`.
+  `bench/raw/vision-suite.html` (cases in `bench/raw/vision-suite/`, made by `python/tools/make_vision_suite.py`): every case through the real path, PASS / FAIL against its expected substrings, grid / tokens / timing per case
+  and a summary per grid (`model=`, `detail=`, `grids=`, `case=`, `repeat=`, `maxNewTokens=`). `bench/raw/qwen35vision.html` (+ `python/tools/qwen35_vision_check.py
   --export`): the device against the interpreter, hidden state after HEAD and after every block, image tokens (relative error, max abs, non-finite values, cosine per token).
+  `node scripts/page-smoke.mjs "<page url>" --wait Done` runs a page in headless Chrome against a validating mock of WebNN and the tiny package (no device: checks the page logic only).
 * Tests: `src/runtime/llm-qwen35-vision.test.ts` on the validating mock of WebNN (every weight / table / activation of every dispatch is checked by name, shape and dtype; image rows at the right prompt positions
   across a chunk boundary; MRoPE tables of the chunks; decode with `ropeDelta`; the canvas preprocessing with a stubbed `OffscreenCanvas`), `protocol.test.ts` (golden vectors).

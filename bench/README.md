@@ -31,6 +31,8 @@ Measurement notes with hardware-specific numbers are kept in `docs/npu-local/` (
 - `run_bench.ps1`: starts `server.py`, launches Chrome on a bench page, samples memory, waits for `done` (see the header for options). Env: `BENCH_CHROME_DIR`, `BENCH_DATA_DIR`.
 - `bench.html` / `bench.js`, `gen_blocks.py`, `prep.py`, `prep_prompt.py`, `run_*.sh`: ONNX block benchmarks through onnxruntime-web (need `BENCH_QWEN_DIR` for the Qwen3 ONNX / tokenizer files).
 - `raw/download.html`: download throughput of a package for different numbers of files in flight and byte ranges per big file (`LoadOptions.parallelDownloads` / `downloadSegments`); run it against the server or CDN the package will be served from.
+- `../scripts/page-smoke.mjs`: runs a page of `raw/` in headless Chrome / Edge against a validating mock of WebNN and the tiny Qwen3.5 package (no device), e.g. `node scripts/page-smoke.mjs "bench/raw/vision-suite.html?model=tiny-qwen35-pkg&maxNewTokens=3&maxLength=128&chunk=16" --wait Done`: checks that the page logic runs, not numbers.
+- `raw/vision-suite.html`: the image test suite of the Qwen3.5 image input on the device (cases in `raw/vision-suite/`), see `docs/models/qwen35-vision.md`.
 - `tools/diff-handwritten.mjs`: structural diff between the hand-written graphs and the graphs the Python compiler writes (no browser needed).
 - `tools/*.py`: OpenVINO IR helpers (weight extraction, op summary, profiling, zero-point probe).
 - `../docs/npu/patches/`: patch for the onnxruntime WebNN EP (static GQA, chunked prefill).
