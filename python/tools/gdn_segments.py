@@ -111,7 +111,10 @@ def segment_graphs(dtype):
 
     out["whole"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_{dtype}", solve="batched")
     out["whole_blockdiag"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_blockdiag_{dtype}", solve="blockdiag")
+    out["whole_neumann16"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_neumann16_{dtype}", solve="neumann16")
+    out["whole_neumann16_add"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_neumann16add_{dtype}", solve="neumann16-add")
     out["whole_npuw64"] = build_core_graph(H, DK, DV, T, 64, dtype, name=f"seg_whole_npuw64_{dtype}", solve="npuw")
+    out["whole_npuw64_aug"] = build_core_graph(H, DK, DV, T, 64, dtype, name=f"seg_whole_npuw64aug_{dtype}", solve="npuw-aug")
     out["whole_npuw32"] = build_core_graph(H, DK, DV, T, 32, dtype, name=f"seg_whole_npuw32_{dtype}", solve="npuw")
     out["whole_affine"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_affine_{dtype}", solve="batched", loop="affine")
 
@@ -154,7 +157,8 @@ def main():
         "decay": {"g": values["g"]}, "a_matrix": {n: values[n] for n in ("k", "beta", "decay")}, "rhs": {n: values[n] for n in ("k", "v", "beta", "gc")},
         "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("aug", "aug2", "plain")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds, "state_loop_affine": loop_feeds,
         "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_affine": graph_feeds((q, k, v, g, beta), state0, "float32"),
-        "whole_npuw64": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_npuw32": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
+        "whole_neumann16": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_neumann16_add": graph_feeds((q, k, v, g, beta), state0, "float32"),
+        "whole_npuw64": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_npuw32": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_npuw64_aug": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
     }
     names = []
 

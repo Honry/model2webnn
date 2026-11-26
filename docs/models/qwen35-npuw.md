@@ -83,6 +83,11 @@ Two things in the compiler's form are worth knowing (numbers from `tools/gdn_seg
   first (`last_state * g.exp()`, then `kv_mem`). The two recurrences differ by ~1 % on typical data and ~5 % on fast decays (the `npuw-excl` graph vs the HF reference in the interpreter).
   Whether the IR's loop body (which the pass matches) is written with the decayed or the undecayed state was not checked here; the package follows HF.
 
+* **The device does not follow the interpreter here.** On the NPU the chunk-64 / chunk-32 doubling forms were unusable even on typical data (tens of percent off, the float16 interpreter says ~1e-3) and blew up on
+  nearly parallel keys; the block-diagonal solve (`solve_block_diagonal`) was an order of magnitude less accurate than the row substitution on typical data, blew up on nearly parallel keys and broke layer 0 of the
+  real model. Product-form inverses (long chains of matmuls) cannot be validated with the interpreter's float16; the row substitution is the only solve whose device numbers match it. They are faster (core ~2 ms vs ~4 ms),
+  at the price of correctness. The measurements themselves stay in the local notes.
+
 ## 3. What was taken from it
 
 * The padding handling was already the same idea; the pass confirms that `g`, `beta` * mask is the right way (identity step) and that the conv history must be written in front of the

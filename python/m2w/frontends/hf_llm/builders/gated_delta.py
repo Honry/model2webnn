@@ -182,7 +182,12 @@ def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value,
     a = b.mul(b.mul(b.matmul(k_beta, k_t), decay), strict)
     gate = b.exp(gc)
     rhs = b.concat([v_beta, b.mul(k_beta, gate)], 3)
-    solved = solve_block_diagonal(b, a, rhs, dtype, sub // 2) if solver == "blockdiag" else forward_substitution(b, a, rhs, dtype)
+    if solver == "blockdiag":
+        solved = solve_block_diagonal(b, a, rhs, dtype, sub // 2)
+    elif solver in ("neumann", "neumann-add"):   # (I + A)^-1 = (I - A)(I + A^2)(I + A^4)(I + A^8): 3 squarings + 3 products, no dependent row steps; "-add": I + X as an add (the NPU is wrong when a value feeds a matmul AND an add)
+        solved = b.matmul(unit_lower_inverse(b, b.mul(a, b.scalar(-1.0, dtype, 4)), sub, dtype, style="plain" if solver == "neumann-add" else "aug"), rhs)
+    else:
+        solved = forward_substitution(b, a, rhs, dtype)
     value, k_cumdecay = b.slice(solved, [0, 0, 0, 0], [1, heads * n, sub, dv]), b.slice(solved, [0, 0, 0, dv], [1, heads * n, sub, dk])
     q_gate = b.mul(q4, gate)
     attn = b.mul(b.matmul(q4, k_t), decay)                                          # q k^T * decay, lower incl. the diagonal
@@ -225,7 +230,7 @@ def _affine_state_loop(b: GraphBuilder, value5, kcd5, qg5, attn5, kdt5, total5, 
     return b.reshape(out, [1, heads, n * sub, dv]), b.reshape(state5, [1, heads, dk, dv])
 
 
-def gated_delta_npu_compiler(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, chunk: int, dtype: str, exclusive: bool = False):
+def gated_delta_npu_compiler(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, chunk: int, dtype: str, exclusive: bool = False, aug_add: bool = False):
     """The chunked form that the NPU compiler's pass `ChunkGatedDeltaRuleLoop` (npu_compiler: src/vpux_compiler/src/dialect/IE/transforms/passes/chunk_gated_delta_rule_loop.cpp) makes of the per-token Loop of an
     OpenVINO IR (chunk-size option, default 64), written with WebNN operators, as a measurement of that design on the device (docs/models/qwen35-npuw.md):
       * chunks of `chunk` tokens one after the other (T / chunk dependent steps, 2 for 128 tokens), NO sub-chunk batching: nothing is hoisted out of the dependent chain;
@@ -253,7 +258,12 @@ def gated_delta_npu_compiler(b: GraphBuilder, q: Value, k: Value, v: Value, g: V
         p, power = eye, lmat
         rounds = max(1, (chunk - 1).bit_length())
         for r in range(rounds):
-            p = b.add(p, b.matmul(power, p))
+            lp = b.matmul(power, p)
+            if aug_add:   # P + Lp P as matmul([P | Lp P], [I ; I]): the NPU is wrong when a value feeds a matmul AND an add (P does)
+                stack = b.constant(dtype, [2 * chunk, chunk], data=np.concatenate([np.eye(chunk, dtype=int), np.eye(chunk, dtype=int)]).reshape(-1).tolist(), cache_key=("ii", chunk, dtype))
+                p = b.matmul(b.concat([b.expand(p, list(lp.shape)) if len(p.shape) < 4 else p, lp], 3), stack)
+            else:
+                p = b.add(p, lp)
             if r < rounds - 1:
                 power = b.matmul(power, power)
         hk = b.matmul(kc, state)
@@ -270,7 +280,7 @@ def gated_delta_npu_compiler(b: GraphBuilder, q: Value, k: Value, v: Value, g: V
 
 def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann", loop: str = "steps"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "blockdiag": "blockdiag", "recurrent": "recur", "npuw": "npuw", "npuw-excl": "npuwx"}[solve]
+    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "blockdiag": "blockdiag", "neumann16": "neumann16", "neumann16-add": "neumann16a", "recurrent": "recur", "npuw": "npuw", "npuw-excl": "npuwx", "npuw-aug": "npuwa"}[solve]
     b = GraphBuilder(name or (f"gdn_core_t{tokens}_{kind}_{dtype}" if solve == "recurrent" else f"gdn_core_t{tokens}_c{sub}_{kind}{'_affine' if loop == 'affine' else ''}_{dtype}{'_probe' if probe else ''}"))
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
@@ -281,10 +291,11 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     probes = {} if probe else None
     if solve == "recurrent":
         out, new_state = gated_delta_unrolled(b, q, k, v, g, beta, state)
-    elif solve in ("npuw", "npuw-excl"):
-        out, new_state = gated_delta_npu_compiler(b, q, k, v, g, beta, state, sub, dtype, exclusive=solve == "npuw-excl")
-    elif solve in ("batched", "blockdiag"):
-        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype, "blockdiag" if solve == "blockdiag" else "substitution", loop)
+    elif solve in ("npuw", "npuw-excl", "npuw-aug"):
+        out, new_state = gated_delta_npu_compiler(b, q, k, v, g, beta, state, sub, dtype, exclusive=solve == "npuw-excl", aug_add=solve == "npuw-aug")
+    elif solve in ("batched", "blockdiag", "neumann16", "neumann16-add"):
+        solver = {"batched": "substitution", "blockdiag": "blockdiag", "neumann16": "neumann", "neumann16-add": "neumann-add"}[solve]
+        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype, solver, loop)
     else:
         out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
     for key, value in (probes or {}).items():
