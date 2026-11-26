@@ -110,6 +110,24 @@
   .active { outline: 2px solid #f2c744; background: #2a2616; }
   .legend { display: flex; gap: 18px; color: #aeb5bd; font-size: 14px; font-weight: 600; margin-bottom: 6px; }
   .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  /* tabs (packages with an image tower): Chat | Vision share one loaded model */
+  #tabs { display: flex; gap: 4px; margin: 0 0 6px; border-bottom: 1px solid var(--line); }
+  #tabs button { border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: transparent; padding: 7px 22px; color: var(--dim); font-size: 15px; }
+  #tabs button.active { background: var(--card); border-color: var(--line); color: var(--text); margin-bottom: -1px; }
+  #tabs button.active::after { content: ""; display: block; height: 2px; background: var(--accent); margin: 4px -22px -8px; }
+
+  /* Vision tab */
+  #dropZone { border: 2px dashed #3a4048; border-radius: 8px; padding: 18px 22px; color: var(--dim); cursor: pointer; min-width: 280px; text-align: center; }
+  #dropZone.over, #dropZone:hover, #dropZone:focus { border-color: var(--accent); color: var(--text); outline: 0; }
+  .visionview { display: grid; grid-template-columns: minmax(260px, 420px) 1fr; gap: 16px; margin-top: 12px; align-items: start; }
+  #modelView { max-width: 100%; max-height: 420px; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
+  #visionCaption { color: #c3c9cf; font-size: 14.5px; line-height: 1.6; }
+  #visionAnswer { white-space: pre-wrap; background: #14171a; border: 1px solid var(--line); border-radius: 6px; padding: 12px; min-height: 80px; font-size: 16px; margin-top: 10px; }
+  #visionTiming td:nth-child(2) { font-weight: 700; }
+  .v-host td:nth-child(2) { color: #ffb454; } .v-device td:nth-child(2) { color: #5af78e; } .v-total td:nth-child(2) { color: #fff; } .v-total td { border-top: 1px solid #3a4048; font-weight: 700; } .v-dim td { color: var(--dim); }
+  .quick { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .quick button { padding: 3px 12px; font-weight: 500; }
 </style>
 </head>
 <body>
@@ -118,6 +136,9 @@
   <h1>Qwen3-4B on WebNN <small>NPUW-style subgraph pipeline</small></h1>
   <div style="display:flex;align-items:center;gap:12px"><label class="field" style="flex-direction:row;align-items:center;gap:6px;min-width:0"><span>Model<i class="tip" data-tip="The built-in hand-written Qwen3-4B graphs offer every option below.\nA package (m2w compile) offers what it was compiled with: other models such as Aion, and Qwen3-4B through the generic runtime. Changing it reloads the page.">i</i></span><select id="modelSelect"></select></label><label class="field" style="flex-direction:row;align-items:center;gap:6px;min-width:0"><span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></span><select id="deviceSelect"></select></label><div id="status">loading…</div></div>
 </header>
+
+<!-- Chat | Vision: only for a package with an image tower; both tabs use the model loaded below (switching does not reload) -->
+<nav id="tabs" style="display:none"><button type="button" data-tab="chat" class="active">Chat</button><button type="button" data-tab="vision">Vision</button></nav>
 
 <!-- ============ model: what to build ============ -->
 <section class="card">
@@ -147,17 +168,13 @@
   </details>
 </section>
 
+<div id="panel-chat">
 <!-- ============ prompt ============ -->
 <section class="card">
   <div class="title">Prompt</div>
   <div class="fields" style="margin-bottom:8px">
     <label class="field"><span>Preset</span><select id="promptPreset" style="min-width:260px"></select></label>
     <span id="promptTokenCount" style="color:var(--good);font-size:14px;font-weight:600;padding-bottom:6px"></span>
-  </div>
-  <div class="fields" id="imageRow" style="display:none;margin-bottom:8px">
-    <label class="field"><span>Image<i class="tip" data-tip="Qwen3.5 packages with an image tower: the picture is resized to the best grid preset in the browser (canvas), turned into image tokens by the vision graphs and written into the prompt in place of the &lt;|image_pad|&gt; token.\nNo file chosen = a text-only prompt.">i</i></span><input type="file" id="imageInput" accept="image/*"></label>
-    <label class="field"><span>Image grids<i class="tip" data-tip="The vision graph presets (patches of 16 px, HxW) to build and load: more presets = more compile time and memory, but a better fit for the pictures. 'none' loads no image tower. Read when the model is loaded.">i</i></span><input id="visionGridsInput" placeholder="24x24" style="min-width:160px"></label>
-    <img id="imagePreview" alt="" style="max-height:72px;display:none;border-radius:6px"><span id="imageInfo" style="font-size:13px;padding-bottom:6px"></span>
   </div>
   <textarea id="prompt"></textarea>
   <div class="actions">
@@ -251,10 +268,47 @@
   <table id="profileTable"><tr><th>segment</th><th>JS enqueue</th><th>device wait</th><th>total ms</th></tr></table>
 </section>
 
+</div><!-- /panel-chat -->
+
+<!-- ============ Vision tab: a picture + a question (packages with an image tower) ============ -->
+<div id="panel-vision" style="display:none">
+<section class="card">
+  <div class="title">Picture</div>
+  <div class="fields">
+    <div id="dropZone" tabindex="0" role="button">Drop a picture here, paste one (Ctrl+V) or click to choose a file<input type="file" id="imageInput" accept="image/*" hidden></div>
+    <label class="field"><span>Sample<i class="tip" data-tip="The pictures of the image test suite (bench/raw/vision-suite): choosing one also fills in its question.">i</i></span><select id="sampleSelect" style="min-width:170px"></select></label>
+    <label class="field"><span>Detail<i class="tip" data-tip="How many image tokens the picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.\nAuto: up to 24x24 patches = 144 image tokens.\nLow (fast): up to 16x16 = 64 tokens.\nHigh: up to 32x32 = 256 tokens (small text, fine details; slower, and no gain for a picture smaller than that).\nPictures are never blown up far beyond their own size.">i</i></span>
+      <select id="detailSelect"><option value="auto">Auto</option><option value="low">Low (fast)</option><option value="high">High (text, small details)</option></select></label>
+    <label style="padding-bottom:6px"><input type="checkbox" id="showBlocks" checked> show the image-token blocks</label>
+  </div>
+  <div class="visionview">
+    <canvas id="modelView" style="display:none" title="what the model sees: the picture resized to the pixels of the chosen grid; every block is one image token"></canvas>
+    <div id="visionCaption">No picture yet.</div>
+  </div>
+</section>
+<section class="card">
+  <div class="title">Question</div>
+  <div class="quick">
+    <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read all text (OCR)</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
+  </div>
+  <textarea id="visionQuestion"></textarea>
+  <div class="actions">
+    <label>Max new tokens <input id="visionMaxNew" type="number" value="128"></label>
+    <button id="visionRun" class="primary" disabled>Generate</button>
+    <span style="color:var(--dim);font-size:13.5px">loads the model first when it is not loaded yet</span>
+  </div>
+  <div id="visionAnswer"></div>
+</section>
+<section class="card">
+  <div class="title">Timing</div>
+  <table id="visionTiming"><tr><th>step</th><th>time</th></tr><tr class="v-dim"><td colspan="2" style="text-align:left">Generate an answer to see the split.</td></tr></table>
+</section>
+</div><!-- /panel-vision -->
+
 <details class="card">
   <summary>Log</summary>
   <div id="log"></div>
 </details>
-<script type="module" src="chat.js?v=20261126b"></script>
+<script type="module" src="chat.js?v=20261126c"></script>
 </body>
 </html>
