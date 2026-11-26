@@ -61,15 +61,20 @@ package should simply offer every preset it can; the page's grid field is gone. 
 | 24x32 | 768 | 192 | 512 x 384 | 1.33 | 3.2 | 4:3 landscape at `auto` / `high` from ~ 370 x 280 px up (screenshots, scans, documents); smaller ones get 16x24 |
 | 32x24 | 768 | 192 | 384 x 512 | 0.75 | 3.2 | 3:4 portrait at `auto` / `high` (phone screenshots, pages) |
 | 32x32 | 1024 | 256 | 512 x 512 | 1.00 | 4.5 | square pictures of ~ 520 x 520 px and more at `high` only |
+| 16x32 | 512 | 128 | 512 x 256 | 2.00 | 2.0 | 2:1 and wider pictures (banners, wide crops) at `auto` / `high` |
+| 32x16 | 512 | 128 | 256 x 512 | 0.50 | 2.0 | 1:2 and taller pictures |
+| 18x32 | 576 | 144 | 512 x 288 | 1.78 | 2.4 | 16:9 landscape at `auto`: screens, screenshots, video frames |
+| 32x18 | 576 | 144 | 288 x 512 | 0.56 | 2.4 | 9:16 portrait (phone screenshots) at `auto` |
+| 24x36 | 864 | 216 | 576 x 384 | 1.50 | 3.8 | 3:2 landscape at `high` (and at `auto` for large 3:2 pictures) |
+| 36x24 | 864 | 216 | 384 x 576 | 0.67 | 3.8 | 2:3 portrait at `high` |
+| 24x42 | 1008 | 252 | 672 x 384 | 1.75 | 4.5 | 16:9 landscape at `high`: the most detail for a screenshot |
+| 42x24 | 1008 | 252 | 384 x 672 | 0.57 | 4.5 | 9:16 portrait at `high` |
 
 The cost class is the order of magnitude of the vision encode (24 blocks over N patches: linear in N plus a small N^2 attention term, about 14 % of the work at N = 1024), not a prediction; the language model then
 prefills `prompt + image tokens` (prefill chunks of 64 / 128 tokens: 64 image tokens fill one chunk, 256 fill two to four). Examples of what the rule picks (low / auto / high): 1000 x 1000 -> 16x16 / 24x24 / 32x32;
 1500 x 1000 and 1920 x 1080 -> 16x24 at every level; 1280 x 960 -> 16x24 / 24x32 / 24x32; 1824 x 2358 -> 24x16 / 32x24 / 32x24; 400 x 400 -> 16x16 / 24x24 / 24x24; 200 x 150 -> 16x16.
 
-Guidance: a package should offer all seven default presets (compile default; the cost of an unused preset is its three small graph JSON files). Small text needs resolution, not a bigger model: use `high` for OCR (a 4:3 page still
-tops out at 24x32 = 512 x 384 pixels, so for dense text prefer a portrait / landscape scan that matches a preset closely). A wide picture (16:9, 3:1) is stretched to 3:2 by the shipped presets; if wide pictures matter,
-add presets with `m2w add-vision <package> --model <hf dir> --vision-grids 16x16 24x24 32x32 16x24 24x16 24x32 32x24 16x32 32x16 24x36 36x24` (2:1 pictures get 16x32 = 128 tokens, 3:2 pictures at `high` get 24x36 =
-216 tokens; `add-vision` repacks the weights, the text is untouched). The test suite `bench/raw/vision-suite.html` runs every case at a chosen detail level and reports the grid per case.
+Guidance: a package offers all fifteen default presets (compile default; the cost of an unused preset is its three small graph JSON files and a table of a few MB). Small text needs resolution, not a bigger model: use `high` for OCR. A 16:9 screenshot at `high` gets 24x42 = 672 x 384 pixels (252 image tokens), at `auto` 18x32 = 512 x 288 (144 tokens). `m2w add-vision <package> --model <hf dir> [--vision-grids ...]` adds or changes the presets of an existing package (it repacks the vision weights, the text is untouched). The test suite `bench/raw/vision-suite.html` runs every case at a chosen detail level and reports the grid per case.
 
 ## The vision graphs (`builders/qwen35_vision.py`)
 

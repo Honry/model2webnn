@@ -12,7 +12,9 @@ import math
 
 import numpy as np
 
-DEFAULT_GRIDS = ((16, 16), (24, 24), (32, 32), (16, 24), (24, 16), (24, 32), (32, 24))   # (grid_h, grid_w) in patches: 256 / 576 / 1024 patches, the 3:2 and 2:3 rectangles
+DEFAULT_GRIDS = ((16, 16), (24, 24), (32, 32), (16, 24), (24, 16), (24, 32), (32, 24),   # (grid_h, grid_w) in patches: 256 / 576 / 1024 patches, the 3:2 and 2:3 rectangles
+                 (16, 32), (32, 16), (24, 36), (36, 24),                                 # 2:1 and 3:2 pictures (wide screenshots, banners) and their portrait counterparts: 512 / 864 patches
+                 (18, 32), (32, 18), (24, 42), (42, 24))                                 # 16:9 / 9:16 (screens, video frames): 576 / 1008 patches
 ROTARY_THETA = 10000.0   # Qwen3_5VisionRotaryEmbedding
 
 

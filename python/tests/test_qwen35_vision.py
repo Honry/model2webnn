@@ -151,8 +151,15 @@ def test_patchify_equals_the_image_processor():
     np.testing.assert_allclose(mine, out["pixel_values"], atol=1e-5)
 
 
+def test_choose_grid_of_the_wide_presets():
+    g = V.DEFAULT_GRIDS   # with the 2:1, 3:2 and 16:9 presets a wide picture is no longer stretched to 3:2
+    assert V.choose_grid(g, 1920, 1080) == (18, 32) and V.choose_grid(g, 1920, 1080, 16, "high") == (24, 42) and V.choose_grid(g, 1920, 1080, 16, "low") == (16, 24)
+    assert V.choose_grid(g, 2880, 1704) == (18, 32) and V.choose_grid(g, 1080, 1920) == (32, 18) and V.choose_grid(g, 768, 256) == (16, 32) and V.choose_grid(g, 1500, 1000) == (24, 36)
+    assert V.choose_grid(g, 1000, 1000) == (24, 24) and V.choose_grid(g, 1000, 1000, 16, "high") == (32, 32)   # squares are unchanged
+
+
 def test_choose_grid():
-    g = V.DEFAULT_GRIDS   # (grid_h, grid_w); never far above the picture's own size or the detail budget, then the closest aspect ratio, then the closest patch count
+    g = V.DEFAULT_GRIDS[:7]   # the original seven presets; (grid_h, grid_w); never far above the picture's own size or the detail budget, then the closest aspect ratio, then the closest patch count
     assert V.choose_grid(g, 1000, 1000) == (24, 24) and V.choose_grid(g, 1000, 1000, 16, "high") == (32, 32) and V.choose_grid(g, 1000, 1000, 16, "low") == (16, 16)
     assert V.choose_grid(g, 400, 400) == (24, 24) and V.choose_grid(g, 400, 400, 16, "high") == (24, 24)   # 400 x 400 = 625 patches: no preset 1.5x above it
     assert V.choose_grid(g, 200, 200) == (16, 16) and V.choose_grid(g, 200, 150) == (16, 16)   # a tiny picture gets the smallest preset whatever its aspect ratio
