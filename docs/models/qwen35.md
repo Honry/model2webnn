@@ -5,7 +5,7 @@ The text decoder is compiled; the vision tower of the checkpoint (images only) i
 
 > How NPUW and the NPU compiler handle the same recurrence (per-token `Loop` -> chunked form inside the compiler), and how that compares with this package: [qwen35-npuw.md](qwen35-npuw.md).
 
-> `GraphOptions.gqa` (repeat | grouped | grouped16: the query heads of a K / V head as rows of one matmul instead of expanding K / V) is numerically equivalent and kept as an option, but the NPU compiler gave no speed-up with it: the default stays `repeat`.
+> `GraphOptions.gqa` (repeat | grouped | grouped16: the query heads of a K / V head as rows of one matmul instead of expanding K / V) is numerically equivalent and kept as an option, but the NPU compiler gave no speed-up with it: the default stays `repeat`. `GraphOptions.attn_split` (attention over the main cache and the new rows as two pieces, no concat of the cache) is equivalent as well and was measurably SLOWER on the NPU: do not use it.
 
 ## The model
 
