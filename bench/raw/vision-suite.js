@@ -72,7 +72,7 @@ async function run() {
                 setStatus(`${id}: generating`);
                 const ids = tokenizer.encode(buildPrompt(pkg.chatFormat, [{ user: c.question, images: 1 }], undefined, new Date(), pkg.model.vision.image_prompt));
                 const generated = [];
-                for await (const token of llm.generate(ids, { maxNewTokens, images: [image] })) { if (stop.has(token)) break; generated.push(token); }
+                for await (const token of llm.generate(ids, { maxNewTokens, images: [image], temperature: 0 })) { if (stop.has(token)) break; generated.push(token); }
                 const answer = tokenizer.decode(generated).trim(), s = llm.stats, steps = s.steps;
                 const tpot = steps.length ? steps.reduce((sum, step) => sum + step.totalMs, 0) / steps.length : 0;
                 const ok = scoreAnswer(c, answer);

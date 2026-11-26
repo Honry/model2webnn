@@ -20,6 +20,7 @@ export function setupVisionTab(host) {
     const state = { bitmap: null, name: "", detail: host.detail ?? "auto", result: null };
     const grids = host.presets;
     byId("detailSelect").value = state.detail;
+    byId("visionGreedy").checked = !!host.greedy;
 
     /** what the runtime does with a picture of this size at this detail level (also drawn: the picture stretched to the pixels the model sees, with the image-token blocks) */
     function describePicture() {
@@ -67,6 +68,7 @@ export function setupVisionTab(host) {
     zone.ondragover = (event) => { event.preventDefault(); zone.classList.add("over"); };
     zone.ondragleave = () => zone.classList.remove("over");
     zone.ondrop = (event) => { event.preventDefault(); zone.classList.remove("over"); fromFile(event.dataTransfer.files[0]); };
+    byId("imageInput").onclick = (event) => event.stopPropagation();   // the input sits inside the zone: its own click must not reach the zone
     zone.onclick = () => byId("imageInput").click();
     zone.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") byId("imageInput").click(); };
     document.addEventListener("paste", (event) => { if (byId("panel-vision").style.display !== "none") fromFile([...event.clipboardData.files][0]); });
@@ -90,6 +92,8 @@ export function setupVisionTab(host) {
     byId("visionQuestion").value = QUESTIONS.describe;
 
     function showResult(result) {
+        const full = result.promptTokens + result.generated >= result.maxLength - 1;
+        if (full) byId("visionAnswer").textContent += `\n\n[stopped: the KV cache of this session holds ${result.maxLength} tokens (${result.promptTokens} prompt + ${result.generated} generated). Open the page with a longer max length that the package has.]`;
         const rows = [
             ["Preprocess (canvas resize + patchify)", ms(result.preprocessMs), "host"],
             ["Graph build (first use of this grid only)", result.buildMs ? ms(result.buildMs) : "0 (already built)", result.buildMs ? "host" : "dim"],
@@ -99,6 +103,7 @@ export function setupVisionTab(host) {
             ["Time to first token from the click (+ preprocess)", seconds(result.prefillMs + result.preprocessMs), "total"],
             ["TPOT", `${result.tpotMs.toFixed(1)} ms/token (${result.tps.toFixed(1)} tokens/s)`, "host"],
             ["Tokens", `prompt ${result.promptTokens} (image ${result.imageTokens}), generated ${result.generated}`, "dim"],
+            ["Session", `max length ${result.maxLength}: ${result.promptTokens + result.generated} of ${result.maxLength - 1} cache rows used${full ? " (FULL: the answer was cut)" : ""}`, full ? "host" : "dim"],
             ["Grid", `${result.grid.join("x")} = ${result.pixels} px, ${result.detail}`, "dim"],
         ];
         const table = byId("visionTiming");
@@ -110,7 +115,7 @@ export function setupVisionTab(host) {
         byId("visionAnswer").textContent = "";
         try {
             const result = await host.generate(byId("visionQuestion").value, +byId("visionMaxNew").value || 128,
-                { image: { source: state.bitmap, name: state.name, detail: state.detail }, onText: (text) => { byId("visionAnswer").textContent = text; } });
+                { image: { source: state.bitmap, name: state.name, detail: state.detail }, ...(byId("visionGreedy").checked ? { sampling: { temperature: 0 } } : {}), onText: (text) => { byId("visionAnswer").textContent = text; } });
             state.result = result;
             if (result) showResult(result);
         } catch (error) {
@@ -120,6 +125,7 @@ export function setupVisionTab(host) {
     };
     describePicture();
     return {
+        setSession: (text) => { byId("visionSession").textContent = text; },
         setBusy: (busy) => { byId("visionRun").disabled = busy || !state.bitmap; },
         loadUrl: fromUrl,
         hasPicture: () => !!state.bitmap,
