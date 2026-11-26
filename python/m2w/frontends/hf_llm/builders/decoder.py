@@ -63,6 +63,8 @@ class GraphOptions:
     value_layout: str = "natural"  # "natural": value cache [1,kvHeads,P,128] like the key cache | "transposed": [1,kvHeads,128,P] (onehot only; faster than natural on the NPU for the one-hot update,
     #                                the compiler needs the attention_guard output of the prefill graphs with it)
     lm_head_format: str = "int8-sym"  # "int8-sym": int8 per-row symmetric (scale only) | "uint8-asym": uint8 per-row asymmetric (scale + zero point, the OpenVINO export)
+    gqa: str = "repeat"  # how the attention of a GQA model reads K / V: "repeat" (K / V expanded to every query head: 4x the memory traffic) | "grouped" (the query heads of a K / V head are rows of ONE matmul,
+    #                      no expansion) | "grouped16" (the same with the rows padded to 16: activation x activation matmuls with dim 4 / 8 failed to compile on the NPU in other graphs). Qwen3.5 only so far.
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -180,6 +182,29 @@ def repeat_kv(c: Ctx, x: Value, trailing) -> Value:
     group = d.num_heads // d.num_kv_heads
     expanded = b.expand(b.reshape(x, [1, d.num_kv_heads, 1, *trailing]), [1, d.num_kv_heads, group, *trailing])
     return b.reshape(expanded, [1, d.num_heads, *trailing])
+
+
+def grouped_attention(c: Ctx, query: Value, keys: Value, values: Value, mask: Value, seq: int, total: int, pad_rows: int = 0) -> Value:
+    """softmax(query keys^T + mask) values for a GQA model WITHOUT expanding K / V: query [1,heads,S,hd] (already scaled), keys / values [1,kvHeads,T,hd], mask [1,1,S,T] -> context [1,heads,S,hd].
+    The `group` query heads of a K / V head become rows of one matmul ([1,kvHeads,group * S,hd] x [1,kvHeads,hd,T]): head h uses K / V head h // group, as repeat_kv does. `pad_rows` > 0: the rows are
+    padded with zeros up to that many (the padded scores are dropped again)."""
+    b, d = c.b, c.dims
+    group, rows = d.num_heads // d.num_kv_heads, (d.num_heads // d.num_kv_heads) * seq
+    q = b.reshape(query, [1, d.num_kv_heads, rows, d.head_dim])
+    padded = max(rows, pad_rows)
+    if padded > rows:
+        q = b.concat([q, b.constant(c.compute, [1, d.num_kv_heads, padded - rows, d.head_dim], fill=0.0)], 2)
+    scores = b.matmul(q, b.transpose(keys, [0, 1, 3, 2]))                                       # [1,kvHeads,padded,T]
+    if padded > rows:
+        scores = b.slice(scores, [0, 0, 0, 0], [1, d.num_kv_heads, rows, total])
+    scores = b.add(b.reshape(scores, [1, d.num_kv_heads, group, seq, total]), b.reshape(mask, [1, 1, 1, seq, total]))
+    probabilities = b.reshape(b.softmax(scores, 4), [1, d.num_kv_heads, rows, total])
+    if padded > rows:
+        probabilities = b.concat([probabilities, b.constant(c.compute, [1, d.num_kv_heads, padded - rows, total], fill=0.0)], 2)
+    context = b.matmul(probabilities, values)                                                 # [1,kvHeads,padded,hd]
+    if padded > rows:
+        context = b.slice(context, [0, 0, 0, 0], [1, d.num_kv_heads, rows, d.head_dim])
+    return b.reshape(context, [1, d.num_heads, seq, d.head_dim])
 
 
 def update_kv_cache(c: Ctx, past_key, past_value, key, value, past_len: int, seq: int, selector_prefix: str = "", style: str = "onehot", transposed_value: bool = False):

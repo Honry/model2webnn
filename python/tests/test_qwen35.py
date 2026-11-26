@@ -121,3 +121,23 @@ def test_decode_block_groups_equal_the_single_blocks(package_groups, group):
         runs[k] = logits
     for a, b in zip(runs[1], runs[group]):
         np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("gqa", ["grouped", "grouped16"])
+def test_grouped_gqa_attention_equals_the_expanded_one(package, gqa):
+    """K / V read by the query heads of a group as rows of one matmul (no repeat_kv expansion) gives the logits of the expanded graphs: prefill, then steps across a staging flush."""
+    from m2w.frontends.hf_llm.builders import decoder as D
+
+    out, spec = package
+    prompt = [3, 9, 27, 5, 11, 2, 40, 7, 19, 1, 33]
+    runs = {}
+    for style in ("repeat", gqa):
+        runner = Qwen35Runner(spec, out / "weights", max_length=128, chunk_sizes=[16], opt=D.GraphOptions(kv_style="staged", staging_rows=8, gqa=style))
+        logits = [runner.prefill(prompt)]
+        token = int(np.argmax(logits[0]))
+        for _ in range(10):
+            logits.append(runner.step(token))
+            token = int(np.argmax(logits[-1]))
+        runs[style] = logits
+    for a, b in zip(runs["repeat"], runs[gqa]):
+        np.testing.assert_allclose(a, b, rtol=2e-3, atol=1e-3)   # the logits are float16: a different summation order moves the last bit

@@ -20,7 +20,7 @@ import math
 
 from ....ir import GraphBuilder, Value
 from . import gated_delta
-from .decoder import Ctx, DecoderDims, GraphOptions, apply_rotary, build_kv_update_graph, quantized_linear, repeat_kv, rms_norm, update_kv_cache
+from .decoder import Ctx, DecoderDims, GraphOptions, apply_rotary, build_kv_update_graph, grouped_attention, quantized_linear, repeat_kv, rms_norm, update_kv_cache
 from .gemma4 import build_lm_head_graph, lm_head_parts, lm_head_weight_specs  # noqa: F401  (the same row-block lm_head: the vocabulary is big)
 
 KINDS = ("linear_attention", "full_attention")
@@ -148,9 +148,12 @@ def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_l
         updated_key, updated_value = update_kv_cache(c, past_key, past_value, key, value, past_len, seq)
         all_keys, all_values = b.concat([to_c(past_key), to_c(key)], 2), b.concat([to_c(past_value), to_c(value)], 2)
     scaled = b.mul(query, c.scalar(1.0 / math.sqrt(d.head_dim), 4))
-    keys_t = b.transpose(repeat_kv(c, all_keys, [total, d.head_dim]), [0, 1, 3, 2])
-    scores = b.add(b.matmul(to_c(scaled), keys_t), to_c(mask))
-    context = b.matmul(b.softmax(scores, 3), repeat_kv(c, all_values, [total, d.head_dim]))
+    if opt.gqa != "repeat":
+        context = grouped_attention(c, to_c(scaled), all_keys, all_values, to_c(mask), seq, total, 16 if opt.gqa == "grouped16" else 0)
+    else:
+        keys_t = b.transpose(repeat_kv(c, all_keys, [total, d.head_dim]), [0, 1, 3, 2])
+        scores = b.add(b.matmul(to_c(scaled), keys_t), to_c(mask))
+        context = b.matmul(b.softmax(scores, 3), repeat_kv(c, all_values, [total, d.head_dim]))
     context = b.reshape(b.transpose(context, [0, 2, 1, 3]), [1, seq, aw])
     gated = b.mul(context, b.sigmoid(gate))
     projected = quantized_linear(c, gated, w["output_projection_weight"], w["output_projection_scale"], aw, d.hidden, seq)
