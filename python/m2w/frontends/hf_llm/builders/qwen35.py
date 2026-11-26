@@ -26,8 +26,9 @@ from .gemma4 import build_lm_head_graph, lm_head_parts, lm_head_weight_specs  # 
 KINDS = ("linear_attention", "full_attention")
 CONV_TAPS = 4
 SUB_CHUNK = 16        # the Gated DeltaNet sub-chunk of a prefill chunk (chunk sizes must be multiples of it)
-PREFILL_SOLVER = "blockdiag"   # the triangular solve of the prefill core: "substitution" (16 dependent row steps: 3.2 ms of the 4.6 ms core on the NPU, accurate to 1e-3) | "blockdiag" (no dependent steps: the
-#                               core takes 2.5 ms, accurate to 1.5e-2 on the NPU; see gated_delta.solve_block_diagonal and bench/raw/gdn.html dir=../data/gdn_seg/)
+PREFILL_SOLVER = "substitution"   # the triangular solve of the prefill core: "substitution" (16 dependent row steps: 3.2 ms of the 4.6 ms core on the NPU, accurate to 1e-3) | "blockdiag" (no dependent steps:
+#                               the core takes 2.5 ms and is 1.5e-2 off on its own, but in the real model it broke the first layer (hidden state entering layer 1: 23% off, wrong text), so it is NOT used;
+#                               see gated_delta.solve_block_diagonal and bench/raw/gdn.html dir=../data/gdn_seg/)
 L2_EPS = 1e-6   # transformers: l2norm(x) = x * rsqrt(sum(x^2) + 1e-6). Faithful: an eps that is 100x bigger changed the hidden states by ~13% (it matters for the many q / k heads with sum(x^2) of 0.01 .. 0.1).
 #                 1e-6 is a float16 subnormal: on the NPU it is flushed to 0, which is harmless for a real row but turns an all-zero row (the pad rows of a left-padded chunk) into 0 * inf = NaN;
 #                 the pad rows therefore get a non-zero guard in prefill (attention_half_linear), they are no-ops of the recurrence anyway (beta = 0, g = 0).
