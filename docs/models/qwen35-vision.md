@@ -58,3 +58,23 @@ text:   the same graphs as before; the 8 full attention layers get 3-position (t
   `rot_pos_emb`; `patchify` against `Qwen2VLImageProcessor`; `choose_grid`; `add-vision` / `rebuild-graphs`.
 * `python/tools/qwen35_vision_check.py <package> <hf dir> <image>`: the same on the real model and a real image, plus the cost of the quantization against the ORIGINAL weights and the activation ranges;
   `--export` writes the patches and the hidden state after every block into `bench/data/qwen35_vision/` (ignored) for the device check page.
+
+## Image in the prompt: the Python reference runner (`reference/qwen35_runner.py`, `reference/protocol.py`)
+
+`Qwen35Runner.prefill(tokens, images=[(patches, grid), ...])` (executable specification of what the browser runtime does):
+
+1. `protocol.prepare_image(pil_image, spec, grids)` -> `(patches, grid)`: preset by `choose_grid`, bicubic resize to `grid * 16` pixels, rescale + normalise with the mean / std of model.json, `patchify`.
+2. `protocol.expand_image_tokens`: the prompt holds ONE `<|image_pad|>` per image (the chat template writes `<|vision_start|><|image_pad|><|vision_end|>`, `model.json vision.image_prompt`);
+   it becomes `grid_h * grid_w / 4` pad tokens (a run that already has that length stays).
+3. `Qwen35VisionRunner.encode(patches, grid)` -> image tokens [N/4, 2560] float16; their rows REPLACE the embedding rows of the pad tokens in the prefill chunk (they may straddle chunk boundaries).
+4. `protocol.mrope_positions` (transformers' `get_rope_index`): text tokens t = h = w = running position; the tokens of an image get `t = start`, `h = start + row`, `w = start + column` of their merge block,
+   the position continues at `start + max(rows, columns)` after the image. `rope_delta = max position + 1 - number of tokens`.
+5. `protocol.rope_tables_mrope`: the rope tables of the full attention layers with one of the three positions per rotary frequency in the interleaved layout (`mrope_axes`: t, h, w, t, h, w ...; sections
+   11 / 11 / 10 of the 32 frequencies; the package's permuted head dims keep the rotating dims in front, the other frequencies are 0). Only the 8 full attention layers see positions at all (the Gated DeltaNet
+   layers have no position input), so MRoPE is purely host-side table building.
+6. Decode: the token at sequence index `i` uses the rope position `i + rope_delta` (all three components equal); cache rows and masks keep using `i`.
+
+`python/tests/test_qwen35_images.py` checks it on a tiny model against `Qwen3_5ForConditionalGeneration` loaded with the same dequantized weights: positions and `rope_delta` against `get_rope_index`, the
+tables against the text model's own rotary embedding, prefill logits and ten decode steps (one image, two images with different grids, an image that straddles a prefill chunk boundary); a prompt without
+image is unchanged. `python/tools/qwen35_vl_check.py` does the same on the real 4B model with a real image (slow: the interpreter runs the whole model) and can also print the answer of the original bfloat16
+checkpoint.

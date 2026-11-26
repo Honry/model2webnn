@@ -5,11 +5,12 @@ from pathlib import Path
 
 import numpy as np
 
-from m2w.frontends.hf_llm import rope as rope_lib
+from m2w.frontends.hf_llm import rope as rope_lib, vision as V
 from m2w.frontends.hf_llm.arch import spec_from_config
 from m2w.reference import protocol
 
 from tiny_model import CONFIG
+from tiny_qwen35 import CONFIG as QWEN35_CONFIG
 
 GOLDEN = Path(__file__).resolve().parents[2] / "tests" / "golden" / "protocol_vectors.json"
 P, C, R = 23, 8, 4
@@ -71,7 +72,30 @@ def build():
         cos, sin = rope_lib.cos_sin([0, 1, 100, 2047], inv, factor)
         out["rope_aion"][name] = {"entry": entry, "head_dim": 128, "positions": [0, 1, 100, 2047], "inv_freq": f(inv, 9), "attention_factor": float(factor),
                                   "cos": f(cos, 5), "sin": f(sin, 5)}
+    out["vision"] = vision_vectors()
     return out
+
+
+def vision_vectors() -> dict:
+    """image prompts of Qwen3.5: grid choice, pad expansion, (t, h, w) positions, interleaved MRoPE tables (theta 10 so that every axis moves the angles), patchify"""
+    import dataclasses
+
+    spec = spec_from_config(QWEN35_CONFIG)
+    spec = dataclasses.replace(spec, rope={"full_attention": {**spec.rope["full_attention"], "theta": 10.0}})
+    grids = [(4, 4), (4, 6), (6, 4)]
+    short = [4, 5, 288, 290, 289, 6, 288, 290, 289, 7, 8]
+    tokens = protocol.expand_image_tokens(spec, short, grids[1:])
+    positions, delta = protocol.mrope_positions(spec, tokens, grids[1:])
+    tables = protocol.rope_tables_mrope(spec, positions[:, 3:11], 12, 4)["full_attention"]   # a left-padded chunk: 4 pad rows + 8 real rows (positions of tokens 3..10)
+    rng = np.random.default_rng(0)
+    pixels = rng.integers(-8, 9, (3, 8, 12)).astype(np.float32)
+    return {"spec": {"head_dim": spec.head_dim, "rope": spec.rope, "mrope": spec.mrope, "image_token_id": spec.vision["image_token_id"], "merge_size": spec.vision["merge_size"]},
+            "choose": [{"grids": [list(g) for g in V.DEFAULT_GRIDS], "width": w, "height": h, "patch": 16, "grid": list(V.choose_grid(V.DEFAULT_GRIDS, w, h))}
+                       for w, h in ((1000, 1000), (400, 400), (200, 200), (1824, 2358), (1500, 1000), (1000, 1500), (1280, 960), (640, 480), (4000, 3000))],
+            "prompt": {"short": short, "grids": [list(g) for g in grids[1:]], "expanded": tokens, "positions": positions.tolist(), "rope_delta": delta},
+            "rope_chunk": {"first": 3, "valid": 8, "rows": 12, "pad": 4, "cos": f(tables[0]), "sin": f(tables[1])},
+            "axes": {"section": [11, 11, 10], "count": 32, "axes": protocol.mrope_axes([11, 11, 10], 32).tolist()},
+            "patchify": {"grid": [4, 6], "patch": 2, "temporal": 2, "merge": 2, "pixels": pixels.reshape(-1).tolist(), "patches": V.patchify(pixels, 4, 6, 2, 2, 2).reshape(-1).tolist()}}
 
 
 def test_protocol_vectors_are_current():

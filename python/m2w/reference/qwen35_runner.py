@@ -3,6 +3,10 @@ full attention layers, a conv state and a recurrent state for the Gated DeltaNet
 drives them. `Qwen35PackageReader.hf_state_dict()` gives the dequantized weights under the HF names, to feed the transformers model as the independent reference.
 
 BLOCK i = feed-forward half of layer i + attention half of layer i + 1 (the graph of ITS kind); HEAD = attention half of layer 0; TAIL = feed-forward half of the last layer + final norm.
+
+Images (a package with an image tower, docs/models/qwen35-vision.md): `prefill(tokens, images=[(patches, grid), ...])` with one <|image_pad|> token per image in `tokens`: the pad is expanded to one token
+per merge block of the grid, the image tower (qwen35_vision.Qwen35VisionRunner) turns the patches into image tokens whose rows REPLACE the embedding rows of the pad tokens, and the full attention layers
+get 3-position interleaved MRoPE tables (protocol.mrope_positions / rope_tables_mrope); decode token i has the rope position i + rope_delta. Without images everything is as before.
 """
 from __future__ import annotations
 
@@ -116,6 +120,7 @@ class Qwen35Runner:
         self.sizes = sorted(set(chunk_sizes))
         self.fixed_tokens = prefill_fixed_tokens
         self.reader = Qwen35PackageReader(spec, weights_dir)
+        self.vision = None   # a qwen35_vision.Qwen35VisionRunner when the package has an image tower (from_package)
         self.g = graphs or self._build_graphs()
         self.kinds = [spec.layer_kind(i) for i in range(spec.num_layers)]
         self.attention_names = {k: [n for n, _, _ in Q.attention_weight_specs(spec, k)] for k in Q.KINDS if k in spec.layer_types}
@@ -165,8 +170,13 @@ class Qwen35Runner:
             prefill[C] = {"head": load(f["head"]), "tail": load(f["tail"]), "blocks": {k: load(p) for k, p in f["blocks"].items()}}
         opt = D.GraphOptions(**{**{k: v for k, v in plan["profile"].items() if k in D.GraphOptions.__dataclass_fields__}, "compute_type": info["compute_type"], "kv_style": "staged",
                                 "staging_rows": info.get("staging_rows", 64)})
-        return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens, blocks_per_graph=decode_group,
-                   graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
+        runner = cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens, blocks_per_graph=decode_group,
+                     graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
+        if "vision" in plan and spec.vision:
+            from .qwen35_vision import Qwen35VisionRunner
+
+            runner.vision = Qwen35VisionRunner(package, spec)
+        return runner
 
     def _lm_head_externals(self) -> dict:
         weight, scale = self.reader.embedding_rows_raw()
@@ -200,6 +210,7 @@ class Qwen35Runner:
                     self.conv[i] = np.zeros((1, Q.CONV_TAPS - 1, ld["conv_width"]), np.float16)
                     self.rec[i] = np.zeros((1, ld["v_heads"], ld["k_dim"], ld["v_dim"]), np.float16)
         self.base = self.filled = self.position = 0
+        self.rope_delta = 0
 
     @property
     def cache_full(self) -> bool:
@@ -263,8 +274,21 @@ class Qwen35Runner:
     def plan(self, token_count: int) -> list:
         return protocol.plan_prefill(self.sizes, token_count, self.fixed_tokens)
 
-    def prefill(self, tokens: list, plan: Optional[list] = None) -> np.ndarray:
-        s, n, P = self.spec, len(tokens), self.P
+    def prefill(self, tokens: list, plan: Optional[list] = None, images: Optional[list] = None) -> np.ndarray:
+        """images: [(patches [N, patch_vector], grid)] in the order of the <|image_pad|> tokens of `tokens` (protocol.prepare_image makes them). self.prompt = the expanded token list."""
+        s, P = self.spec, self.P
+        positions, delta, rows = None, 0, {}
+        if images:
+            if self.vision is None:
+                raise ValueError("this package has no image tower (compile it with a vision checkpoint, or `m2w add-vision`)")
+            grids = [tuple(g) for _, g in images]
+            tokens = protocol.expand_image_tokens(s, tokens, grids)
+            positions, delta = protocol.mrope_positions(s, tokens, grids)
+            pad = s.vision["image_token_id"]
+            at = [i for i, t in enumerate(tokens) if t == pad]
+            embeds = np.concatenate([self.vision.encode(np.asarray(p, np.float16), g) for p, g in images])   # [image tokens, hidden] float16
+            rows = {position: embeds[k] for k, position in enumerate(at)}
+        self.prompt, n = list(tokens), len(tokens)
         plan = plan or self.plan(n)
         if sum(plan) < n or sum(plan[:-1]) >= n:
             raise ValueError(f"the chunk plan {plan} does not fit a prompt of {n} tokens")
@@ -277,15 +301,15 @@ class Qwen35Runner:
             pad = C - valid
             hidden = np.zeros((1, C, s.hidden), np.float16)
             for i in range(valid):
-                hidden[0, pad + i] = self._embed(tokens[start + i])
-            rope = protocol.rope_tables(s, list(range(start, start + valid)), C, pad)
+                hidden[0, pad + i] = rows[start + i] if start + i in rows else self._embed(tokens[start + i])
+            rope = protocol.rope_tables(s, list(range(start, start + valid)), C, pad) if positions is None else protocol.rope_tables_mrope(s, positions[:, start:start + valid], C, pad)
             masks = protocol.prefill_masks(s, P, C, start, valid)
             keep, selector = protocol.prefill_selectors(P, C, start, valid)
             valid_mask, conv_perm = protocol.linear_prefill_controls(C, valid)
             logits = self._chain(self.g["prefill"][C], False, hidden, rope, masks, {"rows_to_keep": keep, "row_selector": selector},
                                  {"valid_mask": valid_mask, "conv_perm": conv_perm}, index == len(plan) - 1)
             start += valid
-        self.base, self.filled, self.position = n, 0, n
+        self.base, self.filled, self.position, self.rope_delta = n, 0, n, delta
         return logits
 
     def _flush(self) -> None:
@@ -303,7 +327,7 @@ class Qwen35Runner:
         if self.filled == R:
             self._flush()
         pos = self.position
-        rope = protocol.rope_tables(s, [pos], 1, 0)
+        rope = protocol.rope_tables(s, [pos + self.rope_delta], 1, 0)   # the rope position of a text token after an image is shifted by rope_delta; the cache rows / masks use the sequence index
         masks = protocol.decode_masks(s, P, R, pos, self.base, self.filled)
         keep, selector = protocol.decode_selectors(R, self.filled)
         logits = self._chain(self.g["decode"], True, self._embed(token).reshape(1, 1, -1), rope, masks, {"staging_rows_to_keep": keep, "staging_row_selector": selector}, {}, True)
@@ -311,8 +335,8 @@ class Qwen35Runner:
         self.position += 1
         return logits
 
-    def generate(self, tokens: list, max_new_tokens: int, eos=()) -> tuple:
-        logits = self.prefill(tokens)
+    def generate(self, tokens: list, max_new_tokens: int, eos=(), images: Optional[list] = None) -> tuple:
+        logits = self.prefill(tokens, images=images)
         out, all_logits = [], [logits]
         for _ in range(max_new_tokens):
             token = int(np.argmax(logits))
