@@ -24,8 +24,9 @@ from .gemma4 import build_lm_head_graph, lm_head_parts, lm_head_weight_specs  # 
 KINDS = ("linear_attention", "full_attention")
 CONV_TAPS = 4
 SUB_CHUNK = 16        # the Gated DeltaNet sub-chunk of a prefill chunk (chunk sizes must be multiples of it)
-MEAN_SQUARE_EPS = 1e-4   # HF: l2norm eps 1e-6 on the SUM of squares. That is a float16 SUBNORMAL (the smallest normal is 6.1e-5): the NPU flushes it to 0 and the normalization of an all-zero row (the pad rows
-#                         of a left-padded chunk) became 0 * inf = NaN, which poisoned the whole recurrent state. 1e-4 on the mean of the squares (= 0.0128 on the sum, ~6e-4 relative for a real row).
+L2_EPS = 1e-6   # transformers: l2norm(x) = x * rsqrt(sum(x^2) + 1e-6). Faithful: an eps that is 100x bigger changed the hidden states by ~13% (it matters for the many q / k heads with sum(x^2) of 0.01 .. 0.1).
+#                 1e-6 is a float16 subnormal: on the NPU it is flushed to 0, which is harmless for a real row but turns an all-zero row (the pad rows of a left-padded chunk) into 0 * inf = NaN;
+#                 the pad rows therefore get a non-zero guard in prefill (attention_half_linear), they are no-ops of the recurrence anyway (beta = 0, g = 0).
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -76,7 +77,7 @@ def l2_normalize(c: Ctx, x: Value, rank: int, scale: float = 1.0) -> Value:
     multiplication behind its normalization)."""
     b, dim = c.b, x.shape[rank - 1]
     mean_square = b.reduce_mean(b.pow(x, c.scalar(2, rank)), axes=[rank - 1], keep_dimensions=True)
-    normalized = b.mul(x, b.div(c.scalar(1, rank), b.sqrt(b.add(mean_square, c.scalar(MEAN_SQUARE_EPS, rank)))))
+    normalized = b.mul(x, b.div(c.scalar(1, rank), b.sqrt(b.add(mean_square, c.scalar(L2_EPS / dim, rank)))))   # sum + eps = dim * (mean + eps / dim)
     return b.mul(normalized, c.scalar(scale / math.sqrt(dim), rank))
 
 
@@ -178,6 +179,8 @@ def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, prob
         term = b.mul(b.slice(sequence, [0, j, 0], [1, seq, cw]), taps[j])
         conv = term if conv is None else b.add(conv, term)
     conv = silu(c, conv)
+    if seq > 1:   # pad rows (valid_mask 0): conv, hence q and k, would be exactly 0 there: add a guard of 1 so that their normalization is finite (real rows get + 0)
+        conv = b.add(conv, b.reshape(b.sub(c.scalar(1.0, 4), c.to_compute(c.declare("valid_mask", "float16", [1, 1, seq, 1], "control"))), [1, seq, 1]))
 
     q = b.reshape(b.slice(conv, [0, 0, 0], [1, seq, hk * dk]), [1, seq, hk, dk])
     k = b.reshape(b.slice(conv, [0, 0, hk * dk], [1, seq, hk * dk]), [1, seq, hk, dk])
@@ -192,7 +195,7 @@ def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, prob
     per_head = lambda x: b.reshape(b.transpose(x, [0, 2, 1]), [1, hv, seq, 1])  # noqa: E731    [1,S,hv] -> [1,hv,S,1]
     beta_h, g_h = per_head(beta), per_head(g)
     if seq > 1:   # pad rows: beta = 0 and g = 0 leave the state untouched
-        valid = c.to_compute(c.declare("valid_mask", "float16", [1, 1, seq, 1], "control"))
+        valid = c.to_compute(c.b.graph.values["valid_mask"])
         beta_h, g_h = b.mul(beta_h, valid), b.mul(g_h, valid)
         out, new_state = gated_delta.gated_delta_batched(b, heads(q), heads(k), heads(v), g_h, beta_h, c.to_compute(state), SUB_CHUNK, c.compute)
     else:
