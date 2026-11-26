@@ -98,3 +98,18 @@ def test_block_diagonal_solve_matches_the_token_loop(regime):
     for dtype, tolerance in (("float32", 1e-5), ("float16", 1e-2)):
         got = interpreter.run(build_core_graph(heads, DK, DV, tokens, 16, dtype, solve="blockdiag"), graph_feeds(inputs, state0, dtype))
         assert error(got["out"][0], want_out)[1] < tolerance and error(got["new_state"][0], want_state)[1] < tolerance
+
+
+@pytest.mark.parametrize("chunk", [32, 64])
+def test_npu_compiler_chunk_form_matches_the_token_loop(chunk):
+    """The chunked form of the NPU compiler's ChunkGatedDeltaRuleLoop pass (Neumann doubling over the whole chunk, solve after the state) is exact in float32 on typical data; its `exclusive` variant is the
+    recurrence whose delta is computed from the state of the PREVIOUS token (a different recurrence, 1 % away from the HF one). On nearly parallel keys the plain doubling is not usable (see the docs)."""
+    rng = np.random.default_rng(23)
+    heads, tokens = 2, 128
+    inputs = make_inputs(rng, heads, tokens, "mixed")
+    state0 = rng.standard_normal((heads, DK, DV)) * 0.1
+    want_out, want_state = recurrent(*inputs, state0)
+    got = interpreter.run(build_core_graph(heads, DK, DV, tokens, chunk, "float32", solve="npuw"), graph_feeds(inputs, state0, "float32"))
+    assert error(got["out"][0], want_out)[1] < 1e-5 and error(got["new_state"][0], want_state)[1] < 1e-5
+    other = interpreter.run(build_core_graph(heads, DK, DV, tokens, chunk, "float32", solve="npuw-excl"), graph_feeds(inputs, state0, "float32"))
+    assert error(other["out"][0], want_out)[1] > 1e-3

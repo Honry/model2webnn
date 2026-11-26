@@ -7,6 +7,7 @@
   products    q_gate = q exp(gc), attn = (q k^T) * D, k_decayed^T, total decay
   state_loop  the 8 dependent sub-chunk steps carrying the state (value / k_cumdecay / q_gate / attn / k_decayed^T / total -> out, new state)
   whole       the complete core (what the package has)
+  whole_npuw64 / whole_npuw32   the chunked form of the NPU compiler's ChunkGatedDeltaRuleLoop pass (chunks of 64 / 32, Neumann doubling, solve after the state; docs/models/qwen35-npuw.md)
   overhead    a one-operator graph: the fixed cost of a dispatch
 Every segment gets its inputs from the float32 interpreter run of the previous ones, so the data is realistic; the accuracy column is against the float32 interpreter.
 
@@ -110,6 +111,8 @@ def segment_graphs(dtype):
 
     out["whole"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_{dtype}", solve="batched")
     out["whole_blockdiag"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_blockdiag_{dtype}", solve="blockdiag")
+    out["whole_npuw64"] = build_core_graph(H, DK, DV, T, 64, dtype, name=f"seg_whole_npuw64_{dtype}", solve="npuw")
+    out["whole_npuw32"] = build_core_graph(H, DK, DV, T, 32, dtype, name=f"seg_whole_npuw32_{dtype}", solve="npuw")
     out["whole_affine"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_affine_{dtype}", solve="batched", loop="affine")
 
     b = GraphBuilder(f"seg_overhead_{dtype}")
@@ -150,13 +153,12 @@ def main():
     feeds_by_segment = {
         "decay": {"g": values["g"]}, "a_matrix": {n: values[n] for n in ("k", "beta", "decay")}, "rhs": {n: values[n] for n in ("k", "v", "beta", "gc")},
         "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("aug", "aug2", "plain")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds, "state_loop_affine": loop_feeds,
-        "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_affine": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
+        "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_affine": graph_feeds((q, k, v, g, beta), state0, "float32"),
+        "whole_npuw64": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_npuw32": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
     }
     names = []
-    for segment, feeds in feeds_by_segment.items():
-        graph = f16[segment]
-        feeds = {n: v for n, v in feeds.items() if n in graph.inputs}
-        want = interpreter.run(f32[segment], feeds)
+
+    def write(graph, want, feeds, regime):
         serialize.dump(graph, out / f"{graph.name}.json")
         blob, entries = bytearray(), {"inputs": [], "expected": [], "weights": []}
         for n in graph.inputs:
@@ -167,11 +169,22 @@ def main():
             raw = np.ascontiguousarray(a.astype(np.float32)).tobytes()
             entries["expected"].append({"name": n, "dataType": "float32", "shape": list(a.shape), "offset": len(blob), "bytes": len(raw)})
             blob.extend(raw)
-        (out / f"{graph.name}.mixed.bin").write_bytes(bytes(blob))
-        (out / f"{graph.name}.mixed.io.json").write_text(json.dumps(entries), encoding="utf-8")
+        (out / f"{graph.name}.{regime}.bin").write_bytes(bytes(blob))
+        (out / f"{graph.name}.{regime}.io.json").write_text(json.dumps(entries), encoding="utf-8")
+
+    for segment, feeds in feeds_by_segment.items():
+        graph = f16[segment]
+        feeds = {n: v for n, v in feeds.items() if n in graph.inputs}
+        write(graph, interpreter.run(f32[segment], feeds), feeds, "mixed")
         names.append(graph.name)
         print(f"{segment:12} {len(graph.nodes):4} nodes")
-    (out / "index.json").write_text(json.dumps({"graphs": names, "regimes": ["mixed"]}), encoding="utf-8")
+    # the adversarial regime (nearly parallel keys, beta near 1: the largest entries of (I + A)^-1) for the complete cores only; gdn.html?data=mixed-corr&only=whole
+    q, k, v, g, beta = make_inputs(rng, H, T, "mixed-corr")
+    state0 = rng.standard_normal((H, DK, DV)) * 0.1
+    for segment in [s for s in f16 if s.startswith("whole")]:
+        feeds = graph_feeds((q, k, v, g, beta), state0, "float32")
+        write(f16[segment], interpreter.run(f32["whole"], feeds), feeds, "mixed-corr")   # expected: the accurate core (substitution), also for the forms that overflow in float32 here
+    (out / "index.json").write_text(json.dumps({"graphs": names, "regimes": ["mixed", "mixed-corr"]}), encoding="utf-8")
 
 
 if __name__ == "__main__":

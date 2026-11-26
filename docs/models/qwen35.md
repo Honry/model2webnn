@@ -3,6 +3,8 @@
 Read from `config.json` and transformers' `modeling_qwen3_5.py` (5.3). The transformers model is the independent reference (`python/m2w/reference/qwen35_hf.py`, `python/tests/test_qwen35.py`, `m2w verify`).
 Only the text decoder is compiled (the checkpoint also has a vision tower and an MTP head, ignored).
 
+> How NPUW and the NPU compiler handle the same recurrence (per-token `Loop` -> chunked form inside the compiler), and how that compares with this package: [qwen35-npuw.md](qwen35-npuw.md).
+
 ## The model
 
 32 layers, hidden 2560, FFN 9216, vocabulary 248320 (tied embedding / lm_head), `layer_types` = 3 x `linear_attention` + 1 x `full_attention`, repeated (24 + 8 layers).

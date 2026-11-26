@@ -225,9 +225,52 @@ def _affine_state_loop(b: GraphBuilder, value5, kcd5, qg5, attn5, kdt5, total5, 
     return b.reshape(out, [1, heads, n * sub, dv]), b.reshape(state5, [1, heads, dk, dv])
 
 
+def gated_delta_npu_compiler(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, chunk: int, dtype: str, exclusive: bool = False):
+    """The chunked form that the NPU compiler's pass `ChunkGatedDeltaRuleLoop` (npu_compiler: src/vpux_compiler/src/dialect/IE/transforms/passes/chunk_gated_delta_rule_loop.cpp) makes of the per-token Loop of an
+    OpenVINO IR (chunk-size option, default 64), written with WebNN operators, as a measurement of that design on the device (docs/models/qwen35-npuw.md):
+      * chunks of `chunk` tokens one after the other (T / chunk dependent steps, 2 for 128 tokens), NO sub-chunk batching: nothing is hoisted out of the dependent chain;
+      * (I - L)^-1 for the whole chunk by Neumann doubling:  P = I;  repeat log2(chunk) times:  P = P + Lp P;  Lp = Lp Lp   (chunk = 64: 11 matmuls of 64 x 64 per head);
+      * the solve comes AFTER the state: rhs = v - exp(cumG) (k S), w = P rhs, c = beta w (the sub-chunk form of `gated_delta_batched` solves before the state, so P never waits for it).
+    `exclusive`: the compiler's row index uses the EXCLUSIVE cumulative gate (the delta is computed from the state of the previous token, not decayed by this token's g); False = the inclusive one of the
+    HF reference (kv_mem is taken from the decayed state). The two are different recurrences; Qwen3.5 (HF) is the inclusive one. The decay matrices are masked BEFORE the exp (the compiler's pass masks after:
+    exp of a positive difference is inf in float16 and inf * 0 = NaN)."""
+    heads, total, dk, dv = q.shape[1], q.shape[2], q.shape[3], v.shape[3]
+    assert total % chunk == 0
+    incl, strict, eye = _tri(b, chunk, dtype, False), _tri(b, chunk, dtype, True), _identity(b, chunk, dtype)
+    minus_one = b.scalar(-1.0, dtype, 4)
+    outs = []
+    for s in range(total // chunk):
+        part = lambda x, width: b.slice(x, [0, 0, s * chunk, 0], [1, heads, chunk, width])  # noqa: E731
+        qc, kc, vc, gs, bc = part(q, dk), part(k, dk), part(v, dv), part(g, 1), part(beta, 1)
+        cum = b.matmul(incl, gs)                                                         # inclusive cumulative gate [1,H,C,1]
+        cum_row = b.transpose(cum, [0, 1, 3, 2])
+        row = b.sub(cum, gs) if exclusive else cum                                       # the gate the delta of token i is computed under
+        decay = b.mul(b.exp(b.mul(b.sub(cum, cum_row), incl)), incl)                     # exp(cum_i - cum_j), i >= j
+        k_t = b.transpose(kc, [0, 1, 3, 2])
+        k_beta = b.mul(kc, bc)
+        kk = b.mul(b.matmul(kc, b.transpose(k_beta, [0, 1, 3, 2])), minus_one)           # -(k_i . k_j) beta_j
+        lmat = b.mul(b.mul(kk, b.exp(b.mul(b.sub(row, cum_row), strict))), strict)       # L, strictly lower
+        p, power = eye, lmat
+        rounds = max(1, (chunk - 1).bit_length())
+        for r in range(rounds):
+            p = b.add(p, b.matmul(power, p))
+            if r < rounds - 1:
+                power = b.matmul(power, power)
+        hk = b.matmul(kc, state)
+        rhs = b.sub(vc, b.mul(b.exp(row), hk))
+        c = b.mul(b.matmul(p, rhs), bc)                                                  # beta w
+        o_intra = b.matmul(b.mul(b.matmul(qc, k_t), decay), c)
+        o_inter = b.matmul(b.mul(qc, b.exp(cum)), state)
+        outs.append(b.add(o_intra, o_inter))
+        cum_last = b.slice(cum, [0, 0, chunk - 1, 0], [1, heads, 1, 1])
+        k_decayed = b.mul(kc, b.exp(b.sub(cum_last, cum)))
+        state = b.add(b.mul(state, b.exp(cum_last)), b.matmul(b.transpose(k_decayed, [0, 1, 3, 2]), c))
+    return (b.concat(outs, 2) if len(outs) > 1 else outs[0]), state
+
+
 def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann", loop: str = "steps"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "blockdiag": "blockdiag", "recurrent": "recur"}[solve]
+    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "blockdiag": "blockdiag", "recurrent": "recur", "npuw": "npuw", "npuw-excl": "npuwx"}[solve]
     b = GraphBuilder(name or (f"gdn_core_t{tokens}_{kind}_{dtype}" if solve == "recurrent" else f"gdn_core_t{tokens}_c{sub}_{kind}{'_affine' if loop == 'affine' else ''}_{dtype}{'_probe' if probe else ''}"))
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
@@ -238,6 +281,8 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     probes = {} if probe else None
     if solve == "recurrent":
         out, new_state = gated_delta_unrolled(b, q, k, v, g, beta, state)
+    elif solve in ("npuw", "npuw-excl"):
+        out, new_state = gated_delta_npu_compiler(b, q, k, v, g, beta, state, sub, dtype, exclusive=solve == "npuw-excl")
     elif solve in ("batched", "blockdiag"):
         out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype, "blockdiag" if solve == "blockdiag" else "substitution", loop)
     else:
