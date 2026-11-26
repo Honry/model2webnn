@@ -164,7 +164,7 @@ def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, 
     return (b.concat(outs, 2) if len(outs) > 1 else outs[0]), state
 
 
-def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, solver: str = "substitution"):
+def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, solver: str = "substitution", loop: str = "steps"):
     """The same recurrence with the work that does NOT depend on the state done for all sub-chunks at once. Inside a sub-chunk the decay matrix, A, the triangular solve (value, k_cumdecay),
     q.k^T and the decayed keys only need q, k, v, g, beta: they run with the n = T / sub sub-chunks as a batch dimension, so the solve costs `sub` dependent steps for the whole prefill chunk
     instead of T. Only the state travels from sub-chunk to sub-chunk: ~10 dependent operators per sub-chunk."""
@@ -193,6 +193,8 @@ def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value,
     value5, kcd5, qg5, attn5, kdt5, total5 = split(value), split(k_cumdecay), split(q_gate), split(attn), split(k_decayed_t), split(decay_total)
     pick = lambda x, s: b.slice(x, [0, 0, s, 0, 0], [1, heads, 1] + list(x.shape[3:]))
     state5 = b.reshape(state, [1, heads, 1, dk, dv])
+    if loop == "affine":
+        return _affine_state_loop(b, value5, kcd5, qg5, attn5, kdt5, total5, state5, heads, n, sub, dk, dv, dtype)
     outs = []
     for s in range(n):
         v_new = b.sub(pick(value5, s), b.matmul(pick(kcd5, s), state5))
@@ -202,10 +204,29 @@ def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value,
     return b.reshape(out, [1, heads, total, dv]), b.reshape(state5, [1, heads, dk, dv])
 
 
-def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann"):
+def _affine_state_loop(b: GraphBuilder, value5, kcd5, qg5, attn5, kdt5, total5, state5, heads: int, n: int, sub: int, dk: int, dv: int, dtype: str):
+    """The sub-chunk steps with everything that does not depend on the state moved out of the dependent chain. A step is
+        v_new = value - kcd S;   out = qg S + attn v_new;   S' = total S + kdt v_new
+    and v_new is linear in S, so   out = (qg - attn kcd) S + attn value,   S' = (total I - kdt kcd) S + kdt value:   [Q' S + O0],  [M S + B]  with Q', O0, M, B for ALL sub-chunks computed at once (batched matmuls).
+    What is left in the chain is one matmul and one add per sub-chunk (S' = M_s S + B_s); the outputs of all sub-chunks come from one batched matmul with the stacked states that entered each step."""
+    q_eff = b.sub(qg5, b.matmul(attn5, kcd5))                                                  # [1,H,n,C,dk]
+    o0 = b.matmul(attn5, value5)                                                               # [1,H,n,C,dv]
+    m = b.sub(b.mul(total5, _identity(b, dk, dtype)), b.matmul(kdt5, kcd5))                    # [1,H,n,dk,dk]
+    bs = b.matmul(kdt5, value5)                                                                # [1,H,n,dk,dv]
+    pick = lambda x, s: b.slice(x, [0, 0, s, 0, 0], [1, heads, 1] + list(x.shape[3:]))  # noqa: E731
+    states = []
+    for s in range(n):
+        states.append(state5)
+        state5 = b.add(b.matmul(pick(m, s), state5), pick(bs, s))
+    stacked = b.concat(states, 2) if n > 1 else states[0]                                      # [1,H,n,dk,dv]: the state that entered each sub-chunk
+    out = b.add(b.matmul(q_eff, stacked), o0)
+    return b.reshape(out, [1, heads, n * sub, dv]), b.reshape(state5, [1, heads, dk, dv])
+
+
+def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann", loop: str = "steps"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
     kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "blockdiag": "blockdiag", "recurrent": "recur"}[solve]
-    b = GraphBuilder(name or (f"gdn_core_t{tokens}_{kind}_{dtype}" if solve == "recurrent" else f"gdn_core_t{tokens}_c{sub}_{kind}_{dtype}{'_probe' if probe else ''}"))
+    b = GraphBuilder(name or (f"gdn_core_t{tokens}_{kind}_{dtype}" if solve == "recurrent" else f"gdn_core_t{tokens}_c{sub}_{kind}{'_affine' if loop == 'affine' else ''}_{dtype}{'_probe' if probe else ''}"))
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
     v = b.input("v", dtype, [1, heads, tokens, dv])
@@ -216,7 +237,7 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     if solve == "recurrent":
         out, new_state = gated_delta_unrolled(b, q, k, v, g, beta, state)
     elif solve in ("batched", "blockdiag"):
-        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype, "blockdiag" if solve == "blockdiag" else "substitution")
+        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype, "blockdiag" if solve == "blockdiag" else "substitution", loop)
     else:
         out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
     for key, value in (probes or {}).items():

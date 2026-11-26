@@ -22,7 +22,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdn_experiment import DK, DV, graph_feeds, make_inputs  # noqa: E402
-from m2w.frontends.hf_llm.builders.gated_delta import _tri, build_core_graph, forward_substitution, solve_block_diagonal  # noqa: E402
+from m2w.frontends.hf_llm.builders.gated_delta import _affine_state_loop, _tri, build_core_graph, forward_substitution, solve_block_diagonal  # noqa: E402
 from m2w.ir import GraphBuilder, interpreter, serialize  # noqa: E402
 
 H, T, SUB = 32, 128, 16
@@ -98,8 +98,19 @@ def segment_graphs(dtype):
     b.output("new_state", b.reshape(state, [1, H, DK, DV]))
     out["state_loop"] = b.build()
 
+    b = GraphBuilder(f"seg_state_loop_affine_{dtype}")   # the same steps with the state-independent products moved out of the dependent chain
+    value, kcd = b.input("value", dtype, [1, H, N, SUB, DV]), b.input("k_cumdecay", dtype, [1, H, N, SUB, DK])
+    qg, attn = b.input("q_gate", dtype, [1, H, N, SUB, DK]), b.input("attn", dtype, [1, H, N, SUB, SUB])
+    kdt, total = b.input("k_decayed_t", dtype, [1, H, N, DK, SUB]), b.input("total", dtype, [1, H, N, 1, 1])
+    state = b.reshape(b.input("state", dtype, [1, H, DK, DV], "kv"), [1, H, 1, DK, DV])
+    o, new_state = _affine_state_loop(b, value, kcd, qg, attn, kdt, total, state, H, N, SUB, DK, DV, dtype)
+    b.output("out", b.reshape(o, [1, H, N, SUB, DV]))
+    b.output("new_state", new_state)
+    out["state_loop_affine"] = b.build()
+
     out["whole"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_{dtype}", solve="batched")
     out["whole_blockdiag"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_blockdiag_{dtype}", solve="blockdiag")
+    out["whole_affine"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_affine_{dtype}", solve="batched", loop="affine")
 
     b = GraphBuilder(f"seg_overhead_{dtype}")
     b.output("y", b.add(b.input("x", dtype, [1, 1, 16, 16]), b.scalar(1.0, dtype, 4)))
@@ -138,8 +149,8 @@ def main():
     split_feeds = {"a": values["a"], "rhs": values["rhs"], "n": -values["a"] * sub_mask, "al": values["a"] * ll_mask}   # only the graph that declares n / al uses them
     feeds_by_segment = {
         "decay": {"g": values["g"]}, "a_matrix": {n: values[n] for n in ("k", "beta", "decay")}, "rhs": {n: values[n] for n in ("k", "v", "beta", "gc")},
-        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("aug", "aug2", "plain")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
-        "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
+        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("aug", "aug2", "plain")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds, "state_loop_affine": loop_feeds,
+        "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_affine": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
     }
     names = []
     for segment, feeds in feeds_by_segment.items():
