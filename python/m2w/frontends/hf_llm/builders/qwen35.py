@@ -80,6 +80,19 @@ def l2_normalize(c: Ctx, x: Value, rank: int, scale: float = 1.0) -> Value:
     return b.mul(normalized, c.scalar(scale / math.sqrt(dim), rank))
 
 
+GATED_NORM_SCALE = 16.0   # the input of the gated RMSNorm (the output of the recurrence) has an rms of ~1e-2: its squares (1e-4) sit at the bottom of the float16 normal range (6.1e-5) and the NPU's reduceMean of
+#                           them lost most of its precision (bench/raw/qwen35probe.html: p_normed 1e-2 off, p_projected 7e-2). RMSNorm does not depend on the scale of its input: scale up, and the eps with it.
+
+
+def gated_rms_norm_input(c: Ctx, x: Value, gamma: Value) -> Value:
+    """gamma * x / sqrt(mean(x^2) + eps) computed on x * 16 with eps * 256: the same value, with squares in the comfortable range of float16."""
+    b = c.b
+    scaled = b.mul(x, c.scalar(GATED_NORM_SCALE, 4))
+    mean_square = b.reduce_mean(b.pow(scaled, c.scalar(2, 4)), axes=[3], keep_dimensions=True)
+    rms = b.sqrt(b.add(mean_square, c.scalar(c.dims.eps * GATED_NORM_SCALE ** 2, 4)))
+    return b.mul(c.to_compute(gamma), b.mul(scaled, b.div(c.scalar(1, 4), rms)))
+
+
 def silu(c: Ctx, x: Value) -> Value:
     return c.b.mul(x, c.b.sigmoid(x))
 
@@ -184,12 +197,12 @@ def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, prob
         out, new_state = gated_delta.gated_delta_batched(b, heads(q), heads(k), heads(v), g_h, beta_h, c.to_compute(state), SUB_CHUNK, c.compute)
     else:
         out, new_state = gated_delta.gated_delta_step(b, heads(q), heads(k), heads(v), g_h, beta_h, c.to_compute(state))
-    normed = rms_norm(c, b.transpose(out, [0, 2, 1, 3]), w["norm_gamma"], 4)               # gated RMSNorm (plain weight): norm(o) * silu(z)
+    normed = gated_rms_norm_input(c, b.transpose(out, [0, 2, 1, 3]), w["norm_gamma"])      # gated RMSNorm (plain weight): norm(o) * silu(z)
     z4 = b.reshape(z, [1, seq, hv, dv])
     gated = b.reshape(b.mul(normed, silu(c, z4)), [1, seq, vw])
     projected = quantized_linear(c, gated, w["output_projection_weight"], w["output_projection_scale"], vw, h, seq)
     if probes is not None:   # intermediate results as extra outputs (build_head_graph(probe=True)): where does a device deviate from the interpreter? see tools/qwen35_probe.py
-        probes.update(normalized=normalized, qkvz=qkvz, ba=ba, beta=beta, g=g, conv=conv, q=heads(q), k=heads(k), v=heads(v), core=out, new_state=new_state, normed=normed, projected=projected)
+        probes.update(normalized=normalized, qkvz=qkvz, ba=ba, beta=beta, g=g, conv=conv, q=heads(q), k=heads(k), v=heads(v), core=out, new_state=new_state, normed=normed, gated=gated, projected=projected)
     return c.to_f16(projected), {"new_conv_state": new_conv_state, "new_recurrent_state": c.to_f16(new_state)}
 
 

@@ -11,7 +11,7 @@ const byId = (id) => document.getElementById(id);
 const start = performance.now();
 const log = (message) => { byId("out").textContent += `[${((performance.now() - start) / 1000).toFixed(1).padStart(6)} s] ${message}\n`; console.log(message); fetch("/log", { method: "POST", body: JSON.stringify({ experiment: "qwen35probe", message }) }).catch(() => {}); };
 const count = (shape) => shape.reduce((a, b) => a * b, 1);
-const ROW_AXIS = { p_normalized: 1, p_qkvz: 1, p_ba: 1, p_beta: 1, p_g: 1, p_conv: 1, p_normed: 1, p_projected: 1, residual: 1, attention_output: 1, p_q: 2, p_k: 2, p_v: 2, p_core: 2 };   // outputs with one row per token
+const ROW_AXIS = { p_normalized: 1, p_qkvz: 1, p_ba: 1, p_beta: 1, p_g: 1, p_conv: 1, p_normed: 1, p_gated: 1, p_projected: 1, residual: 1, attention_output: 1, p_q: 2, p_k: 2, p_v: 2, p_core: 2 };   // outputs with one row per token
 
 /** error over the REAL rows (the left-padded chunk has `pad` garbage rows in front) */
 function compare(name, got, want, shape, pad) {
