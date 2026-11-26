@@ -63,6 +63,8 @@ class GraphOptions:
     value_layout: str = "natural"  # "natural": value cache [1,kvHeads,P,128] like the key cache | "transposed": [1,kvHeads,128,P] (onehot only; faster than natural on the NPU for the one-hot update,
     #                                the compiler needs the attention_guard output of the prefill graphs with it)
     lm_head_format: str = "int8-sym"  # "int8-sym": int8 per-row symmetric (scale only) | "uint8-asym": uint8 per-row asymmetric (scale + zero point, the OpenVINO export)
+    attn_split: bool = False  # attention over the main cache and the rows that are new (the staging buffer in decode, the chunk in prefill) separately: scores of both are joined (small), the context is the
+    #                           sum of two matmuls; the whole K / V cache is not concatenated (copied) with the new rows every step. Qwen3.5 only so far; gqa = "repeat" only.
     gqa: str = "repeat"  # how the attention of a GQA model reads K / V: "repeat" (K / V expanded to every query head: 4x the memory traffic) | "grouped" (the query heads of a K / V head are rows of ONE matmul,
     #                      no expansion) | "grouped16" (the same with the rows padded to 16: activation x activation matmuls with dim 4 / 8 failed to compile on the NPU in other graphs). Qwen3.5 only so far.
 

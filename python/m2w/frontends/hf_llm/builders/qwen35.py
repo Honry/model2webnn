@@ -143,12 +143,22 @@ def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_l
         staging_key = c.declare(prefix + "staging_key", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
         staging_value = c.declare(prefix + "staging_value", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
         updated_key, updated_value = update_kv_cache(c, staging_key, staging_value, key, value, R, seq, selector_prefix="staging_")
-        all_keys, all_values = b.concat([to_c(past_key), to_c(updated_key)], 2), b.concat([to_c(past_value), to_c(updated_value)], 2)
+        pieces = [(past_key, past_value, past_len), (updated_key, updated_value, R)]
     else:
         updated_key, updated_value = update_kv_cache(c, past_key, past_value, key, value, past_len, seq)
-        all_keys, all_values = b.concat([to_c(past_key), to_c(key)], 2), b.concat([to_c(past_value), to_c(value)], 2)
+        pieces = [(past_key, past_value, past_len), (key, value, seq)]
+    split = opt.attn_split and opt.gqa == "repeat"
+    if not split:
+        all_keys, all_values = b.concat([to_c(pieces[0][0]), to_c(pieces[1][0])], 2), b.concat([to_c(pieces[0][1]), to_c(pieces[1][1])], 2)
     scaled = b.mul(query, c.scalar(1.0 / math.sqrt(d.head_dim), 4))
-    if opt.gqa != "repeat":
+    if split:   # scores of every piece (the cache is not copied), joined along the key axis; the context is the sum of the pieces' matmuls
+        scores = b.add(b.concat([b.matmul(to_c(scaled), b.transpose(repeat_kv(c, to_c(k), [n, d.head_dim]), [0, 1, 3, 2])) for k, _, n in pieces], 3), to_c(mask))
+        probabilities, context, offset = b.softmax(scores, 3), None, 0
+        for _, v, n in pieces:
+            part_context = b.matmul(b.slice(probabilities, [0, 0, 0, offset], [1, d.num_heads, seq, n]), repeat_kv(c, to_c(v), [n, d.head_dim]))
+            context = part_context if context is None else b.add(context, part_context)
+            offset += n
+    elif opt.gqa != "repeat":
         context = grouped_attention(c, to_c(scaled), all_keys, all_values, to_c(mask), seq, total, 16 if opt.gqa == "grouped16" else 0)
     else:
         keys_t = b.transpose(repeat_kv(c, all_keys, [total, d.head_dim]), [0, 1, 3, 2])
