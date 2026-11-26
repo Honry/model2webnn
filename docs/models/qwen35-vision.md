@@ -30,7 +30,9 @@ text:   the same graphs as before; the 8 full attention layers get 3-position (t
 
 * Weights: `m2w compile ... --vision-weights int8|int8g128|int4|float16` (default **int8**: per output row symmetric, `dequantizeLinear` with scale [out, 1] and a zero point of 0: the path the lm_head runs on the NPU;
   **int8g128**: int8 data in the layout of the int4 path, `[in/128, out, 128]` with a float16 scale `[in/128, out, 1]` per block of 128 input channels (`dequantizeLinear` with an int8 zero point of 0): the
-  same size as int8 plus the block scales, a few outlier rows / blocks no longer spoil a whole row; int4: group 128 like the text layers; float16: no quantization). Biases, LayerNorm and the patch-embed bias are float16, the Conv3d kernel is a [1024, 1536] matrix in the (channel, temporal, kh, kw) order.
+  same size as int8 plus the block scales (about 0.3 GB for the whole tower, 0.6 GB for float16), a few outlier rows / blocks no longer spoil a whole row; int4: group 128 like the text layers; float16: no quantization).
+  **Recommended: `int8g128`** (the quality of float16 for practical purposes at half the size; `int8` per row is the default of the compiler until the block-scaled `dequantizeLinear` has been confirmed on the target device;
+  `float16` is the reference to compare against, `int4` is not usable). The numbers behind this are in the local notes (`python/tools/qwen35_vision_quality.py`). Biases, LayerNorm and the patch-embed bias are float16, the Conv3d kernel is a [1024, 1536] matrix in the (channel, temporal, kh, kw) order.
   About 300 MB with int8.
 * Presets: `--vision-grids 16x16 24x24 ...` (default 16x16 24x24 32x32 16x24 24x16 24x32 32x24; multiples of 2 patches). `--vision-compute-type float32|float16` (graph interior; default float32),
   `--no-vision` leaves the tower out. `m2w add-vision <package> --model <hf dir>` adds the tower to an existing package without quantizing the text again; `m2w rebuild-graphs` keeps it.
@@ -89,6 +91,9 @@ add presets with `m2w add-vision <package> --model <hf dir> --vision-grids 16x16
 * `python/tests/test_qwen35_vision.py`: the compiled graphs (numpy interpreter, packed weights) against `transformers.Qwen3_5VisionModel` loaded with the DEQUANTIZED package weights, for every preset of a
   tiny model: image embeddings and the hidden state after every block; the three weight formats; the float16 compute type; the per-grid tables against the model's own `fast_pos_embed_interpolate` /
   `rot_pos_emb`; `patchify` against `Qwen2VLImageProcessor`; `choose_grid`; `add-vision` / `rebuild-graphs`.
+* `python/tools/qwen35_vision_quality.py` (no device): the image tokens of every weight format against the ORIGINAL bfloat16 vision tower on the same pixels (cosine per token, relative error) and the greedy
+  answers / teacher-forced log-likelihood of the full model on the cases of `bench/raw/vision-suite` (transformers on the original checkpoint, transformers on the dequantized package weights of each format, and our numpy
+  runner); `--build int8g128 float16 int4` makes the sibling packages (`python/_out/qwen35-4b-vl-<format>-pkg`: text shards hard-linked, own vision shards), `--image <file>` adds a real picture to the comparison.
 * `python/tools/qwen35_vision_check.py <package> <hf dir> <image>`: the same on the real model and a real image, plus the cost of the quantization against the ORIGINAL weights and the activation ranges;
   `--export` writes the patches and the hidden state after every block into `bench/data/qwen35_vision/` (ignored) for the device check page.
 
