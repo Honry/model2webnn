@@ -36,6 +36,47 @@ Gated DeltaNet for one head (state S [dk, dv], per token: L2-normalised q, k, q 
 * Accuracy (numpy interpreter against a float64 token loop, `python/tools/gdn_experiment.py`): float32 1e-7, float16 1e-3, also for nearly parallel keys and over twelve 128-token calls with the state
   kept in float16.
 
+## How the chunkwise form is built (diagrams)
+
+"Parallel" here is the algorithm, not a WebNN feature: a WebNN graph is a DAG of operators that the device runs in dependency order (the NPU is parallel *inside* an operator, e.g. a matmul).
+The point is to replace 128 tiny dependent steps (one per token) by a few big batched matmuls plus a short dependent chain.
+
+**Where the loops went**
+
+    prompt of N tokens ---> runtime: chunks of 128 rows (the last one left-padded)             <- the chunk loop is the host loop, one dispatch chain per chunk
+                              |  state (conv 3 rows, recurrent [32,128,128]) goes in and comes out of every linear layer, like a KV cache
+                              v
+                    one chunk = HEAD, BLOCK x 31, TAIL, (lm_head on the last chunk)  - static graphs
+                              |
+                              v   inside a linear attention half (graph):
+        h --rmsnorm--> [qkvz projection] --> conv (4 taps + silu) --> q, k, v   [ba projection] --> beta, g
+                                                                         |                            |
+                                                                         +---- Gated DeltaNet core ---+---- state_in
+                                                                                        |                       |
+                                                                                        v                       v
+                                                                      gated rmsnorm * silu(z) -> out_proj      state_out
+
+**The core (`gated_delta_batched`), 128 tokens = 8 sub-chunks of 16, 32 heads**
+
+    q, k, v, g, beta  [32 heads, 128 tokens]
+        |  fold: [32 heads x 8 sub-chunks = 256 batches, 16 tokens]                 PHASE 1: no dependence on the state -> all 256 batches at once
+        |    gc    = cumulative sum of g inside the sub-chunk          (matmul with a lower-triangular constant)
+        |    D     = exp(gc_i - gc_j), lower triangular                 (decay matrix)
+        |    A     = strict-lower( (beta k) k^T * D )
+        |    [value | k_cumdecay] = (I + A)^-1 [beta v | beta k exp(gc)]   <- the only non-matmul piece: row-by-row substitution,
+        |                                                                      16 dependent steps for all 256 batches together
+        |    q_gate = q exp(gc);   attn = (q k^T) * D;   k_dec^T = (k exp(g_last - gc))^T;   total = exp(g_last)
+        v
+    unfold to [32 heads, 8 sub-chunks]                                          PHASE 2: only the state travels, 8 dependent steps
+        for s in 0 .. 7:                     (unrolled, static)
+            v_new = value_s - k_cumdecay_s @ S                  # what the state does not predict yet
+            out_s = q_gate_s @ S + attn_s @ v_new               # contribution of the past + of the sub-chunk itself
+            S     = S * total_s + k_dec_s^T @ v_new             # the new state
+        out = concat(out_0 .. out_7) ;  state_out = S
+
+Dependent chain per 128 tokens: 16 (substitution) + 8 x ~6 (phase 2) = about 60 steps of big batched operators, against 128 x ~8 tiny steps for the token recurrence
+(`gated_delta_unrolled`, the OpenVINO-style loop body unrolled), measured 5.8 ms against 17.1 ms on the NPU. Decode (one token) is the plain one-step update (`gated_delta_step`).
+
 ## What OpenVINO's own IR does, and where this package differs (OpenVINO/Qwen3.5-4B-int4-ov, `openvino_language_model.xml`)
 
 The OV IR (made for the GPU) **does use control flow**: 24 `Loop` operators, one per Gated DeltaNet layer, and 64 `ReadValue` / `Assign` pairs (the stateful variables: 24 conv states, 24 recurrent states,
