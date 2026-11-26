@@ -39,7 +39,7 @@ export interface LoadOptions extends SessionOptions {
   downloadSegments?: number;       // big files are fetched as this many parallel byte ranges (default 4; 1 = one request per file)
   onProgress?: Progress;
   /** Qwen3.5 packages with an image tower: load it (weights + graphs of the grid presets; true = every preset of the package, or { grids: [[24, 24], ...] } the ones you want). Default: not loaded (text only). */
-  vision?: boolean | { grids?: [number, number][] };
+  vision?: boolean | { grids?: [number, number][]; preload?: [number, number][] };   // grids: the presets a picture may get (default all of the package); their graphs are built on first use, preload builds some at load
 }
 export interface GenerateOptions {
   maxNewTokens?: number;

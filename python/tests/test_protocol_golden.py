@@ -90,8 +90,11 @@ def vision_vectors() -> dict:
     rng = np.random.default_rng(0)
     pixels = rng.integers(-8, 9, (3, 8, 12)).astype(np.float32)
     return {"spec": {"head_dim": spec.head_dim, "rope": spec.rope, "mrope": spec.mrope, "image_token_id": spec.vision["image_token_id"], "merge_size": spec.vision["merge_size"]},
-            "choose": [{"grids": [list(g) for g in V.DEFAULT_GRIDS], "width": w, "height": h, "patch": 16, "grid": list(V.choose_grid(V.DEFAULT_GRIDS, w, h))}
-                       for w, h in ((1000, 1000), (400, 400), (200, 200), (1824, 2358), (1500, 1000), (1000, 1500), (1280, 960), (640, 480), (4000, 3000))],
+            "choose": [{"grids": [list(g) for g in grids_of], "width": w, "height": h, "patch": 16, "detail": d, "grid": list(V.choose_grid(grids_of, w, h, 16, d))}
+                       for grids_of in (V.DEFAULT_GRIDS, V.DEFAULT_GRIDS[:2] + ((16, 24), (24, 36), (36, 24)), ((24, 24),))
+                       for w, h in ((1000, 1000), (400, 400), (200, 200), (200, 150), (100, 100), (1824, 2358), (1500, 1000), (1000, 1500), (1280, 960), (640, 480), (4000, 3000), (384, 384), (512, 256),
+                                    (768, 256), (384, 768), (3000, 1000), (1500, 1100))
+                       for d in ("low", "auto", "high")],
             "prompt": {"short": short, "grids": [list(g) for g in grids[1:]], "expanded": tokens, "positions": positions.tolist(), "rope_delta": delta},
             "rope_chunk": {"first": 3, "valid": 8, "rows": 12, "pad": 4, "cos": f(tables[0]), "sin": f(tables[1])},
             "axes": {"section": [11, 11, 10], "count": 32, "axes": protocol.mrope_axes([11, 11, 10], 32).tolist()},

@@ -8,6 +8,8 @@ Conv3d kernel: `patchify` (transformers' Qwen2VLImageProcessor `_preprocess`).
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 DEFAULT_GRIDS = ((16, 16), (24, 24), (32, 32), (16, 24), (24, 16), (24, 32), (32, 24))   # (grid_h, grid_w) in patches: 256 / 576 / 1024 patches, the 3:2 and 2:3 rectangles
@@ -75,10 +77,31 @@ def patchify(pixels: np.ndarray, grid_h: int, grid_w: int, patch: int = 16, temp
     return np.ascontiguousarray(x.reshape(grid_h * grid_w, c * temporal * patch * patch)).astype(np.float32)
 
 
-def choose_grid(grids, width: int, height: int, patch: int = 16) -> tuple:
-    """The preset for an image of width x height pixels: the closest aspect ratio (log distance; within 0.1 of the best counts as the same), then the closest size (log of the pixel count).
-    Mirrors protocol.ts chooseGrid."""
-    aspect = lambda g: abs(np.log((g[1] / g[0]) / (width / height)))   # noqa: E731
-    best = min(aspect(g) for g in grids)
-    near = [g for g in grids if aspect(g) <= best + 0.1]
-    return min(near, key=lambda g: (abs(np.log(g[0] * g[1] * patch * patch / (width * height))), g))
+DETAIL_PATCHES = {"low": 256, "auto": 576, "high": 1024}   # the patch budget of a detail level: 16x16 (64 image tokens), 24x24 (144), 32x32 (256)
+UPSCALE_AREA = 1.5                                          # a preset may have at most this many times the (budget limited) patches of the picture, unless it is the smallest preset
+
+
+def choose_grid(grids, width: int, height: int, patch: int = 16, detail: str = "auto") -> tuple:
+    """The preset for an image of width x height pixels among `grids`, automatically (docs/models/qwen35-vision.md). `detail` low | auto | high sets the patch budget (256 / 576 / 1024 patches).
+      1. size: the picture is never upscaled far: target = min(its patches, the budget); presets with more than UPSCALE_AREA x target patches are out (the smallest preset always stays);
+      2. aspect ratio: the closest log aspect ratio among them (presets within 0.1 of the best count as equal);
+      3. of those the one whose patch count is closest to the target (log distance, ties -> larger).
+    Mirrors protocol.ts chooseGrid (tests/golden/protocol_vectors.json)."""
+    if detail not in DETAIL_PATCHES:
+        raise ValueError(f"unknown detail level '{detail}' ({' | '.join(DETAIL_PATCHES)})")
+    patches = lambda g: g[0] * g[1]   # noqa: E731
+    target = min(width * height / (patch * patch), DETAIL_PATCHES[detail])
+    limit = max(UPSCALE_AREA * target, min(patches(g) for g in grids))
+    fit = [g for g in grids if patches(g) <= limit]
+    aspect = lambda g: abs(math.log((g[1] / g[0]) / (width / height)))   # noqa: E731
+    best = min(aspect(g) for g in fit)
+    near = [g for g in fit if aspect(g) <= best + 0.1]
+    return min(near, key=lambda g: (abs(math.log(patches(g) / target)), -patches(g), g))
+
+
+def describe_choice(grid, width: int, height: int, patch: int = 16, merge: int = 2, detail: str = "auto") -> str:
+    """what choose_grid decided, for a caption: 'landscape 3:2 image -> grid 16x24 (384 x 256 px, 96 image tokens, detail auto)'"""
+    ratio = width / height
+    shape = "square" if abs(math.log(ratio)) < 0.1 else ("landscape" if ratio > 1 else "portrait")
+    return (f"{shape} {max(width, height) / min(width, height):.2f}:1 image ({width} x {height} px) -> grid {grid_name(grid)} ({grid[1] * patch} x {grid[0] * patch} px, "
+            f"{grid[0] * grid[1] // merge ** 2} image tokens, detail {detail})")

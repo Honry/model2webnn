@@ -107,7 +107,7 @@ describe('protocol', () => {
 describe('images (Qwen3.5 image tower)', () => {
   const v = g.vision;
   it('chooses the grid preset like the reference', () => {
-    for (const c of v.choose) expect(chooseGrid(c.grids, c.width, c.height, c.patch)).toEqual(c.grid);
+    for (const c of v.choose) expect(chooseGrid(c.grids, c.width, c.height, c.patch, c.detail), JSON.stringify(c)).toEqual(c.grid);
   });
   it('expands the image pad tokens and gives the (t, h, w) positions and rope_delta of get_rope_index', () => {
     const layout = { image_token_id: v.spec.image_token_id, merge_size: v.spec.merge_size }, grids = v.prompt.grids as Grid[];

@@ -152,9 +152,15 @@ def test_patchify_equals_the_image_processor():
 
 
 def test_choose_grid():
-    g = V.DEFAULT_GRIDS   # (grid_h, grid_w): the closest aspect ratio first, then the closest pixel count
-    assert V.choose_grid(g, 1000, 1000) == (32, 32) and V.choose_grid(g, 400, 400) == (24, 24) and V.choose_grid(g, 200, 200) == (16, 16)
+    g = V.DEFAULT_GRIDS   # (grid_h, grid_w); never far above the picture's own size or the detail budget, then the closest aspect ratio, then the closest patch count
+    assert V.choose_grid(g, 1000, 1000) == (24, 24) and V.choose_grid(g, 1000, 1000, 16, "high") == (32, 32) and V.choose_grid(g, 1000, 1000, 16, "low") == (16, 16)
+    assert V.choose_grid(g, 400, 400) == (24, 24) and V.choose_grid(g, 400, 400, 16, "high") == (24, 24)   # 400 x 400 = 625 patches: no preset 1.5x above it
+    assert V.choose_grid(g, 200, 200) == (16, 16) and V.choose_grid(g, 200, 150) == (16, 16)   # a tiny picture gets the smallest preset whatever its aspect ratio
     assert V.choose_grid(g, 1824, 2358) == (32, 24) and V.choose_grid(g, 1500, 1000) == (16, 24) and V.choose_grid(g, 1000, 1500) == (24, 16) and V.choose_grid(g, 1280, 960) == (24, 32)
+    assert V.choose_grid(g, 1280, 960, 16, "low") == (16, 24) and V.choose_grid(g, 768, 256) == (16, 24)   # low: at most 384 patches; a 3:1 banner takes the widest preset
+    assert V.choose_grid(g[:2] + ((16, 24), (24, 36)), 1500, 1000, 16, "high") == (24, 36) and V.choose_grid(((24, 24),), 3000, 100) == (24, 24)   # more presets, a single preset
+    with pytest.raises(ValueError):
+        V.choose_grid(g, 100, 100, 16, "ultra")
 
 
 def test_add_vision_to_a_text_only_package_and_rebuild_graphs(tmp_path_factory):

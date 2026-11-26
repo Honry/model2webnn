@@ -295,14 +295,14 @@ def linear_prefill_controls(C: int, valid: int):
 # ---------------------------------------------------------------------------------------------------------------------
 # images (Qwen3.5 image tower, docs/models/qwen35-vision.md): preprocessing, the prompt, 3-position interleaved MRoPE
 # ---------------------------------------------------------------------------------------------------------------------
-def prepare_image(image, spec: ModelSpec, grids, grid=None):
-    """image: a PIL image (RGB) -> (patches float32 [N, patch_vector], grid): the preset whose aspect ratio / size fit the image (`vision.choose_grid`, or `grid`), the image resized to exactly
+def prepare_image(image, spec: ModelSpec, grids, grid=None, detail: str = "auto"):
+    """image: a PIL image (RGB) -> (patches float32 [N, patch_vector], grid): the preset whose aspect ratio / size fit the image (`vision.choose_grid` with the `detail` level low | auto | high, or `grid`), the image resized to exactly
     grid * patch pixels (bicubic like the Hugging Face image processor), rescaled by 1 / 255, normalised with the mean / std of model.json and patchified in the order of the Conv3d kernel.
     The browser runtime does the same with a canvas (its resize differs a little from PIL's bicubic: the vision graphs are verified on the SAME pixels)."""
     from PIL import Image
 
     v = spec.vision
-    grid = tuple(grid) if grid else vision.choose_grid(grids, image.width, image.height, v["patch_size"])
+    grid = tuple(grid) if grid else vision.choose_grid(grids, image.width, image.height, v["patch_size"], detail)
     size = (grid[1] * v["patch_size"], grid[0] * v["patch_size"])
     pixels = np.asarray(image.convert("RGB").resize(size, Image.BICUBIC), np.float32).transpose(2, 0, 1)   # [3, H, W]
     mean, std = np.asarray(v["image_mean"], np.float32).reshape(3, 1, 1), np.asarray(v["image_std"], np.float32).reshape(3, 1, 1)

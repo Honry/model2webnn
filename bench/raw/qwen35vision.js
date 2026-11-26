@@ -43,7 +43,7 @@ async function main() {
     if (!pkg.plan.vision) throw new Error("this package has no image tower");
     log(`package vision: weights ${pkg.plan.vision.weights}, graph compute type ${pkg.plan.vision.compute_type}, presets ${pkg.plan.vision.presets.map((p) => p.grid.join("x")).join(", ")}`);
     const context = await navigator.ml.createContext({ deviceType: param("device", "npu") });
-    const tower = await VisionTower.create(context, pkg, { grids: [trace.grid] }, (p) => { if (p.stage === "build" || p.stage === "vision") log(`${p.stage} ${p.message ?? ""}`); });
+    const tower = await VisionTower.create(context, pkg, { grids: [trace.grid], preload: [trace.grid] }, (p) => { if (p.stage === "build" || p.stage === "vision") log(`${p.stage} ${p.message ?? ""}`); });   // the graphs of a preset are built on first use: preload builds this one now
     log(`loaded: weights ${(tower.weightsMs / 1000).toFixed(1)} s, graphs built in ${(tower.buildMs / 1000).toFixed(1)} s`);
     const stepwise = param("stepwise", "1") !== "0";
     if (stepwise) tower.onDispatch = (label) => log(`dispatch ${label}`);

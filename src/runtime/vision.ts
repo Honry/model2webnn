@@ -4,13 +4,13 @@
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize } from './llm-common.js';
 import type { ManifestFile, ModelPackage, Progress, VisionPlan, VisionSpecJson } from './package.js';
-import { chooseGrid, imageTokenCount, newHalf, patchify, type Grid, type Half } from './protocol.js';
+import { chooseGrid, imageTokenCount, newHalf, patchify, type Detail, type Grid, type Half } from './protocol.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type ML = any;
 
 /** An image ready for the image tower: its grid preset and the patches (float16, [grid_h * grid_w * patch_vector]); `tokens` = the image tokens it becomes. */
-export interface PreparedImage { patches: Half; grid: Grid; tokens: number; width: number; height: number }
+export interface PreparedImage { patches: Half; grid: Grid; tokens: number; width: number; height: number; detail?: Detail }
 
 /** rescale + normalise RGBA bytes (canvas ImageData) into [3, height, width] float32: (value * rescale_factor - mean) / std */
 export function pixelsFromRGBA(rgba: ArrayLike<number>, width: number, height: number, vision: Pick<VisionSpecJson, 'image_mean' | 'image_std' | 'rescale_factor'>): Float32Array {
@@ -30,18 +30,18 @@ export function patchesOf(pixels: Float32Array, grid: Grid, vision: VisionSpecJs
   return half;
 }
 
-/** The browser's preprocessing: the preset for the picture (closest aspect ratio / size among `grids`), the picture resized to exactly grid * patch pixels on a canvas, normalised, patchified.
+/** The browser's preprocessing: the preset for the picture (chooseGrid among `grids`: size, aspect ratio, `detail`), the picture resized to exactly grid * patch pixels on a canvas, normalised, patchified.
  *  `image`: anything drawImage takes (ImageBitmap, HTMLImageElement, a canvas ...). The resize is the canvas's (smooth), the Python reference uses PIL's bicubic: the vision graphs are verified on the SAME pixels. */
-export function prepareImage(image: { width: number; height: number }, vision: VisionSpecJson, grids: Grid[], grid?: Grid): PreparedImage {
-  if (!grids.length) throw new Error('no image grid preset is loaded');
+export function prepareImage(image: { width: number; height: number }, vision: VisionSpecJson, grids: Grid[], grid?: Grid, detail: Detail = 'auto'): PreparedImage {
+  if (!grids.length) throw new Error('no image grid preset to choose from');
   const width = (image as any).naturalWidth ?? image.width, height = (image as any).naturalHeight ?? image.height;
-  const chosen = grid ?? chooseGrid(grids, width, height, vision.patch_size), w = chosen[1] * vision.patch_size, h = chosen[0] * vision.patch_size;
+  const chosen = grid ?? chooseGrid(grids, width, height, vision.patch_size, detail), w = chosen[1] * vision.patch_size, h = chosen[0] * vision.patch_size;
   const canvas: any = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : Object.assign(document.createElement('canvas'), { width: w, height: h });
   const context = canvas.getContext('2d', { willReadFrequently: true });
   context.imageSmoothingEnabled = true; context.imageSmoothingQuality = 'high';
   context.drawImage(image as any, 0, 0, w, h);
   const pixels = pixelsFromRGBA(context.getImageData(0, 0, w, h).data, w, h, vision);
-  return { patches: patchesOf(pixels, chosen, vision), grid: chosen, tokens: imageTokenCount(chosen, vision.merge_size), width, height };
+  return { patches: patchesOf(pixels, chosen, vision), grid: chosen, tokens: imageTokenCount(chosen, vision.merge_size), width, height, ...(grid ? {} : { detail }) };
 }
 
 interface Preset { grid: Grid; tokens: number; head: Built; block: Built; merger: Built; patches: ML; hidden: ML[]; embeds: ML; tables: ManifestFile }
@@ -51,26 +51,36 @@ const key = (grid: Grid) => `${grid[0]}x${grid[1]}`;
 export class VisionTower {
   /** debugging (bench/raw/qwen35vision.html): keep the hidden state after HEAD and after every block readable so that debugTrace() can read them back; set BEFORE the model is loaded */
   static debugReadback = false;
+  /** the presets a picture may be given (chooseGrid picks among them): all the package has, or the restriction passed to create() */
   readonly grids: Grid[];
+  /** weightsMs: the time to load the weights; buildMs: the total time spent building graphs (a preset is built on its first use: ensure / encode) */
   buildMs = 0; weightsMs = 0;
-  lastEncode = { hostMs: 0, deviceMs: 0 };
+  lastEncode = { hostMs: 0, deviceMs: 0, buildMs: 0 };
+  /** called with { stage: 'build', message: 'build vision 24x16' } while the graphs of a preset are built; replaceable (a page shows it as a status) */
+  progress: Progress;
   private presets = new Map<string, Preset>();
+  private building = new Map<string, Promise<Preset>>();
   private head: Record<string, ML> = {}; private blocks: Record<string, ML>[] = []; private merger: Record<string, ML> = {};
   private tensors: ML[] = []; private graphs: ML[] = [];
   private busy: Promise<unknown> = Promise.resolve();
 
-  private constructor(private ctx: ML, private pkg: ModelPackage, private plan: VisionPlan, readonly vision: VisionSpecJson, grids: Grid[]) { this.grids = grids; }
+  private constructor(private ctx: ML, private pkg: ModelPackage, private plan: VisionPlan, readonly vision: VisionSpecJson, grids: Grid[], progress: Progress) { this.grids = grids; this.progress = progress; }
 
-  /** Loads the weights of the image tower to the device and builds the graphs of the requested presets (default: all the package has). */
-  static async create(ctx: ML, pkg: ModelPackage, options: { grids?: Grid[] } = {}, progress: Progress = () => {}): Promise<VisionTower> {
+  /** Loads the weights of the image tower to the device. The graphs of a grid preset are built LAZILY on its first use (about two seconds per preset on a device, the weights are shared); `grids` restricts
+   *  the presets a picture may get (default: all the package has), `preload` builds some now. */
+  static async create(ctx: ML, pkg: ModelPackage, options: { grids?: Grid[]; preload?: Grid[] } = {}, progress: Progress = () => {}): Promise<VisionTower> {
     const plan = pkg.plan.vision, vision = pkg.model.vision;
     if (!plan || !vision) throw new Error('this package has no image tower (compile it from a checkpoint with a vision tower, or `m2w add-vision`)');
     const have = plan.presets.map((p) => p.grid), wanted = options.grids?.length ? options.grids : have;
-    for (const grid of wanted) if (!have.some((g) => g[0] === grid[0] && g[1] === grid[1])) throw new Error(`the package has no image preset ${key(grid)} (it has ${have.map(key).join(', ')})`);
-    const tower = new VisionTower(ctx, pkg, plan, vision, wanted.map((g) => [g[0], g[1]] as Grid));
+    for (const grid of [...wanted, ...(options.preload ?? [])]) if (!have.some((g) => g[0] === grid[0] && g[1] === grid[1])) throw new Error(`the package has no image preset ${key(grid)} (it has ${have.map(key).join(', ')})`);
+    const tower = new VisionTower(ctx, pkg, plan, vision, wanted.map((g) => [g[0], g[1]] as Grid), progress);
     await tower.load(progress);
+    for (const grid of options.preload ?? []) await tower.ensure(grid);
     return tower;
   }
+
+  /** the presets whose graphs are built */
+  get loadedGrids(): Grid[] { return [...this.presets.values()].map((p) => p.grid); }
 
   private async tensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}) {
     checkTensorSize(dataType, shape);
@@ -97,13 +107,27 @@ export class VisionTower {
     if (blocks.length !== this.plan.depth) throw new Error(`the package lists ${blocks.length} vision blocks, the plan says ${this.plan.depth}`);
     for (const shard of blocks) { progress({ stage: 'vision', message: `vision block ${(shard.layer as number) + 1}/${blocks.length}`, loaded: shard.layer as number, total: blocks.length }); this.blocks.push(await this.upload(shard)); }
     this.weightsMs = performance.now() - t0;
-    const built = performance.now();
-    for (const grid of this.grids) await this.buildPreset(grid, progress);
-    this.buildMs = performance.now() - built;
   }
 
-  private async buildPreset(grid: Grid, progress: Progress) {
-    const entry = this.plan.presets.find((p) => p.grid[0] === grid[0] && p.grid[1] === grid[1]) as VisionPlan['presets'][number], v = this.vision;
+  /** builds the graphs of a preset if that has not happened yet (concurrent callers share one build); resolves with the milliseconds this call waited for a build (0 when it was there) */
+  async ensure(grid: Grid): Promise<number> {
+    const k = key(grid);
+    if (this.presets.has(k)) return 0;
+    const t0 = performance.now();
+    let pending = this.building.get(k);
+    if (!pending) {
+      pending = this.buildPreset(grid, this.progress).then((p) => { this.presets.set(k, p); return p; }).finally(() => this.building.delete(k));
+      this.building.set(k, pending);
+    }
+    await pending;
+    const ms = performance.now() - t0;
+    this.buildMs += ms;
+    return ms;
+  }
+
+  private async buildPreset(grid: Grid, progress: Progress): Promise<Preset> {
+    const entry = this.plan.presets.find((p) => p.grid[0] === grid[0] && p.grid[1] === grid[1]), v = this.vision;
+    if (!entry) throw new Error(`the package has no image preset ${key(grid)} (it has ${this.plan.presets.map((p) => key(p.grid)).join(', ')})`);
     const tables = this.pkg.manifest.files.find((f) => f.role === 'vision_grid' && f.grid?.[0] === grid[0] && f.grid?.[1] === grid[1]);
     if (!tables) throw new Error(`the package has no vision_grid tables for ${key(grid)}`);
     const tableBytes = await this.pkg.source.bytes(`weights/${tables.file}`, undefined, tables.bytes);
@@ -113,7 +137,7 @@ export class VisionTower {
       return new Uint8Array(tableBytes, t.offset, t.bytes);
     };
     const build = async (path: string, label: string): Promise<Built> => {
-      progress({ stage: 'build', message: label });
+      progress({ stage: 'build', message: `build ${label}` });
       const doc: GraphDoc = JSON.parse(await this.pkg.source.text(path)), builder = new (globalThis as any).MLGraphBuilder(this.ctx);
       const { inputs, outputs } = loadGraph(builder, doc, external);
       const graph = await builder.build(outputs);
@@ -127,7 +151,7 @@ export class VisionTower {
     const count = VisionTower.debugReadback ? this.plan.depth + 1 : 2, hidden: ML[] = [];
     for (let i = 0; i < count; i++) hidden.push(await this.tensor('float16', [1, n, v.hidden], readable));
     const embeds = await this.tensor('float16', [1, entry.tokens, v.out_hidden], { readable: true });
-    this.presets.set(key(grid), { grid, tokens: entry.tokens, head, block, merger, patches, hidden, embeds, tables });
+    return { grid, tokens: entry.tokens, head, block, merger, patches, hidden, embeds, tables };
   }
 
   private bind(graph: Built, values: Record<string, ML>, outputs = false) {
@@ -139,11 +163,11 @@ export class VisionTower {
     return out;
   }
 
-  /** the preset for a picture of this size among the loaded ones */
-  chooseGrid(width: number, height: number): Grid { return chooseGrid(this.grids, width, height, this.vision.patch_size); }
+  /** the preset for a picture of this size (chooseGrid among the candidates: size, aspect ratio, detail) */
+  chooseGrid(width: number, height: number, detail: Detail = 'auto'): Grid { return chooseGrid(this.grids, width, height, this.vision.patch_size, detail); }
 
-  /** preprocess a picture (canvas) for this tower: the preset is chosen among the loaded ones */
-  prepare(image: { width: number; height: number }, grid?: Grid): PreparedImage { return prepareImage(image, this.vision, this.grids, grid); }
+  /** preprocess a picture (canvas) for this tower: the preset is chosen automatically among the candidates (or given) */
+  prepare(image: { width: number; height: number }, grid?: Grid, detail: Detail = 'auto'): PreparedImage { return prepareImage(image, this.vision, this.grids, grid, detail); }
 
   /** The image tokens of a prepared image: HEAD, the blocks, MERGER on the device, the rows read back. -> float16 [tokens * out_hidden]. With debugReadback the hidden states are in `trace` afterwards. */
   encode(image: PreparedImage): Promise<Half> {
@@ -159,8 +183,7 @@ export class VisionTower {
   onDispatch: ((label: string) => void | Promise<void>) | null = null;
 
   private async encodeNow(image: PreparedImage): Promise<Half> {
-    const p = this.presets.get(key(image.grid));
-    if (!p) throw new Error(`the image tower has no preset ${key(image.grid)} loaded (it has ${this.grids.map(key).join(', ')})`);
+    const buildMs = await this.ensure(image.grid), p = this.presets.get(key(image.grid)) as Preset;
     const t0 = performance.now(), depth = this.plan.depth, names = this.plan.tensors;
     const pick = (weights: Record<string, ML>, list: string[]) => Object.fromEntries(list.map((n) => [n, weights[n]]));
     this.ctx.writeTensor(p.patches, image.patches);
@@ -181,13 +204,13 @@ export class VisionTower {
       this.trace = [];
       for (const t of p.hidden) { const h = newHalf(t.shape.reduce((x: number, y: number) => x * y, 1)); await this.ctx.readTensor(t, h); this.trace.push(h); }
     }
-    this.lastEncode = { hostMs: t1 - t0, deviceMs: performance.now() - t1 };
+    this.lastEncode = { hostMs: t1 - t0, deviceMs: performance.now() - t1, buildMs };
     return rows;
   }
 
   destroy() {
     for (const t of this.tensors) t.destroy?.();
     for (const g of this.graphs) g.destroy?.();
-    this.tensors = []; this.graphs = []; this.presets.clear(); this.blocks = [];
+    this.tensors = []; this.graphs = []; this.presets.clear(); this.building.clear(); this.blocks = [];
   }
 }

@@ -17,7 +17,7 @@ import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
 import { openPackage, type GemmaBlockGroup, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type QwenDecodeTable, type Variant } from './package.js';
 import {
   decodeMasks, decodeSelectors, expandImageTokens, flushSelectors, layerTypesOf, linearPrefillControls, mropePositions, newHalf, planPrefill, prefillMasks, prefillSelectors,
-  ropeTables, ropeTablesMrope, type Grid, type Half, type LayoutSpec,
+  ropeTables, ropeTablesMrope, type Detail, type Grid, type Half, type LayoutSpec,
 } from './protocol.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -83,8 +83,8 @@ export class Qwen35LLM {
     llm.adopt(llm.resolve(options));
     await llm.init(options, progress);
     if (options.vision) {
-      const grids = typeof options.vision === 'object' ? options.vision.grids : undefined;
-      llm.vision = await VisionTower.create(llm.ctx, pkg, { grids: grids as Grid[] | undefined }, progress);
+      const vision = typeof options.vision === 'object' ? options.vision : {};
+      llm.vision = await VisionTower.create(llm.ctx, pkg, { grids: vision.grids as Grid[] | undefined, preload: vision.preload as Grid[] | undefined }, progress);
     }
     llm.stats.loadMs = performance.now() - t0;
     return llm;
@@ -357,10 +357,10 @@ export class Qwen35LLM {
   }
 
   // ------------------------------------------------------------------------------------------------------------------------------- host side
-  /** a picture -> the patches of the image tower (canvas resize to the best loaded grid preset, normalise, patchify); needs LoadOptions.vision */
-  prepareImage(image: { width: number; height: number }, grid?: Grid): PreparedImage {
+  /** a picture -> the patches of the image tower (the grid preset is chosen automatically from its size and `detail`, canvas resize, normalise, patchify); needs LoadOptions.vision */
+  prepareImage(image: { width: number; height: number }, grid?: Grid, detail?: Detail): PreparedImage {
     if (!this.vision) throw new Error('this model was loaded without the image tower: pass { vision: true } to load()');
-    return this.vision.prepare(image, grid);
+    return this.vision.prepare(image, grid, detail);
   }
 
   /** the prompt with its <|image_pad|> tokens expanded for these images */
@@ -446,12 +446,14 @@ export class Qwen35LLM {
       const started = performance.now(), hidden = s.hidden, rows = new Map<number, Half>();
       let at = 0;
       const pads = tokens.flatMap((t, i) => (t === layout.image_token_id ? [i] : []));
+      let buildMs = 0;
       for (const image of images) {
         const embeds = await this.vision.encode(image);
+        buildMs += this.vision.lastEncode.buildMs;
         for (let k = 0; k < image.tokens; k++) rows.set(pads[at++], embeds.subarray(k * hidden, (k + 1) * hidden));
       }
-      imageRows = rows; visionMs = performance.now() - started;
-      this.stats.imageTokens = rows.size; this.stats.visionMs = visionMs;
+      imageRows = rows; visionMs = performance.now() - started - buildMs;
+      this.stats.imageTokens = rows.size; this.stats.visionMs = visionMs; this.stats.visionBuildMs = buildMs;
     }
     const n = tokens.length;
     if (n === 0) throw new Error('empty prompt');
@@ -547,11 +549,11 @@ export class Qwen35LLM {
     try {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
-      this.stats.imageTokens = undefined; this.stats.visionMs = undefined;
+      this.stats.imageTokens = undefined; this.stats.visionMs = undefined; this.stats.visionBuildMs = undefined;
       let logits = await this.prefill(tokens, options.images ?? []);
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: this.stats.promptTokens, graphBuilds: this.stats.graphBuilds,
-        ...(options.images?.length ? { imageTokens: this.stats.imageTokens, visionMs: this.stats.visionMs } : {}) };
+        ...(options.images?.length ? { imageTokens: this.stats.imageTokens, visionMs: this.stats.visionMs, visionBuildMs: this.stats.visionBuildMs } : {}) };
       t = performance.now();
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();

@@ -22,7 +22,7 @@ export interface Stats {
   loadMs: number; buildMs: number; weightsMs: number; prefillMs: number; prefillChunks: number; promptTokens: number; decodeSteps: number; decodeMs: number; tpotMs: number;
   stepMs: number[]; steps: StepTiming[]; flushes: number; prefillPlan: number[];
   graphBuilds: { label: string; ms: number }[];   // builder.build() time of every graph of the current session ("decode head", "prefill c256 block", "lm_head", ...)
-  imageTokens?: number; visionMs?: number;        // Qwen3.5 with images: image tokens in the prompt, time of the image tower (inside prefillMs)
+  imageTokens?: number; visionMs?: number; visionBuildMs?: number;   // Qwen3.5 with images: image tokens in the prompt, time of the image tower (inside prefillMs), time spent building the graphs of a grid preset on its first use (inside prefillMs, not in visionMs)
 }
 export const emptyStats = (): Stats => ({ loadMs: 0, buildMs: 0, weightsMs: 0, prefillMs: 0, prefillChunks: 0, promptTokens: 0, decodeSteps: 0, decodeMs: 0, tpotMs: 0, stepMs: [], steps: [], flushes: 0, prefillPlan: [], graphBuilds: [] });
 

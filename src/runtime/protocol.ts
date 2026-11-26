@@ -269,12 +269,32 @@ export interface VisionLayout { image_token_id: number; merge_size: number }
 /** the image tokens of a grid: one per merge block */
 export const imageTokenCount = (grid: Grid, merge: number) => (grid[0] * grid[1]) / (merge * merge);
 
-/** The preset for an image of width x height pixels: the closest aspect ratio (log distance; within 0.1 of the best counts as the same), then the closest pixel count. */
-export function chooseGrid(grids: Grid[], width: number, height: number, patch = 16): Grid {
-  const aspect = (g: Grid) => Math.abs(Math.log(g[1] / g[0] / (width / height))), best = Math.min(...grids.map(aspect));
-  const size = (g: Grid) => Math.abs(Math.log((g[0] * g[1] * patch * patch) / (width * height)));
-  const near = grids.filter((g) => aspect(g) <= best + 0.1).sort((a, b) => size(a) - size(b) || a[0] - b[0] || a[1] - b[1]);
-  return near[0];
+/** How much detail an image gets: the patch budget of the image tower (16x16 = 64 image tokens, 24x24 = 144, 32x32 = 256) */
+export type Detail = 'low' | 'auto' | 'high';
+export const DETAIL_PATCHES: Record<Detail, number> = { low: 256, auto: 576, high: 1024 };
+/** a preset may have at most this many times the (budget limited) patches of the picture, unless it is the smallest preset */
+export const UPSCALE_AREA = 1.5;
+
+/** The preset for an image of width x height pixels among `grids`, automatically (python vision.choose_grid is the specification; tests/golden/protocol_vectors.json keeps the two identical):
+ *   1. size: the picture is never upscaled far: target = min(its patches, the detail budget); presets with more than UPSCALE_AREA x target patches are out (the smallest preset always stays);
+ *   2. aspect ratio: the closest log aspect ratio among them (presets within 0.1 of the best count as equal);
+ *   3. of those the one whose patch count is closest to the target (log distance, ties -> larger). */
+export function chooseGrid(grids: Grid[], width: number, height: number, patch = 16, detail: Detail = 'auto'): Grid {
+  if (!(detail in DETAIL_PATCHES)) throw new Error(`unknown detail level '${detail}' (low | auto | high)`);
+  if (!grids.length) throw new Error('no image grid preset to choose from');
+  const patches = (g: Grid) => g[0] * g[1];
+  const target = Math.min((width * height) / (patch * patch), DETAIL_PATCHES[detail]);
+  const limit = Math.max(UPSCALE_AREA * target, Math.min(...grids.map(patches)));
+  const fit = grids.filter((g) => patches(g) <= limit);
+  const aspect = (g: Grid) => Math.abs(Math.log(g[1] / g[0] / (width / height))), best = Math.min(...fit.map(aspect));
+  const distance = (g: Grid) => Math.abs(Math.log(patches(g) / target));
+  return fit.filter((g) => aspect(g) <= best + 0.1).sort((a, b) => distance(a) - distance(b) || patches(b) - patches(a) || a[0] - b[0] || a[1] - b[1])[0];
+}
+
+/** what chooseGrid decided, for a caption: 'landscape 1.50:1 image (1500 x 1000 px) -> grid 16x24 (384 x 256 px, 96 image tokens, detail auto)' */
+export function describeGrid(grid: Grid, width: number, height: number, patch = 16, merge = 2, detail: Detail = 'auto'): string {
+  const ratio = width / height, shape = Math.abs(Math.log(ratio)) < 0.1 ? 'square' : ratio > 1 ? 'landscape' : 'portrait';
+  return `${shape} ${(Math.max(width, height) / Math.min(width, height)).toFixed(2)}:1 image (${width} x ${height} px) -> grid ${grid[0]}x${grid[1]} (${grid[1] * patch} x ${grid[0] * patch} px, ${(grid[0] * grid[1]) / (merge * merge)} image tokens, detail ${detail})`;
 }
 
 /** The prompt as the model sees it: every <|image_pad|> (one per image, in order) becomes imageTokenCount copies for the grid of its image; a run that already has that length stays. */

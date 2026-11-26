@@ -70,10 +70,13 @@ describe('Qwen3.5 image tower on a validating mock of WebNN', () => {
     expect(() => llm.prepareImage({ width: 10, height: 10 })).toThrow(/without the image tower/);
   });
 
-  it('loads the weights of every block and the graphs of the requested presets, and dispatches HEAD, the blocks and MERGER with every input bound by name', async () => {
+  it('loads the weights of every block, builds the graphs of a preset on first use, and dispatches HEAD, the blocks and MERGER with every input bound by name', async () => {
     const { llm, context } = await loaded({ vision: { grids: [[4, 4], [4, 6]] } });
     const tower = llm.vision!;
-    expect(tower.grids).toEqual([[4, 4], [4, 6]]);
+    expect(tower.grids).toEqual([[4, 4], [4, 6]]);   // the candidates a picture may get
+    expect(tower.loadedGrids).toEqual([]);   // nothing is built yet
+    const messages: string[] = [];
+    tower.progress = (p) => { if (p.stage === 'build') messages.push(p.message ?? ''); };
     const rowsOf = (shape: number[]) => shape.join('x');
     // weights: 2 blocks x 18 tensors + head (patch embed: int8 weight + scale + bias) + merger, as the manifest lists them
     expect(context.tensors.filter((t) => rowsOf(t.shape) === '384x128' && t.dataType === 'int8').length).toBe(2);   // qkv of the two blocks
@@ -91,7 +94,15 @@ describe('Qwen3.5 image tower on a validating mock of WebNN', () => {
     expect(dispatched[1].inputs.qkv_weight).not.toBe(dispatched[2].inputs.qkv_weight);
     expect(dispatched[2].inputs.hidden_states).toBe(dispatched[1].outputs.next_hidden_states);
     expect(dispatched[3].inputs.hidden_states).toBe(dispatched[2].outputs.next_hidden_states);
-    await expect(tower.encode(fakeImage([6, 4]))).rejects.toThrow(/no preset 6x4 loaded/);
+    expect(tower.loadedGrids).toEqual([[4, 6]]);
+    expect(messages).toEqual(['build vision 4x6 head', 'build vision 4x6 block', 'build vision 4x6 merger']);   // built on first use, once
+    await tower.encode(image);
+    expect(messages.length).toBe(3);
+    expect(tower.lastEncode.buildMs).toBe(0);
+    await tower.encode(fakeImage([6, 4]));   // not a candidate, but a preset of the package: built on demand
+    expect(tower.loadedGrids).toEqual([[4, 6], [6, 4]]);
+    await expect(tower.encode(fakeImage([8, 8]))).rejects.toThrow(/no image preset 8x8/);
+    await expect(tower.ensure([4, 4])).resolves.toBeGreaterThanOrEqual(0);
     expect(tower.buildMs).toBeGreaterThanOrEqual(0);
   });
 
@@ -124,6 +135,35 @@ describe('Qwen3.5 image tower on a validating mock of WebNN', () => {
       expect(llm.vision!.trace.length).toBe(3);   // HEAD + 2 blocks
       expect(llm.vision!.trace[0].length).toBe(16 * 128);
     } finally { VisionTower.debugReadback = false; }
+  });
+
+  it('preload builds presets at load; concurrent first uses share one build', async () => {
+    const { llm, context } = await loaded({ vision: { preload: [[4, 4]] } });
+    expect(llm.vision!.loadedGrids).toEqual([[4, 4]]);
+    expect(llm.vision!.grids).toEqual([[4, 4], [4, 6], [6, 4]]);
+    const graphs = context.dispatches.length;
+    context.onRead = (_t: MockTensor, d: any) => { d.fill(0.25); };
+    await Promise.all([llm.vision!.encode(fakeImage([4, 6])), llm.vision!.encode(fakeImage([4, 6]))]);
+    expect(llm.vision!.loadedGrids).toEqual([[4, 4], [4, 6]]);
+    expect(context.dispatches.length - graphs).toBe(8);
+  });
+
+  it('chooses the preset automatically from the size of the picture and the detail level (prepareImage, llm.prepareImage)', async () => {
+    const { llm } = await loaded({ vision: true });
+    class FakeCanvas {
+      constructor(public width: number, public height: number) {}
+      getContext() { return { drawImage() {}, getImageData: (_x: number, _y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4).fill(128) }) }; }
+    }
+    (globalThis as any).OffscreenCanvas = FakeCanvas;
+    try {
+      // patch 8: the tiny package's presets are 4x4 / 4x6 / 6x4 (16 / 24 / 24 patches)
+      expect(llm.prepareImage({ width: 1000, height: 1000 }).grid).toEqual([4, 4]);
+      expect(llm.prepareImage({ width: 1500, height: 1000 }).grid).toEqual([4, 6]);
+      expect(llm.prepareImage({ width: 1000, height: 1500 }, undefined, 'low').grid).toEqual([6, 4]);
+      const explicit = llm.prepareImage({ width: 10, height: 10 }, [6, 4]);
+      expect(explicit.grid).toEqual([6, 4]); expect(explicit.detail).toBeUndefined();
+      expect(llm.prepareImage({ width: 50, height: 50 }, undefined, 'high').detail).toBe('high');
+    } finally { delete (globalThis as any).OffscreenCanvas; }
   });
 
   it('rejects a preset the package does not have', async () => {
