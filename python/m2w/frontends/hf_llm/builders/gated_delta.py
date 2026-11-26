@@ -87,7 +87,7 @@ def forward_substitution(b: GraphBuilder, a: Value, rhs: Value, dtype: str) -> V
 
 
 def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, block: int = 8, style: str = "aug", probes: list | None = None, split_inputs: tuple | None = None,
-                         combine: str = "matmul") -> Value:
+                         combine: str = "sub") -> Value:
     """X = (I + A)^-1 RHS for a strictly lower-triangular A [1,H,2*block,2*block] WITHOUT dependent row steps: split A = Ad + Al (Ad: the two strictly lower-triangular diagonal blocks, Al: the lower-left block),
     M = I + Ad is block diagonal, so M^-1 = (I - Ad)(I + Ad^2)(I + Ad^4) is a handful of 16 x 16 matmuls (the powers of a block of 8 vanish after 8: exact; each block of 8 is short enough for the product form
     to stay accurate in float16), and (M + Al)^-1 = M^-1 - M^-1 Al M^-1 exactly (Al M^-1 Al = 0). The row-by-row substitution (`forward_substitution`) needs 16 dependent steps of tiny operators, which is
@@ -106,7 +106,8 @@ def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, bloc
     else:
         n, lower = b.mul(b.mul(a, mask(diag, ("bd_diag", c, dtype))), minus_one), b.mul(a, mask(lower_left, ("bd_ll", c, dtype)))
     inverse = unit_lower_inverse(b, n, c, dtype, order=block, style=style, probes=probes)                                    # M^-1
-    if combine == "matmul":   # M^-1 - M^-1 Al M^-1 = M^-1 (I - Al M^-1): M^-1 only ever feeds matmuls
+    # combine = "sub": M^-1 - M^-1 Al M^-1 (measured right on the NPU, 8.5e-3 on its own); "matmul": M^-1 (I - Al M^-1) is the same value and came out WRONG on the NPU (bench/raw/gdn.html, seg_bd_aug2)
+    if combine == "matmul":
         t = b.matmul(inverse, b.sub(_identity(b, c, dtype), b.matmul(lower, inverse)))
     else:
         t = b.sub(inverse, b.matmul(b.matmul(inverse, lower), inverse))
