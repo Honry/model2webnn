@@ -406,6 +406,11 @@
  },
  "recommended": {
   "blocks_per_graph": 1,
-  "prefill_blocks_per_graph": 1
+  "prefill_blocks_per_graph": 1,
+  "sampling": {
+   "temperature": 0.5,
+   "top_p": 0.9,
+   "top_k": 40
+  }
  }
 }
