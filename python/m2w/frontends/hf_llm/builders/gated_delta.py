@@ -86,7 +86,8 @@ def forward_substitution(b: GraphBuilder, a: Value, rhs: Value, dtype: str) -> V
     return b.concat(rows, 2)
 
 
-def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, block: int = 8, style: str = "plain", probes: list | None = None, split_inputs: tuple | None = None) -> Value:
+def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, block: int = 8, style: str = "aug", probes: list | None = None, split_inputs: tuple | None = None,
+                         combine: str = "matmul") -> Value:
     """X = (I + A)^-1 RHS for a strictly lower-triangular A [1,H,2*block,2*block] WITHOUT dependent row steps: split A = Ad + Al (Ad: the two strictly lower-triangular diagonal blocks, Al: the lower-left block),
     M = I + Ad is block diagonal, so M^-1 = (I - Ad)(I + Ad^2)(I + Ad^4) is a handful of 16 x 16 matmuls (the powers of a block of 8 vanish after 8: exact; each block of 8 is short enough for the product form
     to stay accurate in float16), and (M + Al)^-1 = M^-1 - M^-1 Al M^-1 exactly (Al M^-1 Al = 0). The row-by-row substitution (`forward_substitution`) needs 16 dependent steps of tiny operators, which is
@@ -105,10 +106,13 @@ def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, bloc
     else:
         n, lower = b.mul(b.mul(a, mask(diag, ("bd_diag", c, dtype))), minus_one), b.mul(a, mask(lower_left, ("bd_ll", c, dtype)))
     inverse = unit_lower_inverse(b, n, c, dtype, order=block, style=style, probes=probes)                                    # M^-1
-    correction = b.matmul(b.matmul(inverse, lower), inverse)                                                                  # M^-1 Al M^-1
+    if combine == "matmul":   # M^-1 - M^-1 Al M^-1 = M^-1 (I - Al M^-1): M^-1 only ever feeds matmuls
+        t = b.matmul(inverse, b.sub(_identity(b, c, dtype), b.matmul(lower, inverse)))
+    else:
+        t = b.sub(inverse, b.matmul(b.matmul(inverse, lower), inverse))
     if probes is not None:
-        probes.extend([n, lower, inverse, correction])
-    return b.matmul(b.sub(inverse, correction), rhs)
+        probes.extend([n, lower, inverse, t])
+    return b.matmul(t, rhs)
 
 
 def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, beta: Value, state: Value, dtype: str, base: int, probes: dict | None = None, solve: str = "neumann"):

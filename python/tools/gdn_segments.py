@@ -67,15 +67,10 @@ def segment_graphs(dtype):
     b.output("solved", solve_block_diagonal(b, a, rhs, dtype, SUB // 2))
     out["subst_blockdiag"] = b.build()
 
-    for variant in ("dup", "aug", "probed", "inputs"):   # ways to write the same solve; which one does the NPU compile correctly?
+    for variant, kwargs in (("aug", {"style": "aug", "combine": "sub"}), ("aug2", {"style": "aug", "combine": "matmul"}), ("plain", {"style": "plain", "combine": "sub"})):   # ways to write the same solve
         b = GraphBuilder(f"seg_bd_{variant}_{dtype}")
         a, rhs = b.input("a", dtype, [1, HN, SUB, SUB]), b.input("rhs", dtype, [1, HN, SUB, DV + DK])
-        probes = [] if variant == "probed" else None
-        split = (b.input("n", dtype, [1, HN, SUB, SUB]), b.input("al", dtype, [1, HN, SUB, SUB])) if variant == "inputs" else None
-        solved = solve_block_diagonal(b, a, rhs, dtype, SUB // 2, style="plain" if variant in ("probed", "inputs") else variant, probes=probes, split_inputs=split)
-        b.output("solved", solved)
-        for i, p in enumerate(probes or []):   # every intermediate result is also an output: an extra consumer of each (what made the earlier wrong graphs right)
-            b.output(f"probe{i}", p)
+        b.output("solved", solve_block_diagonal(b, a, rhs, dtype, SUB // 2, **kwargs))
         out[f"bd_{variant}"] = b.build()
 
     b = GraphBuilder(f"seg_products_{dtype}")
@@ -143,7 +138,7 @@ def main():
     split_feeds = {"a": values["a"], "rhs": values["rhs"], "n": -values["a"] * sub_mask, "al": values["a"] * ll_mask}   # only the graph that declares n / al uses them
     feeds_by_segment = {
         "decay": {"g": values["g"]}, "a_matrix": {n: values[n] for n in ("k", "beta", "decay")}, "rhs": {n: values[n] for n in ("k", "v", "beta", "gc")},
-        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("dup", "aug", "probed", "inputs")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
+        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("aug", "aug2", "plain")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
         "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
     }
     names = []
