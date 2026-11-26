@@ -45,9 +45,10 @@ The PLE table is only ever read one row per token: it must not be loaded as a wh
 
 ## Decode block groups (`--blocks-per-graph K`)
 
-Measured per graph on the NPU, a decode BLOCK graph costs about 1.9 ms whatever its size (sliding own 1.89, sliding shared 1.86, full own 2.19, full shared 2.38 ms; 41 blocks = about 80 of the 91 ms of a
-decode step): dispatch overhead, not bandwidth. A group fuses K consecutive BLOCKs into one graph (Aion with 5 blocks per graph: 47.6 -> 43.8 ms). Decode only; `prefillBlocksPerGraph > 1` is refused
-(prefill grouping gave no TTFT gain).
+A group fuses K consecutive BLOCKs into one graph (fewer dispatches; Aion with 5 blocks per graph: 47.6 -> 43.8 ms). Decode only; `prefillBlocksPerGraph > 1` is refused (prefill grouping gave no TTFT gain).
+
+**Which K?** On Gemma 4 E4B (LNL NPU) only **K = 3** gave a repeatable gain (about 6 % TPOT, three alternating runs each, no overlap); K = 2 and K = 4 showed none, although they dispatch less than K = 1.
+The estimate of `bench/raw/m2wgraphs.html` (single graphs, the same weights dispatched 20 times) overstates the gain: judge a K with the chat page, repeated and alternating with K = 1.
 
 * **Schedule.** The N - 1 = 41 BLOCKs (BLOCK i = feed-forward half of layer i + attention half of layer i + 1) are cut into runs of K, the last run may be shorter (K = 3: 13 groups of 3 + one of 2 = 14
   dispatches instead of 41). The block kinds differ (sliding / full x own / shared K / V), so a graph exists per distinct SEQUENCE of kinds: key = the kinds joined by `-` (`so` / `fo` = sliding / full attention
