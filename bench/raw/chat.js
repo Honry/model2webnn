@@ -30,7 +30,7 @@
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=5";
-import { setupVisionTab } from "./vision-tab.js?v=1";
+import { setupVisionTab } from "./vision-tab.js?v=2";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -969,19 +969,31 @@ async function run() {
               chunkGiven: !!(query.get("prefillChunkSize") ?? query.get("chunk")), chunkSizes: urlSessionOptions.chunkSizes });
         const want = (select, value) => { if (value && [...select.options].some((option) => option.value === String(value))) select.value = value; };
         want(maxLengthSelect, query.get("maxLength")); maxLengthSelect.dispatchEvent(new Event("change"));
+        if (query.get("maxLength") && maxLengthSelect.value !== query.get("maxLength")) {   // the package only has the lengths it was compiled with: say so instead of silently using another one
+            const have = [...maxLengthSelect.options].map((option) => option.value).join(", ");
+            byId("optionWarning").textContent = `maxLength=${query.get("maxLength")} is not in this package (it has ${have}): using ${maxLengthSelect.value}`;
+            log("option_not_available", byId("optionWarning").textContent, { requested_max_length: +query.get("maxLength"), available_max_lengths: [...maxLengthSelect.options].map((option) => +option.value) });
+        }
         want(chunkSizeSelect, query.get("prefillChunkSize") ?? query.get("chunk"));
         if (peek.plan.vision && visionSetting() !== null) {   // Qwen3.5 with an image tower: the Chat | Vision tabs (one loaded model for both)
             byId("tabs").style.display = "";
             const override = visionSetting(), detail = ["low", "auto", "high"].includes(query.get("detail")) ? query.get("detail") : "auto";
             visionTab = setupVisionTab({ byId, log, spec: peek.model.vision, presets: override === true ? peek.plan.vision.presets.map((p) => p.grid) : override, detail, isBusy: () => busy,
-                generate: (question, maxNewTokens, options) => visionGenerate(question, maxNewTokens, options), onDetail: () => syncUrl() });
+                generate: (question, maxNewTokens, options) => visionGenerate(question, maxNewTokens, options), onDetail: () => syncUrl(), session: () => sessionSummary(), greedy: query.get("temperature") === "0" });
             if (query.get("maxNewTokens") ?? query.get("maxNew")) byId("visionMaxNew").value = query.get("maxNewTokens") ?? query.get("maxNew");
             if (query.get("question")) visionTab.setQuestion(query.get("question"));
         }
         document.querySelector("header h1").childNodes[0].textContent = `${packageEntry.label} on WebNN `;
         document.querySelector("header h1 small").textContent = `model package · compiled by m2w (${peek.index.compiler}) · target ${peek.index.target}`;
     }
+    const sessionSummary = () => {   // what the next generation uses: the loaded session, else the option selects (shared by both tabs)
+        const loaded = model?.currentSession?.();
+        if (loaded) return `session: ${loaded.label}`;
+        const chunks = chunkSizesInput.value.trim() || chunkSizeSelect.value;
+        return `session (not loaded yet): max length ${maxLengthSelect.selectedOptions[0]?.text ?? maxLengthSelect.value}, prefill chunk ${chunks}, blocks/graph ${blocksSelect.value}, ${computeTypeSelect.value}`;
+    };
     const updateOptionControls = () => {
+        visionTab?.setSession(sessionSummary());
         if (packageMode) { packageControls.lock(); return; }
         stagingRowsSelect.disabled = kvStyleSelect.value !== "staged";
     };
@@ -1056,6 +1068,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             setCell("sum-build", seconds(model.sharedBuildMs + session.buildMs), `shared ${seconds(model.sharedBuildMs)} + max-length / chunk / option specific ${seconds(session.buildMs)}`);
             setCell("sum-startup", seconds(startupMs), firstLoad ? "tokenizer + load weights + build graphs" : reused ? "same settings: the session was already loaded" : "reload: weights were already loaded, only the session graphs were rebuilt");
             setMetric("metric-startup", (startupMs / 1000).toFixed(1), "s", firstLoad ? `incl. weights; graphs built in ${seconds(model.sharedBuildMs + session.buildMs)}` : reused ? "already loaded" : `reload, weights kept; graphs ${seconds(session.buildMs)}`);
+            visionTab?.setSession(sessionSummary());
             byId("loadedLabel").textContent = packageMode ? `loaded: ${session.label}` : `loaded: max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
             updateTokenCount();
             setStatus("ready");
@@ -1073,7 +1086,10 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         setBusy(true);
         try {
             const { maxLength, chunkSize, options } = selected();
-            return await model.generate(await model.getSession(maxLength, chunkSize, options), question, maxNewTokens, generateOptions);
+            const session = await model.getSession(maxLength, chunkSize, options);   // the SAME selects as the Chat tab: max length, chunk sizes, blocks / graph, compute type
+            visionTab.setSession(`session: ${session.label}`);
+            const result = await model.generate(session, question, maxNewTokens, generateOptions);
+            return { ...result, maxLength: session.maxLength, sessionLabel: session.label };
         } finally { setBusy(false); }
     };
     byId("loadButton").onclick = loadModel;

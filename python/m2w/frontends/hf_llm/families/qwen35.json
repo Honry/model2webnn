@@ -4,7 +4,7 @@
   "architectures": ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
   "builder": "qwen35",
   "qk_norm": true,
-  "recommended": {"blocks_per_graph": 4, "prefill_blocks_per_graph": 1, "prefill_chunks": [64, 128]},
+  "recommended": {"blocks_per_graph": 4, "prefill_blocks_per_graph": 1, "prefill_chunks": [64, 128], "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}},
   "chat_template_kwargs": { "Qwen3_5ForConditionalGeneration": { "enable_thinking": false }, "Qwen3_5ForCausalLM": { "enable_thinking": false } },
   "tensors": {
     "embed": "model.language_model.embed_tokens.weight",

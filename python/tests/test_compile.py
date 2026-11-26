@@ -84,7 +84,7 @@ def test_recommended_session_options_of_the_families(tmp_path):
     from m2w.frontends.hf_llm import arch
 
     assert arch.recommended_session("qwen3-like") == {"blocks_per_graph": 5, "prefill_blocks_per_graph": 1}
-    assert arch.recommended_session("gemma4")["blocks_per_graph"] == 3 and arch.recommended_session("qwen3.5") == {"blocks_per_graph": 4, "prefill_blocks_per_graph": 1, "prefill_chunks": [64, 128]}
+    assert arch.recommended_session("gemma4")["blocks_per_graph"] == 3 and arch.recommended_session("qwen3.5") == {"blocks_per_graph": 4, "prefill_blocks_per_graph": 1, "prefill_chunks": [64, 128], "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}}
     spec = arch.ModelSpec.from_dict(json.loads((Path(__file__).resolve().parents[2] / "tests" / "golden" / "tiny-gemma4-package" / "model.json").read_text()))
     assert C.resolve_blocks_per_graph(spec, None) == (1, 3) and C.resolve_blocks_per_graph(spec, (1, 2)) == (1, 2)   # not given: single blocks + the recommended K; given: as asked
     # a package that has no groups of the recommended size recommends single blocks; set_recommended rewrites an existing package from the family file

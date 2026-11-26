@@ -290,7 +290,13 @@
  },
  "recommended": {
   "blocks_per_graph": 1,
-  "prefill_blocks_per_graph": 1
+  "prefill_blocks_per_graph": 1,
+  "sampling": {
+   "temperature": 0.7,
+   "top_p": 0.8,
+   "top_k": 20,
+   "presence_penalty": 1.5
+  }
  },
  "vision": {
   "description": "the image tower in the NPUW-style split, one set of graphs per grid preset (grid = patches in height x width): HEAD (patches [N, patch_vector] -> hidden_states [1,N,hidden]: patch matmul + bias + the position embedding of the grid), BLOCK x depth (ONE graph, weights bound per layer: hidden_states -> next_hidden_states), MERGER (hidden_states -> image_embeds [1,N/4,out_hidden]). Patches are in merge-block order and in the (channel, temporal, kh, kw) order of the Conv3d kernel (protocol patchify). The external constants pos_embed (HEAD) and rope_cos / rope_sin (BLOCK) are the tensors of the manifest file with role vision_grid and this grid; the weights are the manifest files vision_head / vision_block (layer i) / vision_merger.",

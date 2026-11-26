@@ -45,7 +45,7 @@ export interface Plan {
   graphs: Record<string, VariantGraphs>;
   weights: { attention: string[] | Record<string, string[]>; ffn: string[]; final_norm: string[]; embedding: string[]; head_extra?: string[]; ple_table?: string[] };
   /** the session options the model family runs best with (families/*.json `recommended`): used when the caller does not choose; a group size the package does not contain is already 1 here */
-  recommended?: { blocks_per_graph?: number; prefill_blocks_per_graph?: number; prefill_chunks?: number[] };
+  recommended?: { blocks_per_graph?: number; prefill_blocks_per_graph?: number; prefill_chunks?: number[]; sampling?: { temperature?: number; top_p?: number; top_k?: number; presence_penalty?: number } };
   architecture_kind?: 'gemma4' | 'qwen35';
   vision?: VisionPlan;
   state?: { conv_channels: number; v_heads: number; k_dim: number; v_dim: number; layers: number[] };   // qwen35: the layers that carry a Gated DeltaNet state instead of a KV cache

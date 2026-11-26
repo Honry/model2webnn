@@ -46,8 +46,10 @@ export interface GenerateOptions {
   /** Qwen3.5 with an image tower: the images of the prompt, in the order of its <|image_pad|> tokens (one per image; the runtime expands each to one token per image patch group): Qwen35LLM.prepareImage() makes them */
   images?: PreparedImage[];
   stopTokens?: number[];           // default: the model's eos tokens
-  temperature?: number;            // 0 / undefined = greedy
+  temperature?: number;            // 0 = greedy; undefined: the package's recommended sampling (Qwen3.5: plan.recommended.sampling) or greedy
   topK?: number;
+  topP?: number;                   // nucleus: the smallest set of the top-k candidates whose probability adds up to topP (Qwen3.5 only)
+  presencePenalty?: number;        // subtracted from the logit of every token already generated (Qwen3.5 only)
   signal?: AbortSignal;
 }
 export type { StepTiming, Stats } from './llm-common.js';

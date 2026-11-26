@@ -163,6 +163,12 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
     }
 
     /** options: { image: { source (ImageBitmap / canvas / img), name, detail }, onText(text) (default: the answer box of the Chat tab) } -> a summary of the generation */
+    // sampling: the package recommends parameters (plan.recommended.sampling: the model card's); ?temperature=0 = greedy (reproducible), ?temperature=0.7&topK=20&topP=0.8&presencePenalty=1.5 override
+    const samplingFromUrl = () => {
+        const query = new URLSearchParams(location.search), out = {};
+        for (const [name, key] of [["temperature", "temperature"], ["topK", "topK"], ["topP", "topP"], ["presencePenalty", "presencePenalty"]]) if (query.get(name) !== null) out[key] = +query.get(name);
+        return out;
+    };
     async function generate(session, userText, maxNewTokens, options = {}) {
         let ids, images = [], imageInfo = null;
         const showText = options.onText ?? ((text) => { byId("answer").textContent = text; });
@@ -184,7 +190,7 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         log("generation_started", `Generation started: max length ${session.maxLength}, ${total} prompt tokens in ${chunks} chunk(s) (${plan.join("+")}), up to ${maxNewTokens} new tokens`, { max_length: session.maxLength, prompt_tokens: total, prefill_chunks: chunks, prefill_plan: plan, variant: session.variant.id, image_tokens: total - ids.length + images.length });
         setStatus("prefill");
         const start = performance.now(), generated = [];
-        for await (const token of llm.generate(ids, { maxNewTokens, images })) {
+        for await (const token of llm.generate(ids, { maxNewTokens, images, ...samplingFromUrl(), ...(options.sampling ?? {}) })) {
             if (stop.has(token)) break;
             generated.push(token);
             showText(tokenizer.decode(generated));

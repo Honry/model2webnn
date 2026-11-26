@@ -522,14 +522,23 @@ export class Qwen35LLM {
     return logits;
   }
 
-  private pickToken(logits: Half, o: GenerateOptions): number {
-    const vocab = this.pkg.model.vocab;
-    if (!o.temperature) {
+  /** The sampling of a generation: what the caller passed; without a temperature the model card's parameters of the package (plan.recommended.sampling: greedy decoding of these models falls into repetition
+   *  loops); temperature 0 = greedy. */
+  private samplingOf(o: GenerateOptions) {
+    const rec = o.temperature === undefined ? this.pkg.plan.recommended?.sampling : undefined;
+    return { temperature: o.temperature ?? rec?.temperature ?? 0, topK: o.topK ?? rec?.top_k ?? 40, topP: o.topP ?? (o.temperature === undefined ? rec?.top_p : undefined) ?? 1,
+      presencePenalty: o.presencePenalty ?? (o.temperature === undefined ? rec?.presence_penalty : undefined) ?? 0 };
+  }
+
+  private pickToken(logits: Half, o: GenerateOptions, seen: Set<number> = new Set()): number {
+    const vocab = this.pkg.model.vocab, s = this.samplingOf(o);
+    if (s.presencePenalty) for (const t of seen) logits[t] -= s.presencePenalty;   // presence penalty: a token that was generated before is less likely (in place: the logits are read anew every step)
+    if (!s.temperature) {
       let best = 0, bestValue = -Infinity;
       for (let i = 0; i < vocab; i++) if (logits[i] > bestValue) { bestValue = logits[i]; best = i; }
       return best;
     }
-    const k = Math.min(o.topK ?? 40, vocab), top: number[] = [];
+    const k = Math.min(s.topK, vocab), top: number[] = [];
     for (let i = 0; i < vocab; i++) {
       if (top.length < k || logits[i] > logits[top[top.length - 1]]) {
         top.push(i);
@@ -537,9 +546,14 @@ export class Qwen35LLM {
         if (top.length > k) top.pop();
       }
     }
-    const max = logits[top[0]], weights = top.map((i) => Math.exp((logits[i] - max) / (o.temperature as number)));
-    let r = Math.random() * weights.reduce((x, y) => x + y, 0);
-    for (let j = 0; j < top.length; j++) { r -= weights[j]; if (r <= 0) return top[j]; }
+    const max = logits[top[0]], weights = top.map((i) => Math.exp((logits[i] - max) / s.temperature)), total = weights.reduce((x, y) => x + y, 0);
+    let keep = top.length;
+    if (s.topP < 1) {   // nucleus: the shortest prefix of the (sorted) candidates with the probability mass >= topP
+      let mass = 0;
+      for (keep = 0; keep < top.length && mass < s.topP; keep++) mass += weights[keep] / total;
+    }
+    let r = Math.random() * weights.slice(0, keep).reduce((x, y) => x + y, 0);
+    for (let j = 0; j < keep; j++) { r -= weights[j]; if (r <= 0) return top[j]; }
     return top[0];
   }
 
@@ -555,9 +569,11 @@ export class Qwen35LLM {
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: this.stats.promptTokens, graphBuilds: this.stats.graphBuilds,
         ...(options.images?.length ? { imageTokens: this.stats.imageTokens, visionMs: this.stats.visionMs, visionBuildMs: this.stats.visionBuildMs } : {}) };
       t = performance.now();
+      const seen = new Set<number>();   // the tokens generated so far (presence penalty)
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();
-        const token = this.pickToken(logits, options);
+        const token = this.pickToken(logits, options, seen);
+        seen.add(token);
         const samplingMs = performance.now() - sampleStart;
         yield token;
         if (stop.has(token) || i === max - 1 || this.cacheFull || options.signal?.aborted) break;

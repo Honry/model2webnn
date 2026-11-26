@@ -29,7 +29,7 @@ async function loaded(options: LoadOptions = {}) {
 }
 async function run(llm: Qwen35LLM, tokens: number[], maxNewTokens: number) {
   const out: number[] = [];
-  for await (const token of llm.generate(tokens, { maxNewTokens, stopTokens: [] })) out.push(token);
+  for await (const token of llm.generate(tokens, { maxNewTokens, stopTokens: [], temperature: 0 })) out.push(token);   // greedy: the package may recommend sampling
   return out;
 }
 const internals = (llm: Qwen35LLM) => llm as any;
@@ -214,5 +214,35 @@ describe('Qwen3.5 recommended session options of the plan', () => {
     expect(await session(withRecommended({ blocks_per_graph: 3, prefill_chunks: [16, 32] }), { blocksPerGraph: 1, chunkSize: 32 })).toEqual([1, [32]]);   // the caller chose
     expect(await session(withRecommended({ blocks_per_graph: 3, prefill_chunks: [16, 32] }), { chunkSizes: [32] })).toEqual([3, [32]]);
     expect(await session(withRecommended({ blocks_per_graph: 4, prefill_chunks: [64, 128] }))).toEqual([1, [16]]);                              // the package has neither: no error for a default
+  });
+});
+
+describe('Qwen3.5 sampling', () => {
+  const sample = (llm: Qwen35LLM, logits: number[], options: object, seen = new Set<number>()) => (llm as any).pickToken(Float32Array.from(logits), options, seen) as number;
+  const withSampling = (sampling: object): PackageSource => ({
+    ...fsSource, id: 'tiny-qwen35-sampling',
+    text: async (path) => (path === 'plan.json' ? JSON.stringify({ ...JSON.parse(await fsSource.text(path)), recommended: { sampling } }) : fsSource.text(path)),
+  });
+  const vocab = 300, logits = Array.from({ length: vocab }, () => 0);
+  logits[10] = 5; logits[20] = 4.5; logits[30] = 1;
+
+  it('temperature 0 is greedy and the presence penalty moves the pick away from a token that was generated', async () => {
+    installMockBuilder();
+    const llm = await Qwen35LLM.load(fsSource, { context: new MockContext(), cache: false, blocksPerGraph: 1 });
+    expect(sample(llm, logits, { temperature: 0 })).toBe(10);
+    expect(sample(llm, logits, { temperature: 0, presencePenalty: 1.5 }, new Set([10]))).toBe(20);   // 5 - 1.5 < 4.5
+    expect(sample(llm, logits, { temperature: 0, presencePenalty: 0.2 }, new Set([10]))).toBe(10);
+  });
+
+  it('top-k / top-p restrict the candidates; the recommended sampling of the plan is used only when the caller passes no temperature', async () => {
+    installMockBuilder();
+    const llm = await Qwen35LLM.load(withSampling({ temperature: 0.7, top_p: 0.8, top_k: 2, presence_penalty: 0 }), { context: new MockContext(), cache: false, blocksPerGraph: 1 });
+    const picks = new Set<number>();
+    for (let i = 0; i < 300; i++) picks.add(sample(llm, logits, {}));   // no temperature: sampled with the recommendation (top-k 2: tokens 10 and 20 only; top-p 0.8 keeps token 10 alone at 0.7)
+    expect([...picks].every((t) => t === 10 || t === 20)).toBe(true);
+    const nucleus = new Set<number>();
+    for (let i = 0; i < 300; i++) nucleus.add(sample(llm, logits, { temperature: 0.7, topP: 0.5, topK: 5 }));
+    expect([...nucleus]).toEqual([10]);   // token 10 alone has more than half of the probability mass
+    expect(sample(llm, logits, { temperature: 0 })).toBe(10);   // an explicit 0 is greedy whatever the plan recommends
   });
 });

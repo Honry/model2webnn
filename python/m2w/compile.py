@@ -381,6 +381,8 @@ def recommended_for(spec: arch.ModelSpec, plan: dict) -> dict:
     chunks = [int(c) for c in rec.get("prefill_chunks", []) if int(c) in set(plan.get("prefill_chunks", []))]   # the prefill chunk sizes of the family's choice that the package has (none of them: the runtime picks the smallest)
     if chunks:
         out["prefill_chunks"] = chunks
+    if rec.get("sampling"):   # the sampling parameters of the model card (greedy decoding of these models falls into repetition loops): the runtime uses them when the caller does not choose
+        out["sampling"] = dict(rec["sampling"])
     return out
 
 
