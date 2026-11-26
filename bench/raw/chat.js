@@ -29,8 +29,9 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=5";
-import { setupVisionTab } from "./vision-tab.js?v=2";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=6";
+import { answerView } from "./answer-view.js?v=1";
+import { setupVisionTab } from "./vision-tab.js?v=3";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -827,7 +828,7 @@ async function loadSharedModel() {
         const planRows = plan.reduce((sum, size) => sum + size, 0);
         session.promptPad = tensorScatterKv ? planRows - tokenIds.length : 0;   // tensorScatter: padding rows in FRONT of the prompt (see writePrefillChunkInputsTensorScatter)
         if (tensorScatterKv && planRows > session.pastLength) throw new Error(`the prefill chunks (${planRows} rows) do not fit into the ${session.pastLength}-row cache`);
-        byId("answer").textContent = ""; byId("summaryLine").textContent = `prompt: ${tokenIds.length} tokens …`;
+        answerView(byId("answer")).set(""); byId("summaryLine").textContent = `prompt: ${tokenIds.length} tokens …`;
         log("generation_started", `Generation started: max length ${session.maxLength}, ${tokenIds.length} prompt tokens in ${chunkCount} chunk(s) (${chunkDescription}), up to ${maxNewTokens} new tokens`,
             { max_length: session.maxLength, prompt_tokens: tokenIds.length, prefill_chunks: chunkCount, prefill_plan: plan });
         const generationStart = performance.now();
@@ -853,7 +854,7 @@ async function loadSharedModel() {
         if (stagedKv) { session.staging.base = tokenIds.length; session.staging.filled = 0; session.flushCount = 0; }   // the prompt is in the main cache, the staging buffer is empty
         for (let step = 0; step < maxNewTokens && !END_OF_TEXT_TOKENS.has(token) && session.promptPad + position < session.pastLength; step++) {
             generated.push(token);
-            byId("answer").textContent = tokenizer.decode(generated, { skip_special_tokens: true });
+            answerView(byId("answer")).set(tokenizer.decode(generated, { skip_special_tokens: true }));   // rendered as Markdown, at most every 100 ms
             setStatus(`decode step ${step + 1}/${maxNewTokens}`);
             const stepStart = performance.now();
             if (stagedKv && session.staging.filled === stagingRows) flushStaging(session);   // counted in this step's time
@@ -866,7 +867,7 @@ async function loadSharedModel() {
         }
         if (!END_OF_TEXT_TOKENS.has(token)) generated.push(token);
         const answer = tokenizer.decode(generated, { skip_special_tokens: true });
-        byId("answer").textContent = answer;
+        answerView(byId("answer")).set(answer); answerView(byId("answer")).flush();   // the log below gets the RAW text
         highlight();
 
         const inferenceMs = performance.now() - generationStart;

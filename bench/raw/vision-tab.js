@@ -5,6 +5,7 @@
 // host = { byId, log, spec: model.json `vision`, presets: [[h, w], ...] (the candidates of the picture: every preset of the package, or the ?visionGrids= override), detail: initial detail level,
 //          generate(question, maxNewTokens, { image: { source, name, detail }, onText }) -> result, isBusy() }
 import { chooseGrid, describeGrid } from "../../lib/runtime/index.js";
+import { answerView } from "./answer-view.js?v=1";
 
 const QUESTIONS = {
     describe: "Describe this image in detail.",
@@ -18,7 +19,7 @@ const ms = (value) => Math.round(value) + " ms";
 export function setupVisionTab(host) {
     const { byId, spec } = host;
     const state = { bitmap: null, name: "", detail: host.detail ?? "auto", result: null };
-    const grids = host.presets;
+    const grids = host.presets, answer = answerView(byId("visionAnswer"));   // Markdown | Raw view of the answer (the returned result and the log keep the raw text)
     byId("detailSelect").value = state.detail;
     byId("visionGreedy").checked = !!host.greedy;
 
@@ -93,7 +94,8 @@ export function setupVisionTab(host) {
 
     function showResult(result) {
         const full = result.promptTokens + result.generated >= result.maxLength - 1;
-        if (full) byId("visionAnswer").textContent += `\n\n[stopped: the KV cache of this session holds ${result.maxLength} tokens (${result.promptTokens} prompt + ${result.generated} generated). Open the page with a longer max length that the package has.]`;
+        if (full) answer.set(answer.text + `\n\n[stopped: the KV cache of this session holds ${result.maxLength} tokens (${result.promptTokens} prompt + ${result.generated} generated). Open the page with a longer max length that the package has.]`);
+        answer.flush();
         const rows = [
             ["Preprocess (canvas resize + patchify)", ms(result.preprocessMs), "host"],
             ["Graph build (first use of this grid only)", result.buildMs ? ms(result.buildMs) : "0 (already built)", result.buildMs ? "host" : "dim"],
@@ -112,14 +114,15 @@ export function setupVisionTab(host) {
 
     byId("visionRun").onclick = async () => {
         if (!state.bitmap) return;
-        byId("visionAnswer").textContent = "";
+        answer.set("");
         try {
             const result = await host.generate(byId("visionQuestion").value, +byId("visionMaxNew").value || 128,
-                { image: { source: state.bitmap, name: state.name, detail: state.detail }, ...(byId("visionGreedy").checked ? { sampling: { temperature: 0 } } : {}), onText: (text) => { byId("visionAnswer").textContent = text; } });
+                { image: { source: state.bitmap, name: state.name, detail: state.detail }, ...(byId("visionGreedy").checked ? { sampling: { temperature: 0 } } : {}), onText: (text) => answer.set(text) });
+            answer.flush();
             state.result = result;
             if (result) showResult(result);
         } catch (error) {
-            byId("visionAnswer").textContent = "FAILED: " + error;
+            answer.set("FAILED: " + error); answer.flush();
             host.log("fatal", "Vision generation failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500));
         }
     };

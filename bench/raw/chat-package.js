@@ -3,6 +3,7 @@
 // What a package offers is fixed when it is compiled (max lengths, prefill chunks, graph variants = KV protocol x compute type x staging rows, blocks per graph): the page offers exactly that,
 // and a change of any session option rebuilds the graphs of the loaded model (LLM.reconfigure) while the weights stay on the device.
 import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
+import { answerView } from "./answer-view.js?v=1";
 
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 const packagesUrl = new URL("../packages/", import.meta.url);
@@ -171,7 +172,7 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
     };
     async function generate(session, userText, maxNewTokens, options = {}) {
         let ids, images = [], imageInfo = null;
-        const showText = options.onText ?? ((text) => { byId("answer").textContent = text; });
+        const chatAnswer = answerView(byId("answer")), showText = options.onText ?? ((text) => chatAnswer.set(text));   // the Chat tab shows Markdown; the log below gets the raw text
         if (options.image) {   // a picture with the prompt: the grid preset is chosen from its size and the detail level, resized on a canvas, patchified; the pad token is expanded by the runtime
             if (!llm.vision) throw new Error("the image tower is not loaded (this package has none, or the page was opened with vision=0)");
             const { source, name = "", detail = "auto" } = options.image, started = performance.now();
@@ -220,6 +221,7 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         log("generation_finished", `Generated ${generated.length} tokens: TTFT ${seconds(prefillMs)}, TPOT ${rounded(tpot)} ms/token (${rounded(tps)} tokens/s); first decode steps ms: ${first}`,
             { ...(images.length ? { image_tokens: llm.stats.imageTokens, vision_ms: Math.round(llm.stats.visionMs ?? 0), vision_build_ms: Math.round(llm.stats.visionBuildMs ?? 0), grid: imageInfo.grid, detail: imageInfo.detail, preprocess_ms: Math.round(imageInfo.preprocessMs) } : {}), max_length: session.maxLength, prefill_chunk_size: session.chunkSize, prefill_plan: plan, variant: session.variant.id, prompt_tokens: total, prefill_chunks: chunks, ttft_ms: Math.round(prefillMs), tpot_ms: rounded(tpot),
               tokens_per_second: rounded(tps), decode_steps: steps.length, inference_ms: Math.round(inferenceMs), generated_token_ids: generated, text: answer, kv_flushes: s.flushes, package: url });
+        if (!options.onText) chatAnswer.flush();
         setStatus("ready");
         return { text: answer, promptTokens: total, imageTokens: llm.stats.imageTokens ?? 0, generated: generated.length, prefillMs, visionMs: llm.stats.visionMs ?? 0, buildMs: imageInfo?.buildMs ?? 0, preprocessMs: imageInfo?.preprocessMs ?? 0,
             tpotMs: tpot, tps, inferenceMs, grid: imageInfo?.grid ?? null, pixels: imageInfo?.pixels ?? "", detail: imageInfo?.detail ?? "" };
