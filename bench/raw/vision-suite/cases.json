@@ -1,0 +1,112 @@
+{
+ "cases": [
+  {
+   "id": "ocr-large",
+   "image": "ocr-large.png",
+   "width": 640,
+   "height": 384,
+   "question": "What text is written in the image? Reply with the text only.",
+   "expect_all": [
+    "webnn",
+    "2026"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "notes": "large printed text: the baseline OCR case"
+  },
+  {
+   "id": "ocr-small",
+   "image": "ocr-small.png",
+   "width": 640,
+   "height": 480,
+   "question": "What is the order number and what is the total? Reply briefly.",
+   "expect_all": [
+    "48213",
+    "127.50"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "notes": "small printed text lines: resolution test, a bigger grid helps (16x16 loses it)"
+  },
+  {
+   "id": "color-circle",
+   "image": "color-circle.png",
+   "width": 384,
+   "height": 384,
+   "question": "What color is the circle?",
+   "expect_all": [
+    "red"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "notes": "one red circle on white"
+  },
+  {
+   "id": "count-squares",
+   "image": "count-squares.png",
+   "width": 640,
+   "height": 320,
+   "question": "How many squares are there? Answer with a number.",
+   "expect_all": [],
+   "expect_any": [
+    "5",
+    "five"
+   ],
+   "expect_regex": [],
+   "notes": "five blue squares in a row"
+  },
+  {
+   "id": "left-right",
+   "image": "left-right.png",
+   "width": 512,
+   "height": 384,
+   "question": "Which color is on the left? Answer with one word.",
+   "expect_all": [
+    "red"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "notes": "red square left, green square right"
+  },
+  {
+   "id": "bar-chart",
+   "image": "bar-chart.png",
+   "width": 512,
+   "height": 512,
+   "question": "Which bar is the tallest? Answer with the letter only.",
+   "expect_all": [],
+   "expect_any": [],
+   "expect_regex": [
+    "\\bD\\b"
+   ],
+   "notes": "bars A B C D, D is the tallest"
+  },
+  {
+   "id": "banner-wide",
+   "image": "banner-wide.png",
+   "width": 768,
+   "height": 256,
+   "question": "What word is written on the banner? Reply with the word only.",
+   "expect_all": [
+    "banner"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "notes": "3:1 wide banner: tests the aspect-ratio preset choice"
+  },
+  {
+   "id": "tall-triangle",
+   "image": "tall-triangle.png",
+   "width": 384,
+   "height": 768,
+   "question": "What shape is this and what color is it?",
+   "expect_all": [
+    "triangle",
+    "green"
+   ],
+   "expect_any": [],
+   "expect_regex": [],
+   "notes": "1:2 tall image with a green triangle"
+  }
+ ]
+}
