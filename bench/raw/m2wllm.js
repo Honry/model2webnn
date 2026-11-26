@@ -49,7 +49,7 @@ async function check() {
     const expected = await (await fetch(url, { cache: "no-store" })).json();
     if (expected.max_length !== llm.maxLength) log(`note: verification.json was made with max length ${expected.max_length}, this model runs ${llm.maxLength} (results may differ slightly)`);
     const generated = [];
-    for await (const token of llm.generate(expected.prompt_ids, { maxNewTokens: expected.generated_ids.length, stopTokens: [] })) generated.push(token);
+    for await (const token of llm.generate(expected.prompt_ids, { maxNewTokens: expected.generated_ids.length, stopTokens: [], temperature: 0 })) generated.push(token);
     const same = generated.filter((t, i) => t === expected.generated_ids[i]).length, firstSame = generated[0] === expected.generated_ids[0];
     const s = llm.stats;
     log(`expected ${JSON.stringify(expected.generated_ids)}`);
@@ -93,7 +93,7 @@ async function bench() {
     const tokens = +byId("maxNew").value || 64;
     for (const run of [1, 2]) {   // the second run shows what a warm model does
         const generated = [];
-        for await (const token of llm.generate(expected.prompt_ids, { maxNewTokens: tokens, stopTokens: [] })) generated.push(token);
+        for await (const token of llm.generate(expected.prompt_ids, { maxNewTokens: tokens, stopTokens: [], temperature: 0 })) generated.push(token);
         const s = llm.stats;
         log(`RESULT bench run ${run}: ${tokens} tokens, TTFT ${s.prefillMs.toFixed(0)} ms, TPOT ${s.tpotMs.toFixed(1)} ms (mean of all ${s.decodeSteps} steps)`);
         reportSteps(`run ${run}`);

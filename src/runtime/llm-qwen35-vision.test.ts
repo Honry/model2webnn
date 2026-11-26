@@ -53,7 +53,7 @@ const fakeImage = (grid: [number, number], seed = 1): PreparedImage => {
 };
 async function run(llm: Qwen35LLM, tokens: number[], images: PreparedImage[], maxNewTokens: number) {
   const out: number[] = [];
-  for await (const token of llm.generate(tokens, { maxNewTokens, stopTokens: [], images })) out.push(token);
+  for await (const token of llm.generate(tokens, { maxNewTokens, stopTokens: [], images, temperature: 0 })) out.push(token);
   return out;
 }
 

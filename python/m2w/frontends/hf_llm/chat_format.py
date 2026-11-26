@@ -132,3 +132,14 @@ def fill_placeholders(text: str, now) -> str:
     """Replace <<date:fmt>> by strftime(fmt) of ``now`` (what the runtime does)."""
     import re
     return re.sub(r"<<date:([^>]*)>>", lambda m: now.strftime(m.group(1)), text)
+
+
+def end_of_turn_token_id(fmt: dict, tokenizer_json: dict) -> Optional[int]:
+    """The id of the special token that ends an assistant turn (the start of assistant_suffix, e.g. <|im_end|>), or None. config.json / generation_config.json may not list it among the
+    eos tokens (Qwen3.5: only <|endoftext|>), and then a model that ends its answer with it would keep generating and show the token."""
+    suffix = fmt.get("assistant_suffix", "")
+    best = None
+    for token in tokenizer_json.get("added_tokens", []):
+        if token.get("special") and token["content"] and suffix.startswith(token["content"]) and (best is None or len(token["content"]) > len(best["content"])):
+            best = token
+    return None if best is None else int(best["id"])

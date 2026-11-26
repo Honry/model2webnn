@@ -4,7 +4,7 @@
   "architectures": ["Gemma4ForConditionalGeneration", "Gemma4ForCausalLM"],
   "builder": "gemma4",
   "qk_norm": true,
-  "recommended": {"blocks_per_graph": 3, "prefill_blocks_per_graph": 1},
+  "recommended": {"blocks_per_graph": 3, "prefill_blocks_per_graph": 1, "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64}},
   "tensors": {
     "embed": "model.language_model.embed_tokens.weight",
     "final_norm": "model.language_model.norm.weight",

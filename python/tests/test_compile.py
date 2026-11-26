@@ -83,7 +83,7 @@ def test_recommended_session_options_of_the_families(tmp_path):
 
     from m2w.frontends.hf_llm import arch
 
-    assert arch.recommended_session("qwen3-like") == {"blocks_per_graph": 5, "prefill_blocks_per_graph": 1}
+    assert arch.recommended_session("qwen3-like")["blocks_per_graph"] == 5
     assert arch.recommended_session("gemma4")["blocks_per_graph"] == 3 and arch.recommended_session("qwen3.5") == {"blocks_per_graph": 4, "prefill_blocks_per_graph": 1, "prefill_chunks": [64, 128], "sampling": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}}
     spec = arch.ModelSpec.from_dict(json.loads((Path(__file__).resolve().parents[2] / "tests" / "golden" / "tiny-gemma4-package" / "model.json").read_text()))
     assert C.resolve_blocks_per_graph(spec, None) == (1, 3) and C.resolve_blocks_per_graph(spec, (1, 2)) == (1, 2)   # not given: single blocks + the recommended K; given: as asked
@@ -91,9 +91,9 @@ def test_recommended_session_options_of_the_families(tmp_path):
     pkg = tmp_path / "pkg"
     shutil.copytree(Path(__file__).resolve().parents[2] / "tests" / "golden" / "tiny-gemma4-package", pkg)
     plan = json.loads((pkg / "plan.json").read_text())
-    assert plan["recommended"] == {"blocks_per_graph": 3, "prefill_blocks_per_graph": 1}   # the golden package has groups of 1 .. 5
+    assert plan["recommended"] == {"blocks_per_graph": 3, "prefill_blocks_per_graph": 1, "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64}}   # the golden package has groups of 1 .. 5
     plan["blocks_per_graph"] = [1, 2]
     (pkg / "plan.json").write_text(json.dumps(plan))
     C.set_recommended(pkg, progress=lambda m: None)
-    assert json.loads((pkg / "plan.json").read_text())["recommended"] == {"blocks_per_graph": 1, "prefill_blocks_per_graph": 1}
+    assert json.loads((pkg / "plan.json").read_text())["recommended"] == {"blocks_per_graph": 1, "prefill_blocks_per_graph": 1, "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 64}}
     assert any(f["path"] == "plan.json" for f in json.loads((pkg / "m2w.json").read_text())["files"])   # the file index was refreshed

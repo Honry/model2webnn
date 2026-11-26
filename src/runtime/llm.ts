@@ -8,6 +8,7 @@
 import type { PreparedImage } from './vision.js';
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
+import { pickToken, samplingOf } from './sampling.js';
 import { openPackage, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
   decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables,
@@ -46,10 +47,10 @@ export interface GenerateOptions {
   /** Qwen3.5 with an image tower: the images of the prompt, in the order of its <|image_pad|> tokens (one per image; the runtime expands each to one token per image patch group): Qwen35LLM.prepareImage() makes them */
   images?: PreparedImage[];
   stopTokens?: number[];           // default: the model's eos tokens
-  temperature?: number;            // 0 = greedy; undefined: the package's recommended sampling (Qwen3.5: plan.recommended.sampling) or greedy
+  temperature?: number;            // 0 = greedy; undefined: the package's recommended sampling (plan.recommended.sampling: the model card's values) or greedy
   topK?: number;
-  topP?: number;                   // nucleus: the smallest set of the top-k candidates whose probability adds up to topP (Qwen3.5 only)
-  presencePenalty?: number;        // subtracted from the logit of every token already generated (Qwen3.5 only)
+  topP?: number;                   // nucleus: the smallest set of the top-k candidates whose probability adds up to topP
+  presencePenalty?: number;        // subtracted from the logit of every token already generated
   signal?: AbortSignal;
 }
 export type { StepTiming, Stats } from './llm-common.js';
@@ -539,27 +540,6 @@ export class LLM {
     return logits;
   }
 
-  private pickToken(logits: Half, o: GenerateOptions): number {
-    const vocab = this.pkg.model.vocab;
-    if (!o.temperature) {
-      let best = 0, bestValue = -Infinity;
-      for (let i = 0; i < vocab; i++) if (logits[i] > bestValue) { bestValue = logits[i]; best = i; }
-      return best;
-    }
-    const k = Math.min(o.topK ?? 40, vocab), top: number[] = [];
-    for (let i = 0; i < vocab; i++) {
-      if (top.length < k || logits[i] > logits[top[top.length - 1]]) {
-        top.push(i);
-        top.sort((x, y) => logits[y] - logits[x]);
-        if (top.length > k) top.pop();
-      }
-    }
-    const max = logits[top[0]], weights = top.map((i) => Math.exp((logits[i] - max) / (o.temperature as number)));
-    let r = Math.random() * weights.reduce((x, y) => x + y, 0);
-    for (let j = 0; j < top.length; j++) { r -= weights[j]; if (r <= 0) return top[j]; }
-    return top[0];
-  }
-
   /** Greedy (or sampled) generation from prompt token ids; yields each new token id (the stop token is yielded too, then the loop ends). */
   async *generate(tokens: number[], options: GenerateOptions = {}): AsyncGenerator<number> {
     if (this.busy) throw new Error('a generation is already running on this model');
@@ -571,9 +551,11 @@ export class LLM {
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
       t = performance.now();
+      const seen = new Set<number>(), sampling = samplingOf(options, this.pkg.plan.recommended?.sampling);   // seen: the tokens generated so far (presence penalty)
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();
-        const token = this.pickToken(logits, options);
+        const token = pickToken(logits, this.pkg.model.vocab, sampling, seen);
+        seen.add(token);
         const samplingMs = performance.now() - sampleStart;
         yield token;
         if (stop.has(token) || i === max - 1 || this.cacheFull || options.signal?.aborted) break;

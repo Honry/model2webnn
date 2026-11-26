@@ -37,3 +37,10 @@ def test_gemma4_format_starts_with_the_bos_token():
 def test_unrenderable_template_is_reported():
     with pytest.raises(C.ChatTemplateError):
         C.derive_chat_format("{{ messages | length }}")
+
+
+def test_end_of_turn_token_is_the_special_token_the_assistant_suffix_starts_with():
+    tokenizer = {"added_tokens": [{"id": 7, "content": "<|im_end|>", "special": True}, {"id": 8, "content": "<|im", "special": True}, {"id": 9, "content": "<|im_end|>\n", "special": False},
+                                  {"id": 10, "content": "<|endoftext|>", "special": True}]}
+    assert C.end_of_turn_token_id({"assistant_suffix": "<|im_end|>\n"}, tokenizer) == 7   # the longest special token: a plain (non-special) token and a prefix of it do not count
+    assert C.end_of_turn_token_id({"assistant_suffix": "\n"}, tokenizer) is None

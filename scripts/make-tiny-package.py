@@ -36,6 +36,6 @@ except ImportError:
 else:
     write_tiny_qwen35(out / "tiny-qwen35-hf")
     qwen = compile_model(str(out / "tiny-qwen35-hf"), golden / "tiny-qwen35-package", max_lengths=(max_length,), chunks=(chunk, 2 * chunk), staging_rows=(staging,),
-                         compute_types=("float32", "float16"), blocks_per_graph=(1, 2, 3, 5), vision_grids=GRIDS, workers=2, progress=lambda m: None)
+                         compute_types=("float32", "float16"), blocks_per_graph=(1, 2, 3, 5), vision_grids=GRIDS, vision_weights="int8", workers=2, progress=lambda m: None)   # int8 per row: what the TS vision test reads (int8g128 is the product default)
     status |= verify_package(qwen, str(out / "tiny-qwen35-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, 2 * chunk])
 sys.exit(status)

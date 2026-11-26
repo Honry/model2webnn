@@ -9,6 +9,7 @@
 // Python counterpart (the executable specification): python/m2w/reference/gemma4_runner.py. Only the staged KV protocol exists.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
+import { pickToken, samplingOf } from './sampling.js';
 import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
 import { openPackage, type GemmaBlockGroup, type GemmaDecodeTable, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
@@ -461,27 +462,6 @@ export class Gemma4LLM {
     return logits;
   }
 
-  private pickToken(logits: Half, o: GenerateOptions): number {
-    const vocab = this.pkg.model.vocab;
-    if (!o.temperature) {
-      let best = 0, bestValue = -Infinity;
-      for (let i = 0; i < vocab; i++) if (logits[i] > bestValue) { bestValue = logits[i]; best = i; }
-      return best;
-    }
-    const k = Math.min(o.topK ?? 40, vocab), top: number[] = [];
-    for (let i = 0; i < vocab; i++) {
-      if (top.length < k || logits[i] > logits[top[top.length - 1]]) {
-        top.push(i);
-        top.sort((x, y) => logits[y] - logits[x]);
-        if (top.length > k) top.pop();
-      }
-    }
-    const max = logits[top[0]], weights = top.map((i) => Math.exp((logits[i] - max) / (o.temperature as number)));
-    let r = Math.random() * weights.reduce((x, y) => x + y, 0);
-    for (let j = 0; j < top.length; j++) { r -= weights[j]; if (r <= 0) return top[j]; }
-    return top[0];
-  }
-
   async *generate(tokens: number[], options: GenerateOptions = {}): AsyncGenerator<number> {
     if (this.busy) throw new Error('a generation is already running on this model');
     this.busy = true;
@@ -492,9 +472,11 @@ export class Gemma4LLM {
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
       t = performance.now();
+      const seen = new Set<number>(), sampling = samplingOf(options, this.pkg.plan.recommended?.sampling);   // seen: the tokens generated so far (presence penalty)
       for (let i = 0; i < max; i++) {
         const sampleStart = performance.now();
-        const token = this.pickToken(logits, options);
+        const token = pickToken(logits, this.pkg.model.vocab, sampling, seen);
+        seen.add(token);
         const samplingMs = performance.now() - sampleStart;
         yield token;
         if (stop.has(token) || i === max - 1 || this.cacheFull || options.signal?.aborted) break;

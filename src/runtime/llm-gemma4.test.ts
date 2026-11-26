@@ -32,7 +32,7 @@ async function loaded(options: LoadOptions = {}) {
 }
 async function run(llm: Gemma4LLM, tokens: number[], maxNewTokens: number) {
   const out: number[] = [];
-  for await (const token of llm.generate(tokens, { maxNewTokens, stopTokens: [] })) out.push(token);
+  for await (const token of llm.generate(tokens, { maxNewTokens, stopTokens: [], temperature: 0 })) out.push(token);   // greedy: the package may recommend sampling
   return out;
 }
 const internals = (llm: Gemma4LLM) => llm as any;

@@ -476,6 +476,34 @@ def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, 
     return index
 
 
+def _add_end_of_turn_token(out: Path, spec: arch.ModelSpec) -> bool:
+    """Adds the token that ends an assistant turn of the chat format to the eos tokens of the spec (True when it was missing)."""
+    try:
+        fmt = json.loads((out / "chat_format.json").read_text(encoding="utf-8"))
+        token = chat_format.end_of_turn_token_id(fmt, json.loads((out / "tokenizer" / "tokenizer.json").read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return False
+    if token is None or token in spec.eos_token_ids:
+        return False
+    spec.eos_token_ids = [token, *spec.eos_token_ids]
+    return True
+
+
+def refresh_stop_tokens(package_dir, progress: Callable[[str], None] = print) -> bool:
+    """Adds the end-of-turn token of the chat format to the eos tokens of an existing package (compiled before this was done: it stopped only at <|endoftext|>); model.json and the file index are rewritten."""
+    out = Path(package_dir)
+    spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text(encoding="utf-8")))
+    if not _add_end_of_turn_token(out, spec):
+        return False
+    (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
+    index_old = json.loads((out / "m2w.json").read_text(encoding="utf-8"))
+    plan = json.loads((out / "plan.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "weights" / "manifest.json").read_text(encoding="utf-8"))
+    _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), [Path(f).name for f in index_old.get("tokenizer", [])])
+    progress(f"{out.name}: eos tokens {spec.eos_token_ids}")
+    return True
+
+
 def _bos_token(source: Path) -> str:
     """The text of the BOS token from tokenizer_config.json ('' when there is none): templates of models like Gemma start with it."""
     try:
@@ -539,7 +567,6 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     manifest = packer.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress,
                                  **({"vision": {"weights": vision_opt["weights"], "grids": vision_opt["grids"]}} if vision_opt else {}))
     graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph, vision_opt)
-    (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
     (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
 
     chat_file = None
@@ -551,6 +578,8 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
         progress(f"warning: no chat format derived ({e}); the runtime can only complete raw text")
     (out / "tokenizer").mkdir(exist_ok=True)
     tokenizer_files = [n for n in TOKENIZER_FILES if (source / n).exists() and not shutil.copy2(source / n, out / "tokenizer" / n)]
+    _add_end_of_turn_token(out, spec)
+    (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
 
     source_name = Path(model).name if Path(model).is_dir() else model   # a local folder is recorded by its name, never by its absolute path
     if "/" not in source_name and source_name.count("--") == 1:

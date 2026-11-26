@@ -39,7 +39,7 @@ describe.skipIf(!dir || !existsSync(path.join(dir, 'm2w.json')))('real package o
     context.onRead = (_t, d) => { d.fill(0); d[3] = 5; };
     const prompt = Array.from({ length: 46 }, (_, i) => 3 + (i % 50)), steps = (staged ? R : 0) + 3;   // staged: enough decode steps to need one flush
     const out: number[] = [];
-    for await (const token of llm.generate(prompt, { maxNewTokens: steps + 1, stopTokens: [] })) out.push(token);
+    for await (const token of llm.generate(prompt, { maxNewTokens: steps + 1, stopTokens: [], temperature: 0 })) out.push(token);
     expect(out.length).toBe(steps + 1);
     if (staged) {
       const flushes = gemma ? [...(llm as any).decodeSet.flush.values()].map((g: any) => g.graph) : [(llm as any).decodeSet.flush.graph];
