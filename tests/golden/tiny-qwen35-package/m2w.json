@@ -48,6 +48,31 @@
    "sha256": "743878884270dfda8031ef237c0d74b387fb836270fbbc3406d8d612029efb5f"
   },
   {
+   "path": "graphs/staged-r8-float16/decode_group_f_L128.json",
+   "bytes": 11497,
+   "sha256": "819eab9575be2354d6a5b7cd47e09f52d9594d6ba1132fddfa4131fca88d9549"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_l-f-l-l-f_L128.json",
+   "bytes": 58281,
+   "sha256": "cf2a11433678c1da83c7b79336c635f0302fe1d9fad3cec004f8696f9c48f1c9"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_l-f-l_L128.json",
+   "bytes": 36201,
+   "sha256": "8635cf47eef183514c9d5c5afa17a374a59d3f28ba77dae1d433ecd2bfea8e7a"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_l-f_L128.json",
+   "bytes": 24144,
+   "sha256": "6ee23fd0b9a7f8cbdd592c7e785ee1d48454e13e241a08b8c4e98f154b0f4d04"
+  },
+  {
+   "path": "graphs/staged-r8-float16/decode_group_l-l_L128.json",
+   "bytes": 25407,
+   "sha256": "de6110d326e09bd4ee7dac096721feff4ffff710c62c91cdcc5f27db7fd5cc3b"
+  },
+  {
    "path": "graphs/staged-r8-float16/decode_head_L128.json",
    "bytes": 10587,
    "sha256": "0c0441237da40af56320d92523651816fff20b550a0d24fa126eb33823626588"
@@ -118,6 +143,31 @@
    "sha256": "de5ce2e01c14dc72d8a06de09e7cae37be1cd5973d0ced1a6d2c26c55976467c"
   },
   {
+   "path": "graphs/staged-r8-float32/decode_group_f_L128.json",
+   "bytes": 13294,
+   "sha256": "871df37992f5094c66793499489ce36c32e854846d80948b8b047a35d64cba32"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_l-f-l-l-f_L128.json",
+   "bytes": 67003,
+   "sha256": "12055954db40ec76d8b997d3942f87eb601f3ffc9ba0c99010177c9360968cca"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_l-f-l_L128.json",
+   "bytes": 41415,
+   "sha256": "a46736e39128bc4167ed1296fdbf1f8764eaa2b039b85d5dacdce9af5ad38ea8"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_l-f_L128.json",
+   "bytes": 27648,
+   "sha256": "bf57adf590baf654343bc80cb5a29b9b25a86e42879654e2e543df324f7e7e4e"
+  },
+  {
+   "path": "graphs/staged-r8-float32/decode_group_l-l_L128.json",
+   "bytes": 28823,
+   "sha256": "27927fdb92723216573535f337ff83a444a98e3caccea1b20c00049acb3b6e85"
+  },
+  {
    "path": "graphs/staged-r8-float32/decode_head_L128.json",
    "bytes": 11874,
    "sha256": "d4d0ceae3627042bc5038cb5f2dc4817f81bd9a9920119a4a91db720525354e3"
@@ -184,8 +234,8 @@
   },
   {
    "path": "plan.json",
-   "bytes": 6699,
-   "sha256": "70cad701a5343430a5941d2ce6d5082d2eed8c3f1ddda03aba8130b646e33e1e"
+   "bytes": 10008,
+   "sha256": "94edfebfe582f6219c967a056aa1d3203a9e400618c039f5413fbcf77ac97e5c"
   },
   {
    "path": "weights/embed.safetensors",

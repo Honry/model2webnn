@@ -41,13 +41,13 @@ export function setupPackageControls(pkg, c, initial = {}) {
     const fillChunks = () => replace(c.chunkSizeSelect, chunksOf(+c.maxLengthSelect.value).map((s) => [s, `${s} tokens`]), c.chunkSizeSelect.value);
     fillChunks();
     const singleType = new Set(model.layer_types).size === 1 || plan.block_group_controls === "per_block";   // hybrid models: groups take a mask / RoPE table per block
-    const gemma = plan.architecture_kind === "gemma4";   // Gemma 4: decode block groups of any K the package lists (cut per sequence of attention kinds), no prefill groups
+    const gemma = ["gemma4", "qwen35"].includes(plan.architecture_kind);   // Gemma 4, Qwen3.5: decode block groups of any K the package lists (cut per sequence of attention kinds), no prefill groups
     const groupsOf = (table) => Object.keys(table?.block_groups ?? {}).map(Number);
     const fillBlocks = () => {
         const length = c.maxLengthSelect.value, decode = groupsOf(plan.graphs[defaultVariant.id].decode[length]), biggest = decode.length ? Math.max(...decode) : 0;
         replace(c.blocksSelect, [[1, "1"], ...(gemma ? decode.sort((a, b) => a - b).map((n) => [n, String(n)]) : singleType && biggest > 1 ? [[biggest, String(biggest)]] : [])], c.blocksSelect.value);
         const prefill = Object.values(plan.graphs[defaultVariant.id].prefill[length] ?? {}).map(groupsOf).reduce((common, list, i) => (i === 0 ? list : common.filter((n) => list.includes(n))), []);
-        replace(c.prefillBlocksSelect, gemma ? [["1", "1 (Gemma 4: decode groups only)"]] : [["0", "same as decode"], ["1", "1 (single blocks)"], ...(singleType ? prefill.map((n) => [n, String(n)]) : [])], c.prefillBlocksSelect.value);
+        replace(c.prefillBlocksSelect, gemma ? [["1", "1 (decode groups only)"]] : [["0", "same as decode"], ["1", "1 (single blocks)"], ...(singleType ? prefill.map((n) => [n, String(n)]) : [])], c.prefillBlocksSelect.value);
     };
     fillBlocks();
     // KV protocol x compute type x staging rows: only the combinations the package contains

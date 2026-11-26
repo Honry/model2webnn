@@ -70,8 +70,9 @@ class Qwen35PackageReader(Gemma4PackageReader):
 
 class Qwen35Runner:
     def __init__(self, spec: ModelSpec, weights_dir, *, max_length: int = 128, chunk_sizes=(16,), staging_rows: int = 8, opt: Optional[D.GraphOptions] = None,
-                 graphs: Optional[dict] = None, prefill_fixed_tokens: int = 200):
+                 graphs: Optional[dict] = None, prefill_fixed_tokens: int = 200, blocks_per_graph: int = 1):
         self.spec = spec
+        self.group = blocks_per_graph   # decode block groups (the prefill chain always runs one dispatch per block)
         self.opt = opt or D.GraphOptions(kv_style="staged", staging_rows=staging_rows)
         self.R, self.P = self.opt.staging_rows, max_length - 1
         self.sizes = sorted(set(chunk_sizes))
@@ -91,12 +92,21 @@ class Qwen35Runner:
         kinds = sorted(set(s.layer_kind(i) for i in range(1, s.num_layers)))
         decode = {"head": Q.build_head_graph(s, opt, seq=1, past_len=P), "blocks": {k: Q.build_block_graph(s, opt, k, seq=1, past_len=P) for k in kinds}, "tail": Q.build_tail_graph(s, opt, seq=1),
                   "flush": Q.build_flush_graph(s, staging_rows=self.R, past_len=P)}
+        if self.group > 1:
+            decode["groups"], built = [], {}   # the schedule: (first block, blocks, graph)
+            for first, blocks in Q.block_group_schedule(s, self.group):
+                kinds_of = Q.block_group_kinds(s, first, blocks)
+                key = Q.block_group_key(kinds_of)
+                if key not in built:
+                    built[key] = Q.build_block_group_graph(s, opt, kinds_of, seq=1, past_len=P)
+                decode["groups"].append((first, blocks, built[key]))
         prefill = {C: {"head": Q.build_head_graph(s, opt, seq=C, past_len=P), "tail": Q.build_tail_graph(s, opt, seq=C),
                        "blocks": {k: Q.build_block_graph(s, opt, k, seq=C, past_len=P) for k in kinds}} for C in self.sizes}
         return {"decode": decode, "prefill": prefill, "lm_head": Q.build_lm_head_graph(s, opt)}
 
     @classmethod
-    def from_package(cls, package, spec: ModelSpec, *, variant: Optional[str] = None, max_length: int = 0, chunk_sizes=None, prefill_fixed_tokens: int = 200) -> "Qwen35Runner":
+    def from_package(cls, package, spec: ModelSpec, *, variant: Optional[str] = None, max_length: int = 0, chunk_sizes=None, prefill_fixed_tokens: int = 200,
+                     decode_group: int = 1) -> "Qwen35Runner":
         package = Path(package)
         plan = json.loads((package / "plan.json").read_text(encoding="utf-8"))
         info = next(v for v in plan["variants"] if v["id"] == (variant or plan["default_variant"]))
@@ -106,13 +116,18 @@ class Qwen35Runner:
         load = lambda path: serialize.load(package / path)   # noqa: E731
         d = table["decode"][str(L)]
         decode = {"head": load(d["head"]), "tail": load(d["tail"]), "blocks": {k: load(p) for k, p in d["blocks"].items()}, "flush": load(d["flush"])}
+        if decode_group > 1:
+            if str(decode_group) not in d.get("block_groups", {}):
+                raise ValueError(f"the package has no decode block groups of {decode_group} blocks (it has {', '.join(d.get('block_groups', {})) or 'none'})")
+            loaded: dict = {}
+            decode["groups"] = [(e["first_block"], e["blocks"], loaded.setdefault(e["graph"], load(e["graph"]))) for e in d["block_groups"][str(decode_group)]]
         prefill = {}
         for C in sizes:
             f = table["prefill"][str(L)][str(C)]
             prefill[C] = {"head": load(f["head"]), "tail": load(f["tail"]), "blocks": {k: load(p) for k, p in f["blocks"].items()}}
         opt = D.GraphOptions(**{**{k: v for k, v in plan["profile"].items() if k in D.GraphOptions.__dataclass_fields__}, "compute_type": info["compute_type"], "kv_style": "staged",
                                 "staging_rows": info.get("staging_rows", 64)})
-        return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens,
+        return cls(spec, package / "weights", max_length=L, chunk_sizes=sizes, opt=opt, prefill_fixed_tokens=prefill_fixed_tokens, blocks_per_graph=decode_group,
                    graphs={"decode": decode, "prefill": prefill, "lm_head": load(table["lm_head"])})
 
     def _lm_head_externals(self) -> dict:
@@ -155,6 +170,7 @@ class Qwen35Runner:
     # ----------------------------------------------------------------------------------------------- one forward pass
     def _chain(self, graphs: dict, decode: bool, hidden, rope, masks, selectors, controls, last: bool):
         s, N = self.spec, self.spec.num_layers
+        shared_inputs = {"rope_cos", "rope_sin", "attention_mask", "staging_rows_to_keep", "staging_row_selector"}
 
         def feeds_for(layer: int) -> dict:
             kind = self.kinds[layer]
@@ -179,11 +195,25 @@ class Qwen35Runner:
         store(0, out)
         residual, attention = out["residual"], out["attention_output"]
         self.trace = [residual]   # the hidden state entering layer i (the residual of its BLOCK): what tools/qwen35_trace.py writes for the on-device comparison (bench/raw/qwen35check.html)
-        for i in range(N - 1):
-            out = run(graphs["blocks"][self.kinds[i + 1]], {"residual": residual, "attention_output": attention, **self._weights(i, self.ffn_names), **feeds_for(i + 1)})
-            store(i + 1, out)
-            residual, attention = out["next_residual"], out["next_attention_output"]
-            self.trace.append(residual)
+        if decode and self.group > 1:
+            for first, blocks, graph in graphs["groups"]:
+                feeds = {"residual": residual, "attention_output": attention}
+                for j in range(blocks):
+                    for n, v in self._weights(first + j, self.ffn_names).items():
+                        feeds[f"b{j}_{n}"] = v
+                    for n, v in feeds_for(first + j + 1).items():   # the controls are shared by the blocks of the group, the weights and the state have the prefix of their block
+                        feeds[n if n in shared_inputs else f"b{j}_{n}"] = v
+                out = run(graph, {n: v for n, v in feeds.items() if n in graph.inputs})
+                for j in range(blocks):
+                    store(first + j + 1, {n[len(f"b{j}_"):]: v for n, v in out.items() if n.startswith(f"b{j}_")})
+                residual, attention = out["next_residual"], out["next_attention_output"]
+                self.trace.append(residual)   # a group has no boundary values inside: one trace entry per group
+        else:
+            for i in range(N - 1):
+                out = run(graphs["blocks"][self.kinds[i + 1]], {"residual": residual, "attention_output": attention, **self._weights(i, self.ffn_names), **feeds_for(i + 1)})
+                store(i + 1, out)
+                residual, attention = out["next_residual"], out["next_attention_output"]
+                self.trace.append(residual)
         if not last:
             return None
         tail = run(graphs["tail"], {"residual": residual, "attention_output": attention, **self._weights(N - 1, self.ffn_names), "final_norm_gamma": self.final_gamma})

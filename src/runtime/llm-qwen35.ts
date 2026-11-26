@@ -4,11 +4,13 @@
 //  * the states are zeroed at the start of every prompt; prefill graphs of linear layers take two controls built by protocol.linearPrefillControls (valid_mask, conv_perm) for the left-padded
 //    last chunk;
 //  * the embedding is not scaled; the lm_head is built in row blocks of the table (it is too big for one WebNN tensor).
-// Python counterpart (the executable specification): python/m2w/reference/qwen35_runner.py. Only the staged KV protocol exists; there are no block groups.
+//  * decode block groups (blocksPerGraph = K > 1, a package built with --blocks-per-graph K): the N - 1 BLOCKs in runs of K, one dispatch per run (plan.chain.block_groups); the inputs of a group graph
+//    are bound by NAME: residual / attention_output of its first block, the shared controls of the full attention layers, and b<j>_ = the weights and the state / caches of block j. Prefill has no groups.
+// Python counterpart (the executable specification): python/m2w/reference/qwen35_runner.py. Only the staged KV protocol exists.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
-import { openPackage, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type QwenDecodeTable, type Variant } from './package.js';
+import { openPackage, type GemmaBlockGroup, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type QwenDecodeTable, type Variant } from './package.js';
 import {
   decodeMasks, decodeSelectors, flushSelectors, layerTypesOf, linearPrefillControls, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables, type Half,
 } from './protocol.js';
@@ -33,12 +35,12 @@ export class Qwen35LLM {
 
   private ctx!: ML;
   private P = 0; private R = 0; private N: number;
-  private fixedTokens = 200;
+  private fixedTokens = 200; private groupSize = 1;
   private kinds: string[];
   private weights: Record<string, ML>[] = [];
   private finalGamma!: ML;
   private lmHead!: Built;
-  private decodeSet!: { head: Built; blocks: Map<string, Built>; tail: Built; flush: Built };
+  private decodeSet!: { head: Built; blocks: Map<string, Built>; tail: Built; flush: Built; groups: { first: number; blocks: number; built: Built }[] };
   private prefillSets = new Map<number, PrefillSet>();
   private kv = new Map<number, Cache>(); private kvSpare = new Map<number, Cache>(); private stg = new Map<number, Cache>(); private stgSpare = new Map<number, Cache>();
   private state = new Map<number, LinearState>(); private stateSpare = new Map<number, LinearState>();
@@ -89,12 +91,16 @@ export class Qwen35LLM {
     const available = Object.keys(table.prefill[key]).map(Number).sort((a, b) => a - b);
     const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
     for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
-    if ((o.blocksPerGraph ?? 1) > 1 || (o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('block groups are not available for Qwen3.5 packages yet');
-    return { maxLength: +key, variant, sizes, fixedTokens: o.prefillFixedTokens ?? 200 };
+    if ((o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('Qwen3.5 packages have block groups for decode only: prefillBlocksPerGraph must be 1');
+    const groupsOf = (table.decode[key] as unknown as QwenDecodeTable).block_groups ?? {};
+    let group = o.blocksPerGraph ?? plan.recommended?.blocks_per_graph ?? 1;   // not chosen by the caller: the recommended group size, when this variant has it
+    if (o.blocksPerGraph === undefined && group > 1 && !groupsOf[String(group)]) group = 1;
+    if (group > 1 && !groupsOf[String(group)]) throw new Error(`the package has no decode block groups of ${group} blocks (it has ${Object.keys(groupsOf).join(', ') || 'none'})`);
+    return { maxLength: +key, variant, sizes, group, fixedTokens: o.prefillFixedTokens ?? 200 };
   }
 
   private adopt(c: ReturnType<Qwen35LLM['resolve']>) {
-    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.fixedTokens = c.fixedTokens;
+    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.fixedTokens = c.fixedTokens; this.groupSize = c.group;
   }
 
   private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
@@ -178,9 +184,17 @@ export class Qwen35LLM {
       for (const kind of kindsNeeded) map.set(kind, await build(paths[kind], `${label} block ${kind}`));
       return map;
     };
+    // decode block groups replace the single decode blocks; groups with the same sequence of kinds share one graph
+    const groups: { first: number; blocks: number; built: Built }[] = [], byGraph = new Map<string, Built>();
+    if (this.groupSize > 1) {
+      for (const e of (decode.block_groups as Record<string, GemmaBlockGroup[]>)[String(this.groupSize)]) {
+        if (!byGraph.has(e.graph)) byGraph.set(e.graph, await build(e.graph, `decode group ${e.key}`));
+        groups.push({ first: e.first_block, blocks: e.blocks, built: byGraph.get(e.graph) as Built });
+      }
+    }
     this.lmHead = await build(table.lm_head, 'lm_head', external);
     const flush = await build(decode.flush, 'kv flush');
-    this.decodeSet = { head: await build(decode.head, 'decode head'), blocks: await blocks(decode.blocks, 'decode'), tail: await build(decode.tail, 'decode tail'), flush };
+    this.decodeSet = { head: await build(decode.head, 'decode head'), blocks: this.groupSize > 1 ? new Map() : await blocks(decode.blocks, 'decode'), tail: await build(decode.tail, 'decode tail'), flush, groups };
     this.prefillSets = new Map();
     for (const size of this.chunkSizes) {
       const files = table.prefill[key][String(size)] as unknown as GraphTable & { blocks: Record<string, string> }, label = `prefill c${size}`;
@@ -303,10 +317,27 @@ export class Qwen35LLM {
     dispatch(set.head, { hidden_states: a.hidden, ...attentionInputs(0) }, { residual: a.residuals[0], attention_output: a.attentionOutputs[0], ...stateOutputs(0) });
     swapState(0);
     // BLOCK i: feed-forward half of layer i + attention half of layer i + 1
-    for (let layer = 0; layer < N - 1; layer++) {
-      dispatch(set.blocks.get(this.kinds[layer + 1]) as Built, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...this.pick(ffnNames, layer), ...attentionInputs(layer + 1) },
-        { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], ...stateOutputs(layer + 1) });
-      swapState(layer + 1);
+    if (decode && this.groupSize > 1) {
+      // a block group (decode only): BLOCKs first .. first + blocks - 1 in one dispatch; the inputs are bound by name: b<j>_<name> = block j's weight / state / cache, the rest is shared
+      const shared: Record<string, ML> = { rope_cos: a.ropeCos, rope_sin: a.ropeSin, attention_mask: a.mask, ...selectors };
+      for (const { first, blocks, built } of this.decodeSet.groups) {
+        const inputs: Record<string, ML> = { residual: a.residuals[first], attention_output: a.attentionOutputs[first] };
+        const outputs: Record<string, ML> = { next_residual: a.residuals[first + blocks], next_attention_output: a.attentionOutputs[first + blocks] };
+        for (let j = 0; j < blocks; j++) {
+          const layer = first + j + 1, own = { ...this.pick(ffnNames, first + j), ...attentionInputs(layer) };
+          for (const [name, tensor] of Object.entries(own)) { if (!(name in shared)) inputs[`b${j}_${name}`] = tensor; }
+          for (const [name, tensor] of Object.entries(stateOutputs(layer))) outputs[`b${j}_${name}`] = tensor;
+        }
+        for (const name of built.inputs) if (name in shared) inputs[name] = shared[name];
+        dispatch(built, inputs, outputs);
+        for (let j = 0; j < blocks; j++) swapState(first + j + 1);
+      }
+    } else {
+      for (let layer = 0; layer < N - 1; layer++) {
+        dispatch(set.blocks.get(this.kinds[layer + 1]) as Built, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...this.pick(ffnNames, layer), ...attentionInputs(layer + 1) },
+          { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], ...stateOutputs(layer + 1) });
+        swapState(layer + 1);
+      }
     }
     if (!lastChunk) return;
     dispatch(set.tail, { residual: a.residuals[N - 1], attention_output: a.attentionOutputs[N - 1], ...this.pick(ffnNames, N - 1), final_norm_gamma: this.finalGamma }, { final_hidden_states: a.finalHidden });

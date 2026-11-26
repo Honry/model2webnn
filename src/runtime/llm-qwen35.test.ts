@@ -23,7 +23,7 @@ const N = 6, LINEAR = [0, 1, 3, 4], FULL = [2, 5];
 async function loaded(options: LoadOptions = {}) {
   installMockBuilder();
   const context = new MockContext();
-  const llm = await Qwen35LLM.load(fsSource, { context, cache: false, ...options });
+  const llm = await Qwen35LLM.load(fsSource, { context, cache: false, blocksPerGraph: 1, ...options });   // the plan may recommend groups: the tests of the single-block protocol ask for 1
   context.onRead = (_t, destination) => { destination.fill(0); destination[7] = 5; };   // argmax = token 7
   return { llm, context };
 }
@@ -131,7 +131,8 @@ describe('Qwen3.5 runtime on a validating mock of WebNN', () => {
     expect(weightWrites()).toBe(before);
     expect((await run(llm, prompt.slice(0, 21), 3)).length).toBe(3);
     await expect(llm.reconfigure({ kvStyle: 'onehot' })).rejects.toThrow(/staged/);
-    await expect(llm.reconfigure({ blocksPerGraph: 5 })).rejects.toThrow(/block groups/);
+    await expect(llm.reconfigure({ blocksPerGraph: 7 })).rejects.toThrow(/block groups/);
+    await expect(llm.reconfigure({ prefillBlocksPerGraph: 2 })).rejects.toThrow(/decode only/);
   });
 
   it('loadModel picks the runtime from the plan; the standard runtime refuses a Qwen3.5 package', async () => {
@@ -149,5 +150,49 @@ describe('Qwen3.5 runtime on a validating mock of WebNN', () => {
     expect(labels).toContain('decode block linear_attention');
     expect(labels).toContain('prefill c16 block full_attention');
     expect(labels[0]).toBe('lm_head');
+  });
+});
+
+describe('Qwen3.5 decode block groups', () => {
+  // the tiny model has 5 BLOCKs (the attention halves of layers 1..5): linear, full, linear, linear, full
+  const stateIndex = (llm: Qwen35LLM) => {
+    const x = internals(llm), at = (t: any) => x.stateTensors.indexOf(t);
+    return {
+      kv: [...x.kv.entries()].map(([l, c]: any) => [l, at(c.key), at(c.value)]), stg: [...x.stg.entries()].map(([l, c]: any) => [l, at(c.key), at(c.value)]),
+      state: [...x.state.entries()].map(([l, s]: any) => [l, at(s.conv), at(s.rec)]),
+    };
+  };
+
+  it.each([2, 3, 5])('%i blocks per graph: one dispatch per group, the same tokens and the same buffers (caches, staging, states) as without groups', async (group) => {
+    const plain = await loaded({ chunkSizes: [16, 32] }), grouped = await loaded({ chunkSizes: [16, 32], blocksPerGraph: group });
+    const a = await run(plain.llm, prompt, 12), b = await run(grouped.llm, prompt, 12);
+    expect(b).toEqual(a);
+    const steps = 11, groups = Math.ceil(5 / group), plan = planPrefill([16, 32], 45, 200), prefill = (plan.length - 1) * N + (N + 2);
+    expect(grouped.context.dispatches.length - plain.context.dispatches.length).toBe(steps * (groups - 5));   // HEAD + groups + TAIL + lm_head per decode step; prefill and flushes are as before
+    expect(plain.context.dispatches.length).toBeGreaterThan(prefill);
+    expect(stateIndex(grouped.llm)).toEqual(stateIndex(plain.llm));   // every state / cache and its spare were swapped exactly as often
+    const labels = grouped.llm.stats.graphBuilds.map((g) => g.label);
+    expect(labels.some((l) => l.startsWith('decode block'))).toBe(false);
+    expect(labels.filter((l) => l.startsWith('decode group'))).toHaveLength(group === 2 ? 3 : group === 3 ? 2 : 1);
+  });
+
+  it('binds a group by input name: shared controls once, weights / states / caches with the prefix of their block, the spare tensors as outputs', async () => {
+    const { llm, context } = await loaded({ chunkSizes: [16, 32], blocksPerGraph: 5 });
+    await run(llm, prompt, 2);
+    const x = internals(llm), prefill = (planPrefill([16, 32], 45, 200).length - 1) * N + (N + 2);
+    const [head, g0] = context.dispatches.slice(prefill, prefill + 2);   // the decode step: HEAD, the one group of 5 blocks, TAIL
+    expect(g0.inputs.residual).toBe(head.outputs.residual);
+    expect(g0.inputs.attention_output).toBe(head.outputs.attention_output);
+    expect(g0.inputs.rope_cos).toBe(x.dec.ropeCos);
+    expect(g0.inputs.attention_mask).toBe(x.dec.mask);
+    expect(Object.keys(g0.inputs).filter((n) => n.endsWith('rope_cos'))).toEqual(['rope_cos']);
+    expect(g0.inputs.b0_conv_state).toBe(x.stateSpare.get(1).conv);              // block 0 = the attention half of layer 1 (linear); the step has swapped its state with the spare since
+    expect(g0.inputs.b1_past_key).toBe(x.kv.get(2).key);                         // block 1 = layer 2 (full)
+    expect(g0.inputs.b1_staging_value).toBe(x.stgSpare.get(2).value);
+    expect(g0.inputs.b2_qkvz_projection_weight).toBe(x.weights[3].qkvz_projection_weight);
+    expect(g0.inputs.b2_gate_up_projection_weight).toBe(x.weights[2].gate_up_projection_weight);   // the feed-forward half of layer 2, the attention half of layer 3
+    expect(g0.outputs.b1_updated_key).toBe(x.stg.get(2).key);                    // the outputs are now the current tensors
+    expect(g0.outputs.b0_new_conv_state).toBe(x.state.get(1).conv);
+    expect(g0.outputs.b0_new_recurrent_state.shape).toEqual([1, 4, 128, 128]);
   });
 });

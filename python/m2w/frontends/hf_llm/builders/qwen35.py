@@ -112,17 +112,17 @@ def _ctx(b: GraphBuilder, spec, opt: GraphOptions) -> Ctx:
 # ---------------------------------------------------------------------------------------------------------------------
 # the halves
 # ---------------------------------------------------------------------------------------------------------------------
-def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_len: int, opt: GraphOptions, mask_dtype: str = "float16"):
-    """Full attention with the output gate. -> (attention_output f16 [1,S,hidden], kv_out)"""
+def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_len: int, opt: GraphOptions, mask_dtype: str = "float16", prefix: str = ""):
+    """Full attention with the output gate. -> (attention_output f16 [1,S,hidden], kv_out). `prefix` (block groups): the caches of this layer are <prefix>past_key ...; rope / mask / selectors are shared."""
     b, d = c.b, c.dims
     c.seq = seq
     decode, R, to_c = seq == 1, opt.staging_rows, c.to_compute
     total = past_len + R if decode else past_len + seq
-    cos = c.declare("rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
-    sin = c.declare("rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
-    mask = c.declare("attention_mask", mask_dtype, [1, 1, seq, total], "control")
-    past_key = c.declare("past_key", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
-    past_value = c.declare("past_value", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
+    cos = c.shared("rope_cos", "float16", [1, 1, seq, d.head_dim], "control")
+    sin = c.shared("rope_sin", "float16", [1, 1, seq, d.head_dim], "control")
+    mask = c.shared("attention_mask", mask_dtype, [1, 1, seq, total], "control")
+    past_key = c.declare(prefix + "past_key", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
+    past_value = c.declare(prefix + "past_value", "float16", [1, d.num_kv_heads, past_len, d.head_dim], "kv")
 
     normalized = rms_norm(c, residual, w["input_layernorm_gamma"], 3)
     qkvg = quantized_linear(c, normalized, w["qkvg_projection_weight"], w["qkvg_projection_scale"], d.hidden, 2 * d.attention_width + 2 * d.kv_width, seq)
@@ -140,8 +140,8 @@ def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_l
     key = apply_rotary(c, heads_of(part(2 * aw, kw), d.num_kv_heads, w["key_norm_gamma"]), cos, sin, d.num_kv_heads)
     value = heads_of(part(2 * aw + kw, kw), d.num_kv_heads, None)
     if decode:
-        staging_key = c.declare("staging_key", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
-        staging_value = c.declare("staging_value", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
+        staging_key = c.declare(prefix + "staging_key", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
+        staging_value = c.declare(prefix + "staging_value", "float16", [1, d.num_kv_heads, R, d.head_dim], "kv")
         updated_key, updated_value = update_kv_cache(c, staging_key, staging_value, key, value, R, seq, selector_prefix="staging_")
         all_keys, all_values = b.concat([to_c(past_key), to_c(updated_key)], 2), b.concat([to_c(past_value), to_c(updated_value)], 2)
     else:
@@ -157,15 +157,15 @@ def attention_half_full(c: Ctx, spec, residual: Value, w: dict, seq: int, past_l
     return c.to_f16(projected), {"updated_key": updated_key, "updated_value": updated_value}
 
 
-def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, probes: dict | None = None):
+def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, probes: dict | None = None, prefix: str = ""):
     """Gated DeltaNet. -> (attention_output f16 [1,S,hidden], {new_conv_state, new_recurrent_state})"""
     b, h = c.b, spec.hidden
     d = linear_dims(spec)
     hk, hv, dk, dv = d["k_heads"], d["v_heads"], d["k_dim"], d["v_dim"]
     cw, vw = d["conv_width"], d["value_width"]
     c.seq = seq
-    conv_state = c.declare("conv_state", "float16", [1, CONV_TAPS - 1, cw], "kv")
-    state = c.declare("recurrent_state", "float16", [1, hv, dk, dv], "kv")
+    conv_state = c.declare(prefix + "conv_state", "float16", [1, CONV_TAPS - 1, cw], "kv")
+    state = c.declare(prefix + "recurrent_state", "float16", [1, hv, dk, dv], "kv")
 
     normalized = rms_norm(c, residual, w["input_layernorm_gamma"], 3)
     qkvz = quantized_linear(c, normalized, w["qkvz_projection_weight"], w["qkvz_projection_scale"], h, cw + vw, seq)
@@ -216,10 +216,10 @@ def attention_half_linear(c: Ctx, spec, residual: Value, w: dict, seq: int, prob
     return c.to_f16(projected), {"new_conv_state": new_conv_state, "new_recurrent_state": c.to_f16(new_state)}
 
 
-def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, past_len: int, opt: GraphOptions):
+def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, past_len: int, opt: GraphOptions, prefix: str = ""):
     if kind == "linear_attention":
-        return attention_half_linear(c, spec, residual, w, seq)
-    return attention_half_full(c, spec, residual, w, seq, past_len, opt)
+        return attention_half_linear(c, spec, residual, w, seq, prefix=prefix)
+    return attention_half_full(c, spec, residual, w, seq, past_len, opt, prefix=prefix)
 
 
 def feed_forward_half(c: Ctx, spec, residual: Value, attention_output: Value, w: dict, seq: int) -> Value:
@@ -268,6 +268,55 @@ def build_block_graph(spec, opt: GraphOptions, kind: str, *, seq: int, past_len:
     b.output("next_residual", c.to_f16(layer_output))
     b.output("next_attention_output", next_attention)
     _outputs(b, kv_out)
+    return b.build()
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# block groups (decode only): several consecutive BLOCKs in one graph
+# ---------------------------------------------------------------------------------------------------------------------
+KIND_CODES = {"linear_attention": "l", "full_attention": "f"}
+
+
+def block_group_schedule(spec, count: int) -> list:
+    """The N - 1 BLOCKs cut into runs of `count`: [(first block, blocks)]; the last run may be shorter."""
+    total = spec.num_layers - 1
+    return [(first, min(count, total - first)) for first in range(0, total, count)]
+
+
+def block_group_kinds(spec, first: int, blocks: int) -> list:
+    """The kinds of the attention halves of a run of BLOCKs (block j of the run: the attention half of layer first + j + 1)."""
+    return [spec.layer_kind(first + j + 1) for j in range(blocks)]
+
+
+def block_group_key(kinds: list) -> str:
+    return "-".join(KIND_CODES[k] for k in kinds)
+
+
+def build_block_group_graph(spec, opt: GraphOptions, kinds: list, *, seq: int = 1, past_len: int, name: str | None = None):
+    """len(kinds) consecutive BLOCKs in one graph (fewer dispatches); decode only. Inputs: residual, attention_output (of the first block); the controls of the full attention layers ONCE (rope_cos, rope_sin,
+    attention_mask, staging_rows_to_keep / staging_row_selector: every full attention layer has the same ones in decode); per block j with the prefix b<j>_: the weights of the feed-forward half of layer i
+    and of the attention half of layer i + 1 and the state of that layer (conv_state / recurrent_state of a linear attention layer; past_key, past_value, staging_key, staging_value of a full attention one).
+    Outputs: next_residual, next_attention_output and the new state of every block: b<j>_new_conv_state / b<j>_new_recurrent_state, b<j>_updated_key / b<j>_updated_value."""
+    if seq != 1:
+        raise ValueError("block groups of Qwen3.5 are built for decode only (seq = 1)")
+    b = GraphBuilder(name or f"block_x{len(kinds)}")
+    c = _ctx(b, spec, opt)
+    residual = c.to_compute(c.declare("residual", "float16", [1, seq, spec.hidden]))
+    attention_output = c.to_compute(c.declare("attention_output", "float16", [1, seq, spec.hidden]))
+    last_attention = None
+    for j, kind in enumerate(kinds):
+        prefix = f"b{j}_"
+        layer_output = feed_forward_half(c, spec, residual, attention_output, c.weights(feed_forward_weight_specs(spec), prefix), seq)
+        attention, kv_out = attention_half(c, spec, kind, layer_output, c.weights(attention_weight_specs(spec, kind), prefix), seq, past_len, opt, prefix=prefix)
+        for key, value in kv_out.items():
+            b.output(prefix + key, value)
+        if j < len(kinds) - 1:
+            # the next block gets the boundary values of the ungrouped chain (float16 rounding): the same numbers as with one dispatch per block
+            residual, attention_output = c.to_compute(c.to_f16(layer_output)), c.to_compute(attention)
+        else:
+            b.output("next_residual", c.to_f16(layer_output))
+            last_attention = attention
+    b.output("next_attention_output", last_attention)
     return b.build()
 
 

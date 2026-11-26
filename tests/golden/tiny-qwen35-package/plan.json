@@ -71,7 +71,10 @@
   32
  ],
  "blocks_per_graph": [
-  1
+  1,
+  2,
+  3,
+  5
  ],
  "prefill_blocks_per_graph": [
   1
@@ -87,7 +90,51 @@
       "linear_attention": "graphs/staged-r8-float32/decode_block_linear_attention_L128.json"
      },
      "tail": "graphs/staged-r8-float32/decode_tail.json",
-     "flush": "graphs/staged-r8-float32/kv_flush_L128.json"
+     "flush": "graphs/staged-r8-float32/kv_flush_L128.json",
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "l-f",
+        "graph": "graphs/staged-r8-float32/decode_group_l-f_L128.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "l-l",
+        "graph": "graphs/staged-r8-float32/decode_group_l-l_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "f",
+        "graph": "graphs/staged-r8-float32/decode_group_f_L128.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "l-f-l",
+        "graph": "graphs/staged-r8-float32/decode_group_l-f-l_L128.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "l-f",
+        "graph": "graphs/staged-r8-float32/decode_group_l-f_L128.json"
+       }
+      ],
+      "5": [
+       {
+        "first_block": 0,
+        "blocks": 5,
+        "key": "l-f-l-l-f",
+        "graph": "graphs/staged-r8-float32/decode_group_l-f-l-l-f_L128.json"
+       }
+      ]
+     }
     }
    },
    "prefill": {
@@ -121,7 +168,51 @@
       "linear_attention": "graphs/staged-r8-float16/decode_block_linear_attention_L128.json"
      },
      "tail": "graphs/staged-r8-float16/decode_tail.json",
-     "flush": "graphs/staged-r8-float16/kv_flush_L128.json"
+     "flush": "graphs/staged-r8-float16/kv_flush_L128.json",
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "l-f",
+        "graph": "graphs/staged-r8-float16/decode_group_l-f_L128.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "l-l",
+        "graph": "graphs/staged-r8-float16/decode_group_l-l_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "f",
+        "graph": "graphs/staged-r8-float16/decode_group_f_L128.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "l-f-l",
+        "graph": "graphs/staged-r8-float16/decode_group_l-f-l_L128.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "l-f",
+        "graph": "graphs/staged-r8-float16/decode_group_l-f_L128.json"
+       }
+      ],
+      "5": [
+       {
+        "first_block": 0,
+        "blocks": 5,
+        "key": "l-f-l-l-f",
+        "graph": "graphs/staged-r8-float16/decode_group_l-f-l-l-f_L128.json"
+       }
+      ]
+     }
     }
    },
    "prefill": {
@@ -156,7 +247,14 @@
    "linear_attention",
    "linear_attention",
    "full_attention"
-  ]
+  ],
+  "block_groups": {
+   "description": "decode only: graphs.<variant>.decode.<max length>.block_groups[K] = the N - 1 BLOCKs cut into runs of K ([{first_block, blocks, key, graph}], the last run may be shorter), one graph per distinct sequence of kinds (key: the kinds joined by '-', l / f = linear / full attention). A group graph takes residual + attention_output of its first block and returns next_residual + next_attention_output of its last block. Block j (BLOCK first_block + j) has the prefix b<j>_: the weights of the feed-forward half of layer first_block + j and of the attention half of layer first_block + j + 1 and its state: b<j>_conv_state / b<j>_recurrent_state (linear attention), b<j>_past_key / _past_value / _staging_key / _staging_value (full attention). Outputs b<j>_new_conv_state / b<j>_new_recurrent_state / b<j>_updated_key / b<j>_updated_value = the spare tensors, to be swapped in. rope_cos / rope_sin / attention_mask / staging_rows_to_keep / staging_row_selector are shared by the full attention blocks. Prefill has no groups (prefill_blocks_per_graph = [1]).",
+   "kind_codes": {
+    "l": "linear_attention",
+    "f": "full_attention"
+   }
+  }
  },
  "per_layer_type_inputs": {
   "description": "full attention layers: rope_cos / rope_sin [1,1,S,head_dim] / attention_mask (partial rotary: the head dims are permuted at packing time, see model.json rope + pack_qwen35.py)",

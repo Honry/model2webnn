@@ -21,7 +21,7 @@ export interface GraphTable {
 /** One decode block group of a Gemma 4 package: BLOCKs first_block .. first_block + blocks - 1 in one graph (plan.chain.block_groups) */
 export interface GemmaBlockGroup { first_block: number; blocks: number; key: string; graph: string }
 export interface GemmaDecodeTable { head: string; blocks: Record<string, string>; tail: string; flush: Record<string, string>; block_groups?: Record<string, GemmaBlockGroup[]> }
-export interface QwenDecodeTable { head: string; blocks: Record<string, string>; tail: string; flush: string }
+export interface QwenDecodeTable { head: string; blocks: Record<string, string>; tail: string; flush: string; block_groups?: Record<string, GemmaBlockGroup[]> }
 /** One set of graphs of the package: a KV protocol x a compute type (x the staging rows of the staged protocol). Weights are shared by all variants. */
 export interface Variant { id: string; kv_style: 'staged' | 'onehot' | 'tensorScatter' | 'scatterND'; compute_type: 'float32' | 'float16'; staging_rows?: number; scatter_index_type?: 'int32' | 'int64'; value_layout?: 'natural' | 'transposed' }
 export interface VariantGraphs { lm_head: string; decode: Record<string, GraphTable>; prefill: Record<string, Record<string, GraphTable>> }

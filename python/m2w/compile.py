@@ -224,9 +224,10 @@ def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
     return plan
 
 
-def write_graphs_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks) -> dict:
+def write_graphs_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph=(1,)) -> dict:
     """The graphs of a Qwen3.5-style hybrid model, per variant: head, one block per kind of attention half (linear_attention | full_attention) of layers 1.., tail, one flush (the full
-    attention layers' caches), lm_head."""
+    attention layers' caches), lm_head; decode only: for every K > 1 of blocks_per_graph the block groups (decode.block_groups[K] = the schedule of the N - 1 blocks, one graph per distinct
+    sequence of kinds)."""
     bad = [C for C in chunks if C % Q.SUB_CHUNK]
     if bad:
         raise ValueError(f"the prefill chunk sizes of a Gated DeltaNet model must be multiples of {Q.SUB_CHUNK} (got {bad})")
@@ -250,6 +251,9 @@ def write_graphs_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, va
                 "blocks": {k: emit(Q.build_block_graph(spec, vopt, k, seq=1, past_len=past, name=f"decode_block_{k}_L{L}")) for k in block_kinds},
                 "tail": emit(Q.build_tail_graph(spec, vopt, seq=1, name="decode_tail")),
                 "flush": emit(Q.build_flush_graph(spec, staging_rows=vopt.staging_rows, past_len=past, name=f"kv_flush_L{L}"))}
+            groups = {str(k): _qwen35_block_groups(spec, vopt, k, past, L, emit) for k in blocks_per_graph if k > 1}
+            if groups:
+                table["decode"][str(L)]["block_groups"] = groups
             table["prefill"][str(L)] = {}
             for C in chunks:
                 if C > past:
@@ -262,10 +266,24 @@ def write_graphs_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, va
     return tables
 
 
-def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks) -> dict:
+def _qwen35_block_groups(spec: arch.ModelSpec, vopt: D.GraphOptions, count: int, past: int, L: int, emit) -> list:
+    """The schedule of the decode block groups of `count` blocks: [{first_block, blocks, key, graph}]; the graphs are shared by the groups with the same sequence of kinds (the key)."""
+    if count > spec.num_layers - 1:
+        raise ValueError(f"{count} blocks per graph: the model has {spec.num_layers - 1} blocks")
+    schedule, built = [], {}
+    for first, blocks in Q.block_group_schedule(spec, count):
+        kinds = Q.block_group_kinds(spec, first, blocks)
+        key = Q.block_group_key(kinds)
+        if key not in built:
+            built[key] = emit(Q.build_block_group_graph(spec, vopt, kinds, seq=1, past_len=past, name=f"decode_group_{key}_L{L}"))
+        schedule.append({"first_block": first, "blocks": blocks, "key": key, "graph": built[key]})
+    return schedule
+
+
+def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks, blocks_per_graph=(1,)) -> dict:
     kinds = sorted(set(spec.layer_types))
     dims = Q.linear_dims(spec) if spec.linear else {}
-    return {
+    plan = {
         "format": "m2w-plan", "version": 0, "target": TARGET, "architecture_kind": "qwen35",
         "weights": {
             "description": "tensor names of the weights manifest: attention = by kind of the layer (linear_attention = Gated DeltaNet, full_attention), ffn = the feed-forward half of every layer",
@@ -276,7 +294,7 @@ def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
         },
         "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type", "value_layout")},
         "variants": variants, "default_variant": variants[0]["id"],
-        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": [1], "prefill_blocks_per_graph": [1],
+        "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": [1],
         "graphs": graphs,
         "chain": {
             "description": "HEAD = attention half of layer 0; BLOCK i (i = 0 .. N-2) = feed-forward half of layer i + attention half of layer i + 1, the graph of its KIND (plan.graphs[..].blocks[kind]); "
@@ -303,6 +321,16 @@ def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
         "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
         "logits": {"padded_vocab": spec.vocab_padded, "vocab": spec.vocab, "note": "argmax / sampling over the first `vocab` entries only"},
     }
+    if any(k > 1 for k in blocks_per_graph):
+        plan["chain"]["block_groups"] = {
+            "description": "decode only: graphs.<variant>.decode.<max length>.block_groups[K] = the N - 1 BLOCKs cut into runs of K ([{first_block, blocks, key, graph}], the last run may be shorter), one "
+                           "graph per distinct sequence of kinds (key: the kinds joined by '-', l / f = linear / full attention). A group graph takes residual + attention_output of its first block and returns "
+                           "next_residual + next_attention_output of its last block. Block j (BLOCK first_block + j) has the prefix b<j>_: the weights of the feed-forward half of layer first_block + j and of the "
+                           "attention half of layer first_block + j + 1 and its state: b<j>_conv_state / b<j>_recurrent_state (linear attention), b<j>_past_key / _past_value / _staging_key / _staging_value "
+                           "(full attention). Outputs b<j>_new_conv_state / b<j>_new_recurrent_state / b<j>_updated_key / b<j>_updated_value = the spare tensors, to be swapped in. rope_cos / rope_sin / "
+                           "attention_mask / staging_rows_to_keep / staging_row_selector are shared by the full attention blocks. Prefill has no groups (prefill_blocks_per_graph = [1]).",
+            "kind_codes": {code: kind for kind, code in Q.KIND_CODES.items()}}
+    return plan
 
 
 def resolve_blocks_per_graph(spec: arch.ModelSpec, blocks_per_graph) -> tuple:
@@ -331,10 +359,10 @@ def _graphs_and_plan_core(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, 
     if spec.builder == "qwen35":
         if any(v["kv_style"] != "staged" for v in variants):
             raise ValueError("Qwen3.5 packages support the staged KV protocol only")
-        if any(k > 1 for k in tuple(blocks_per_graph) + tuple(prefill_blocks_per_graph)):
-            raise ValueError("block groups are not available for Qwen3.5 packages yet")
-        graphs = write_graphs_qwen35(spec, opt, out, variants, max_lengths, chunks)
-        return graphs, build_plan_qwen35(spec, opt, variants, graphs, max_lengths, chunks)
+        if any(k > 1 for k in prefill_blocks_per_graph):
+            raise ValueError("block groups of Qwen3.5 packages are for decode only: prefill blocks per graph must be 1")
+        graphs = write_graphs_qwen35(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph)
+        return graphs, build_plan_qwen35(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph)
     if spec.builder == "gemma4":
         if any(v["kv_style"] != "staged" for v in variants):
             raise ValueError("Gemma 4 packages support the staged KV protocol only")

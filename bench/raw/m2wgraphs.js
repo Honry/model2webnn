@@ -148,7 +148,7 @@ async function main() {
     const blocksOf = (phase, t) => (gemma ? Object.entries(t.blocks).map(([kind, p]) => [`${phase}_block ${kind}`, p]) : [[`${phase}_block`, t.block]]);
     const list = [["lm_head", table.lm_head], ["decode_head", decode.head], ...blocksOf("decode", decode), ["decode_tail", decode.tail],
         ...(kind === "gemma4" ? Object.entries(decode.flush).map(([type, p]) => [`kv_flush ${type}`, p]) : decode.flush ? [["kv_flush", decode.flush]] : []),
-        ...(kind === "gemma4" ? gemmaGroups(decode).map(({ key, graph }) => [`decode_group ${key}`, graph]) : Object.entries(decode.block_groups ?? {}).map(([k, p]) => [`decode_block_x${k}`, p])),
+        ...(gemma ? gemmaGroups(decode).map(({ key, graph }) => [`decode_group ${key}`, graph]) : Object.entries(decode.block_groups ?? {}).map(([k, p]) => [`decode_block_x${k}`, p])),
         ["prefill_head", prefill.head], ...blocksOf("prefill", prefill), ["prefill_tail", prefill.tail]].filter(([name]) => !only.length || only.some((o) => name === o || name.startsWith(o + " ")));
     const chainedMs = {};   // graph name -> ms per dispatch when chained: the sum over the layers estimates a decode step
     const ctx = await navigator.ml.createContext({ deviceType });

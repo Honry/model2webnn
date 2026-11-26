@@ -92,3 +92,32 @@ def test_logits_match_transformers(package, reference, n):
         with torch.no_grad():
             want = reference(torch.tensor([sequence])).logits[0, -1].numpy()
         assert np.abs(logits - want).max() < 0.1 and int(logits.argmax()) == int(want.argmax())
+
+
+@pytest.fixture(scope="module")
+def package_groups(tmp_path_factory):
+    root = tmp_path_factory.mktemp("q35g")
+    T.write_tiny_qwen35(root / "hf")
+    out = compile_model(str(root / "hf"), root / "pkg", max_lengths=(128,), chunks=(16,), staging_rows=(8,), compute_types=("float32",), blocks_per_graph=(1, 2, 3, 5), progress=lambda m: None)
+    return out, arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text()))
+
+
+@pytest.mark.parametrize("group", [2, 3, 5])
+def test_decode_block_groups_equal_the_single_blocks(package_groups, group):
+    """A decode block group (several BLOCKs in one graph, state / caches / weights bound with the prefix b<j>_) gives the logits of the single-block chain: prefill, then steps across a staging flush."""
+    out, spec = package_groups
+    plan = json.loads((out / "plan.json").read_text())
+    decode = plan["graphs"][plan["default_variant"]]["decode"]["128"]
+    assert [e["blocks"] for e in decode["block_groups"][str(group)]] == [min(group, 5 - first) for first in range(0, 5, group)]
+    prompt = [3, 9, 27, 5, 11, 2, 40, 7, 19, 1, 33]
+    runs = {}
+    for k in (1, group):
+        runner = Qwen35Runner.from_package(out, spec, max_length=128, chunk_sizes=[16], decode_group=k)
+        logits = [runner.prefill(prompt)]
+        token = int(np.argmax(logits[0]))
+        for _ in range(11):   # 11 steps > 8 staging rows: one flush
+            logits.append(runner.step(token))
+            token = int(np.argmax(logits[-1]))
+        runs[k] = logits
+    for a, b in zip(runs[1], runs[group]):
+        np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4)
