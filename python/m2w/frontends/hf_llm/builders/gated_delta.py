@@ -208,6 +208,8 @@ def _affine_state_loop(b: GraphBuilder, value5, kcd5, qg5, attn5, kdt5, total5, 
     """The sub-chunk steps with everything that does not depend on the state moved out of the dependent chain. A step is
         v_new = value - kcd S;   out = qg S + attn v_new;   S' = total S + kdt v_new
     and v_new is linear in S, so   out = (qg - attn kcd) S + attn value,   S' = (total I - kdt kcd) S + kdt value:   [Q' S + O0],  [M S + B]  with Q', O0, M, B for ALL sub-chunks computed at once (batched matmuls).
+    MEASURED ON THE NPU: slower (state loop 3.6 ms instead of 1.7 ms, whole core 7.1 instead of 4.5 ms; same accuracy): the products of the batched [H, n, 128, 128] M and the 128^3 matmuls of the chain are
+    real compute, the 16-wide matmuls of the plain steps are not. Not used (qwen35.PREFILL_LOOP).
     What is left in the chain is one matmul and one add per sub-chunk (S' = M_s S + B_s); the outputs of all sub-chunks come from one batched matmul with the stacked states that entered each step."""
     q_eff = b.sub(qg5, b.matmul(attn5, kcd5))                                                  # [1,H,n,C,dk]
     o0 = b.matmul(attn5, value5)                                                               # [1,H,n,C,dv]
