@@ -31,15 +31,26 @@ def _identity(b: GraphBuilder, c: int, dtype: str) -> Value:
     return b.constant(dtype, [c, c], data=np.eye(c, dtype=int).reshape(-1).tolist(), cache_key=("eye", c, dtype))
 
 
-def unit_lower_inverse(b: GraphBuilder, n: Value, c: int, dtype: str, order: int | None = None) -> Value:
+def unit_lower_inverse(b: GraphBuilder, n: Value, c: int, dtype: str, order: int | None = None, style: str = "plain", probes: list | None = None) -> Value:
     """(I - N)^-1 for a strictly lower-triangular N [.., C, C]: (I + N)(I + N^2)(I + N^4)...(I + N^(C/2)) (exact, N^C = 0). `order` < C: N is nilpotent of that order (N^order = 0, e.g. block diagonal with
     blocks of `order`): the product stops there."""
     eye = _identity(b, c, dtype)
-    product = b.add(n, eye)
+    # styles (the NPU compiler returned WRONG results when a result feeds a matmul AND an elementwise add; which of these writes avoids it is measured by bench/raw/gdn.html dir=../data/gdn_seg/):
+    #   plain: (I + N), (I + N^2), ... with add;  dup: the square that feeds the add is computed a second time (its own node);  aug: I + X as matmul([I | X], [I ; I]) instead of an add
+    def plus_eye(x):
+        if style == "aug":
+            ones = b.constant(dtype, [2 * c, c], data=np.concatenate([np.eye(c, dtype=int), np.eye(c, dtype=int)]).reshape(-1).tolist(), cache_key=("ii", c, dtype))
+            return b.matmul(b.concat([b.expand(eye, list(x.shape)), x], 3), ones)
+        return b.add(x, eye)
+
+    product = plus_eye(n)
     power, step = n, 2
     while step < (order or c):
-        power = b.matmul(power, power)
-        product = b.matmul(product, b.add(power, eye))
+        squared = b.matmul(power, power)
+        product = b.matmul(product, plus_eye(b.matmul(power, power) if style == "dup" else squared))
+        power = squared
+        if probes is not None:
+            probes.append(squared)
         step *= 2
     return product
 
@@ -75,7 +86,7 @@ def forward_substitution(b: GraphBuilder, a: Value, rhs: Value, dtype: str) -> V
     return b.concat(rows, 2)
 
 
-def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, block: int = 8) -> Value:
+def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, block: int = 8, style: str = "plain", probes: list | None = None, split_inputs: tuple | None = None) -> Value:
     """X = (I + A)^-1 RHS for a strictly lower-triangular A [1,H,2*block,2*block] WITHOUT dependent row steps: split A = Ad + Al (Ad: the two strictly lower-triangular diagonal blocks, Al: the lower-left block),
     M = I + Ad is block diagonal, so M^-1 = (I - Ad)(I + Ad^2)(I + Ad^4) is a handful of 16 x 16 matmuls (the powers of a block of 8 vanish after 8: exact; each block of 8 is short enough for the product form
     to stay accurate in float16), and (M + Al)^-1 = M^-1 - M^-1 Al M^-1 exactly (Al M^-1 Al = 0). The row-by-row substitution (`forward_substitution`) needs 16 dependent steps of tiny operators, which is
@@ -89,8 +100,14 @@ def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, bloc
     lower_left[block:, :block] = 1
     mask = lambda m, key: b.constant(dtype, [c, c], data=m.reshape(-1).tolist(), cache_key=key)  # noqa: E731
     minus_one = b.scalar(-1.0, dtype, 4)
-    inverse = unit_lower_inverse(b, b.mul(b.mul(a, mask(diag, ("bd_diag", c, dtype))), minus_one), c, dtype, order=block)   # M^-1
-    correction = b.matmul(b.matmul(inverse, b.mul(a, mask(lower_left, ("bd_ll", c, dtype)))), inverse)                       # M^-1 Al M^-1
+    if split_inputs is not None:   # experiment: -Ad and Al arrive as graph inputs (no multiplication of `a` by the masks inside the graph)
+        n, lower = split_inputs
+    else:
+        n, lower = b.mul(b.mul(a, mask(diag, ("bd_diag", c, dtype))), minus_one), b.mul(a, mask(lower_left, ("bd_ll", c, dtype)))
+    inverse = unit_lower_inverse(b, n, c, dtype, order=block, style=style, probes=probes)                                    # M^-1
+    correction = b.matmul(b.matmul(inverse, lower), inverse)                                                                  # M^-1 Al M^-1
+    if probes is not None:
+        probes.extend([n, lower, inverse, correction])
     return b.matmul(b.sub(inverse, correction), rhs)
 
 

@@ -67,6 +67,17 @@ def segment_graphs(dtype):
     b.output("solved", solve_block_diagonal(b, a, rhs, dtype, SUB // 2))
     out["subst_blockdiag"] = b.build()
 
+    for variant in ("dup", "aug", "probed", "inputs"):   # ways to write the same solve; which one does the NPU compile correctly?
+        b = GraphBuilder(f"seg_bd_{variant}_{dtype}")
+        a, rhs = b.input("a", dtype, [1, HN, SUB, SUB]), b.input("rhs", dtype, [1, HN, SUB, DV + DK])
+        probes = [] if variant == "probed" else None
+        split = (b.input("n", dtype, [1, HN, SUB, SUB]), b.input("al", dtype, [1, HN, SUB, SUB])) if variant == "inputs" else None
+        solved = solve_block_diagonal(b, a, rhs, dtype, SUB // 2, style="plain" if variant in ("probed", "inputs") else variant, probes=probes, split_inputs=split)
+        b.output("solved", solved)
+        for i, p in enumerate(probes or []):   # every intermediate result is also an output: an extra consumer of each (what made the earlier wrong graphs right)
+            b.output(f"probe{i}", p)
+        out[f"bd_{variant}"] = b.build()
+
     b = GraphBuilder(f"seg_products_{dtype}")
     q, k, gc, decay = folded(b, "q", DK, dtype), folded(b, "k", DK, dtype), folded(b, "gc", 1, dtype), b.input("decay", dtype, [1, HN, SUB, SUB])
     k_t = b.transpose(k, [0, 1, 3, 2])
@@ -124,15 +135,22 @@ def main():
     r = run("products", {n: values[n] for n in ("q", "k", "gc", "decay")}); values.update(r)
     loop_feeds = {"value": unfold(values["value"]), "k_cumdecay": unfold(values["k_cumdecay"]), "q_gate": unfold(values["q_gate"]), "attn": unfold(values["attn"]),
                   "k_decayed_t": unfold(values["k_decayed_t"]), "total": unfold(values["total"]), "state": state0[None].astype(np.float32)}
+    sub_mask = np.zeros((SUB, SUB), np.float32)
+    for lo in (0, SUB // 2):
+        sub_mask[lo:lo + SUB // 2, lo:lo + SUB // 2] = np.tril(np.ones((SUB // 2, SUB // 2)), -1)
+    ll_mask = np.zeros((SUB, SUB), np.float32)
+    ll_mask[SUB // 2:, :SUB // 2] = 1
+    split_feeds = {"a": values["a"], "rhs": values["rhs"], "n": -values["a"] * sub_mask, "al": values["a"] * ll_mask}   # only the graph that declares n / al uses them
     feeds_by_segment = {
         "decay": {"g": values["g"]}, "a_matrix": {n: values[n] for n in ("k", "beta", "decay")}, "rhs": {n: values[n] for n in ("k", "v", "beta", "gc")},
-        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
+        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, **{f"bd_{v}": split_feeds for v in ("dup", "aug", "probed", "inputs")}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
         "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
     }
     names = []
     for segment, feeds in feeds_by_segment.items():
-        want = interpreter.run(f32[segment], feeds)
         graph = f16[segment]
+        feeds = {n: v for n, v in feeds.items() if n in graph.inputs}
+        want = interpreter.run(f32[segment], feeds)
         serialize.dump(graph, out / f"{graph.name}.json")
         blob, entries = bytearray(), {"inputs": [], "expected": [], "weights": []}
         for n in graph.inputs:
