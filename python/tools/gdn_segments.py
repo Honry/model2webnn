@@ -22,7 +22,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdn_experiment import DK, DV, graph_feeds, make_inputs  # noqa: E402
-from m2w.frontends.hf_llm.builders.gated_delta import _tri, build_core_graph, forward_substitution  # noqa: E402
+from m2w.frontends.hf_llm.builders.gated_delta import _tri, build_core_graph, forward_substitution, solve_block_diagonal  # noqa: E402
 from m2w.ir import GraphBuilder, interpreter, serialize  # noqa: E402
 
 H, T, SUB = 32, 128, 16
@@ -62,6 +62,11 @@ def segment_graphs(dtype):
     b.output("solved", forward_substitution(b, a, rhs, dtype))
     out["subst"] = b.build()
 
+    b = GraphBuilder(f"seg_subst_blockdiag_{dtype}")   # the same solve without the 16 dependent steps
+    a, rhs = b.input("a", dtype, [1, HN, SUB, SUB]), b.input("rhs", dtype, [1, HN, SUB, DV + DK])
+    b.output("solved", solve_block_diagonal(b, a, rhs, dtype, SUB // 2))
+    out["subst_blockdiag"] = b.build()
+
     b = GraphBuilder(f"seg_products_{dtype}")
     q, k, gc, decay = folded(b, "q", DK, dtype), folded(b, "k", DK, dtype), folded(b, "gc", 1, dtype), b.input("decay", dtype, [1, HN, SUB, SUB])
     k_t = b.transpose(k, [0, 1, 3, 2])
@@ -88,6 +93,7 @@ def segment_graphs(dtype):
     out["state_loop"] = b.build()
 
     out["whole"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_{dtype}", solve="batched")
+    out["whole_blockdiag"] = build_core_graph(H, DK, DV, T, SUB, dtype, name=f"seg_whole_blockdiag_{dtype}", solve="blockdiag")
 
     b = GraphBuilder(f"seg_overhead_{dtype}")
     b.output("y", b.add(b.input("x", dtype, [1, 1, 16, 16]), b.scalar(1.0, dtype, 4)))
@@ -120,8 +126,8 @@ def main():
                   "k_decayed_t": unfold(values["k_decayed_t"]), "total": unfold(values["total"]), "state": state0[None].astype(np.float32)}
     feeds_by_segment = {
         "decay": {"g": values["g"]}, "a_matrix": {n: values[n] for n in ("k", "beta", "decay")}, "rhs": {n: values[n] for n in ("k", "v", "beta", "gc")},
-        "subst": {"a": values["a"], "rhs": values["rhs"]}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
-        "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
+        "subst": {"a": values["a"], "rhs": values["rhs"]}, "subst_blockdiag": {"a": values["a"], "rhs": values["rhs"]}, "products": {n: values[n] for n in ("q", "k", "gc", "decay")}, "state_loop": loop_feeds,
+        "whole": graph_feeds((q, k, v, g, beta), state0, "float32"), "whole_blockdiag": graph_feeds((q, k, v, g, beta), state0, "float32"), "overhead": {"x": np.zeros((1, 1, 16, 16), np.float32)},
     }
     names = []
     for segment, feeds in feeds_by_segment.items():

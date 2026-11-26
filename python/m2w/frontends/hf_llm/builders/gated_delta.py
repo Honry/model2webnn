@@ -31,12 +31,13 @@ def _identity(b: GraphBuilder, c: int, dtype: str) -> Value:
     return b.constant(dtype, [c, c], data=np.eye(c, dtype=int).reshape(-1).tolist(), cache_key=("eye", c, dtype))
 
 
-def unit_lower_inverse(b: GraphBuilder, n: Value, c: int, dtype: str) -> Value:
-    """(I - N)^-1 for a strictly lower-triangular N [.., C, C]: (I + N)(I + N^2)(I + N^4)...(I + N^(C/2)) (exact, N^C = 0)."""
+def unit_lower_inverse(b: GraphBuilder, n: Value, c: int, dtype: str, order: int | None = None) -> Value:
+    """(I - N)^-1 for a strictly lower-triangular N [.., C, C]: (I + N)(I + N^2)(I + N^4)...(I + N^(C/2)) (exact, N^C = 0). `order` < C: N is nilpotent of that order (N^order = 0, e.g. block diagonal with
+    blocks of `order`): the product stops there."""
     eye = _identity(b, c, dtype)
     product = b.add(n, eye)
     power, step = n, 2
-    while step < c:
+    while step < (order or c):
         power = b.matmul(power, power)
         product = b.matmul(product, b.add(power, eye))
         step *= 2
@@ -72,6 +73,25 @@ def forward_substitution(b: GraphBuilder, a: Value, rhs: Value, dtype: str) -> V
         correction = b.matmul(b.slice(a, [0, 0, i, 0], [1, heads, 1, c]), x_full)
         rows.append(b.sub(b.slice(rhs, [0, 0, i, 0], [1, heads, 1, width]), correction))
     return b.concat(rows, 2)
+
+
+def solve_block_diagonal(b: GraphBuilder, a: Value, rhs: Value, dtype: str, block: int = 8) -> Value:
+    """X = (I + A)^-1 RHS for a strictly lower-triangular A [1,H,2*block,2*block] WITHOUT dependent row steps: split A = Ad + Al (Ad: the two strictly lower-triangular diagonal blocks, Al: the lower-left block),
+    M = I + Ad is block diagonal, so M^-1 = (I - Ad)(I + Ad^2)(I + Ad^4) is a handful of 16 x 16 matmuls (the powers of a block of 8 vanish after 8: exact; each block of 8 is short enough for the product form
+    to stay accurate in float16), and (M + Al)^-1 = M^-1 - M^-1 Al M^-1 exactly (Al M^-1 Al = 0). The row-by-row substitution (`forward_substitution`) needs 16 dependent steps of tiny operators, which is
+    most of the time of the core on the NPU (bench/raw/gdn.html with dir=../data/gdn_seg/). The blocks are padded to the full 16 x 16 (activation x activation matmuls with dims 8 do not compile on the NPU)."""
+    c = a.shape[2]
+    assert c == 2 * block, "the block-diagonal solve splits the sub-chunk into two blocks"
+    diag = np.zeros((c, c), int)
+    diag[:block, :block] = np.tril(np.ones((block, block), int), -1)
+    diag[block:, block:] = np.tril(np.ones((block, block), int), -1)
+    lower_left = np.zeros((c, c), int)
+    lower_left[block:, :block] = 1
+    mask = lambda m, key: b.constant(dtype, [c, c], data=m.reshape(-1).tolist(), cache_key=key)  # noqa: E731
+    minus_one = b.scalar(-1.0, dtype, 4)
+    inverse = unit_lower_inverse(b, b.mul(b.mul(a, mask(diag, ("bd_diag", c, dtype))), minus_one), c, dtype, order=block)   # M^-1
+    correction = b.matmul(b.matmul(inverse, b.mul(a, mask(lower_left, ("bd_ll", c, dtype)))), inverse)                       # M^-1 Al M^-1
+    return b.matmul(b.sub(inverse, correction), rhs)
 
 
 def gated_delta_chunk(b: GraphBuilder, q: Value, k: Value, v: Value, gc: Value, beta: Value, state: Value, dtype: str, base: int, probes: dict | None = None, solve: str = "neumann"):
@@ -122,7 +142,7 @@ def gated_delta_chunks(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, 
     return (b.concat(outs, 2) if len(outs) > 1 else outs[0]), state
 
 
-def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str):
+def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value, beta: Value, state: Value, sub: int, dtype: str, solver: str = "substitution"):
     """The same recurrence with the work that does NOT depend on the state done for all sub-chunks at once. Inside a sub-chunk the decay matrix, A, the triangular solve (value, k_cumdecay),
     q.k^T and the decayed keys only need q, k, v, g, beta: they run with the n = T / sub sub-chunks as a batch dimension, so the solve costs `sub` dependent steps for the whole prefill chunk
     instead of T. Only the state travels from sub-chunk to sub-chunk: ~10 dependent operators per sub-chunk."""
@@ -139,7 +159,8 @@ def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value,
     k_beta, v_beta = b.mul(k4, beta4), b.mul(v4, beta4)
     a = b.mul(b.mul(b.matmul(k_beta, k_t), decay), strict)
     gate = b.exp(gc)
-    solved = forward_substitution(b, a, b.concat([v_beta, b.mul(k_beta, gate)], 3), dtype)
+    rhs = b.concat([v_beta, b.mul(k_beta, gate)], 3)
+    solved = solve_block_diagonal(b, a, rhs, dtype, sub // 2) if solver == "blockdiag" else forward_substitution(b, a, rhs, dtype)
     value, k_cumdecay = b.slice(solved, [0, 0, 0, 0], [1, heads * n, sub, dv]), b.slice(solved, [0, 0, 0, dv], [1, heads * n, sub, dk])
     q_gate = b.mul(q4, gate)
     attn = b.mul(b.matmul(q4, k_t), decay)                                          # q k^T * decay, lower incl. the diagonal
@@ -161,7 +182,7 @@ def gated_delta_batched(b: GraphBuilder, q: Value, k: Value, v: Value, g: Value,
 
 def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype: str = "float32", name: str | None = None, base: int = 16, probe: bool = False, solve: str = "neumann"):
     """The recurrence of one layer on its own (inputs after conv / l2norm / gating): the experiment graph, and the part that goes into the prefill BLOCK graph."""
-    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "recurrent": "recur"}[solve]
+    kind = {"neumann": f"b{min(base, sub)}", "substitution": "subst", "batched": "batched", "blockdiag": "blockdiag", "recurrent": "recur"}[solve]
     b = GraphBuilder(name or (f"gdn_core_t{tokens}_{kind}_{dtype}" if solve == "recurrent" else f"gdn_core_t{tokens}_c{sub}_{kind}_{dtype}{'_probe' if probe else ''}"))
     q = b.input("q", dtype, [1, heads, tokens, dk])
     k = b.input("k", dtype, [1, heads, tokens, dk])
@@ -172,8 +193,8 @@ def build_core_graph(heads: int, dk: int, dv: int, tokens: int, sub: int, dtype:
     probes = {} if probe else None
     if solve == "recurrent":
         out, new_state = gated_delta_unrolled(b, q, k, v, g, beta, state)
-    elif solve == "batched":
-        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype)
+    elif solve in ("batched", "blockdiag"):
+        out, new_state = gated_delta_batched(b, q, k, v, g, beta, state, sub, dtype, "blockdiag" if solve == "blockdiag" else "substitution")
     else:
         out, new_state = gated_delta_chunks(b, q, k, v, g, beta, state, sub, dtype, base, probes, solve)
     for key, value in (probes or {}).items():

@@ -85,3 +85,16 @@ def test_batched_form_matches_the_token_loop(regime, sub):
     for dtype, tolerance in (("float32", 1e-5), ("float16", 1e-2)):
         got = interpreter.run(build_core_graph(heads, DK, DV, tokens, sub, dtype, solve="batched"), graph_feeds(inputs, state0, dtype))
         assert error(got["out"][0], want_out)[1] < tolerance and error(got["new_state"][0], want_state)[1] < tolerance
+
+
+@pytest.mark.parametrize("regime", ["mixed", "mixed-corr"])
+def test_block_diagonal_solve_matches_the_token_loop(regime):
+    """The solve without dependent row steps (two blocks of 8 inverted together, M^-1 - M^-1 Al M^-1) is as exact as the substitution in float32 and within noise in float16."""
+    rng = np.random.default_rng(19)
+    heads, tokens = 2, 128
+    inputs = make_inputs(rng, heads, tokens, regime)
+    state0 = rng.standard_normal((heads, DK, DV)) * 0.1
+    want_out, want_state = recurrent(*inputs, state0)
+    for dtype, tolerance in (("float32", 1e-5), ("float16", 1e-2)):
+        got = interpreter.run(build_core_graph(heads, DK, DV, tokens, 16, dtype, solve="blockdiag"), graph_feeds(inputs, state0, dtype))
+        assert error(got["out"][0], want_out)[1] < tolerance and error(got["new_state"][0], want_state)[1] < tolerance
