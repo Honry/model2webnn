@@ -1,7 +1,7 @@
 # Qwen3.5 (Qwen/Qwen3.5-4B): linear attention without a loop
 
 Read from `config.json` and transformers' `modeling_qwen3_5.py` (5.3). The transformers model is the independent reference (`python/m2w/reference/qwen35_hf.py`, `python/tests/test_qwen35.py`, `m2w verify`).
-Only the text decoder is compiled (the checkpoint also has a vision tower and an MTP head, ignored).
+The text decoder is compiled; the vision tower of the checkpoint (images only) is compiled into the same package as separate graphs: [qwen35-vision.md](qwen35-vision.md). The MTP head is ignored.
 
 > How NPUW and the NPU compiler handle the same recurrence (per-token `Loop` -> chunked form inside the compiler), and how that compares with this package: [qwen35-npuw.md](qwen35-npuw.md).
 

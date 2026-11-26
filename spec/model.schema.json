@@ -16,7 +16,7 @@
     "vocab_padded": { "type": "integer", "description": "what the lm_head graph computes (a multiple of 128; padded rows dequantize to 0)" },
     "eps": { "type": "number" }, "qk_norm": { "type": "boolean" }, "tie_embeddings": { "type": "boolean" }, "activation": { "const": "silu" },
     "max_position_embeddings": { "type": "integer" },
-    "layer_types": { "type": "array", "items": { "enum": ["full_attention", "sliding_attention"] }, "description": "one per layer" },
+    "layer_types": { "type": "array", "items": { "enum": ["full_attention", "sliding_attention", "linear_attention"] }, "description": "one per layer" },
     "sliding_window": { "type": ["integer", "null"] },
     "rope": {
       "type": "object",
@@ -35,6 +35,26 @@
     "bos_token_id": { "type": ["integer", "null"] }, "pad_token_id": { "type": ["integer", "null"] },
     "group_size": { "type": "integer", "description": "int4 quantization block size along the input channels" },
     "tensors": { "type": "object", "description": "role -> Hugging Face tensor name (templates with {i}); only the compiler reads this" },
-    "chat_template_kwargs": { "type": "object" }
+    "chat_template_kwargs": { "type": "object" },
+    "vision": {
+      "type": "object",
+      "description": "Qwen3.5 only: the image tower the package carries (images only). Absent = a text-only package",
+      "required": ["depth", "hidden", "heads", "ffn", "out_hidden", "patch_size", "temporal_patch_size", "merge_size", "channels", "pos_grid", "image_mean", "image_std", "image_token_id"],
+      "properties": {
+        "depth": { "type": "integer", "description": "ViT blocks" }, "hidden": { "type": "integer" }, "heads": { "type": "integer" }, "ffn": { "type": "integer" },
+        "out_hidden": { "type": "integer", "description": "width of an image token = the hidden size of the text decoder" },
+        "patch_size": { "type": "integer" }, "temporal_patch_size": { "type": "integer", "description": "a single image is repeated over it" }, "merge_size": { "type": "integer", "description": "merge_size^2 patches become one image token" },
+        "channels": { "type": "integer" }, "pos_grid": { "type": "integer", "description": "side of the learned (pos_grid x pos_grid) position embedding table, resampled to every grid at compile time" },
+        "activation": { "const": "gelu_tanh" }, "eps": { "type": "number", "description": "LayerNorm epsilon" },
+        "image_mean": { "type": "array", "items": { "type": "number" } }, "image_std": { "type": "array", "items": { "type": "number" } }, "rescale_factor": { "type": "number", "description": "pixel * rescale_factor, then (x - mean) / std" },
+        "image_token_id": { "type": "integer", "description": "<|image_pad|>: the prompt holds one per image token" }, "vision_start_token_id": { "type": "integer" }, "vision_end_token_id": { "type": "integer" },
+        "image_prompt": { "type": "string", "description": "what the chat template writes for an image: the runtime expands the pad token to one copy per image token" }
+      }
+    },
+    "mrope": {
+      "type": "object",
+      "description": "Qwen3.5: the 3-position rotary of the full attention layers; text tokens use t = h = w = position, image tokens their (t, h, w) (python protocol.rope_tables_mrope / protocol.ts ropeTablesMrope)",
+      "properties": { "section": { "type": "array", "items": { "type": "integer" }, "description": "frequencies per position axis (t, h, w)" }, "interleaved": { "type": "boolean" } }
+    }
   }
 }

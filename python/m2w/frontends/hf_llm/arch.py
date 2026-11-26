@@ -33,7 +33,7 @@ def families() -> dict:
 
 
 def recommended_session(spec_or_family) -> dict:
-    """The session options a model family runs best with ("recommended" in families/*.json: blocks_per_graph = decode blocks per graph, prefill_blocks_per_graph): measured on Intel NPUs, the
+    """The session options a model family runs best with ("recommended" in families/*.json: blocks_per_graph = decode blocks per graph, prefill_blocks_per_graph, prefill_chunks = the prefill chunk sizes): measured on Intel NPUs, the
     package's plan.json carries them (plan.recommended) and the runtime / pages use them when the caller does not choose. {} for a family without a recommendation."""
     name = spec_or_family if isinstance(spec_or_family, str) else spec_or_family.family
     return dict(families().get(name, {}).get("recommended", {}))
@@ -83,6 +83,8 @@ class ModelSpec:
     logit_softcap: float = 0.0                                  # logits = cap * tanh(logits / cap) when > 0
     linear: dict = field(default_factory=dict)                  # Gated DeltaNet layers (layer type "linear_attention", Qwen3.5): {"num_k_heads", "num_v_heads", "k_dim", "v_dim", "conv_kernel"}
     attn_output_gate: bool = False                              # the full attention output is multiplied by sigmoid(gate), the gate comes out of q_proj next to the query (Qwen3.5)
+    vision: dict = field(default_factory=dict)                  # the image tower of Qwen3.5 (images only): see _qwen35_vision(); empty = a text-only model / package
+    mrope: dict = field(default_factory=dict)                   # Qwen3.5: {"section": [11, 11, 10], "interleaved": true}, the 3-position rotary of the full attention layers (positions of image tokens)
 
     def decoder_dims(self, layer_type: Optional[str] = None) -> DecoderDims:
         """The dims of the attention of a layer of this type (the defaults for the types that do not override them)."""
@@ -105,7 +107,7 @@ class ModelSpec:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        for key in ("linear", "attn_output_gate"):   # Qwen3.5 additions: absent from the model.json of every other model
+        for key in ("linear", "attn_output_gate", "vision", "mrope"):   # Qwen3.5 additions: absent from the model.json of every other model
             if not d[key]:
                 del d[key]
         return {"format": FORMAT, "version": VERSION, **d}
@@ -195,7 +197,37 @@ def _gemma4_spec(config: dict, generation_config: Optional[dict], family: dict, 
     return spec
 
 
-def _qwen35_spec(config: dict, generation_config: Optional[dict], family: dict, architecture: str) -> ModelSpec:
+VISION_DEFAULT_MEAN_STD = [0.5, 0.5, 0.5]   # preprocessor_config.json of Qwen3.5 (absent from a local checkpoint folder: the same numbers)
+IMAGE_PROMPT = "<|vision_start|><|image_pad|><|vision_end|>"   # what the chat template writes for an image: the runtime expands the pad token to one copy per image token
+
+
+def _qwen35_vision(config: dict, text: dict, family: dict, preprocessor: Optional[dict]) -> dict:
+    """config.vision_config (+ preprocessor_config.json) -> the `vision` entry of model.json; {} for a checkpoint without a vision tower. Images only: no video, no deepstack."""
+    v = config.get("vision_config")
+    if not v:
+        return {}
+    if v.get("deepstack_visual_indexes"):
+        raise UnsupportedModel("Qwen3.5 vision towers with deepstack layers are not supported")
+    activation = {"gelu_pytorch_tanh": "gelu_tanh"}.get(v.get("hidden_act"))
+    if activation is None:
+        raise UnsupportedModel(f"vision activation '{v.get('hidden_act')}' is not supported (only gelu_pytorch_tanh)")
+    if v["out_hidden_size"] != text["hidden_size"] or v["hidden_size"] % v["num_heads"] or (v["hidden_size"] // v["num_heads"]) % 4:
+        raise UnsupportedModel("unsupported vision dims (out_hidden_size must be the text hidden size, head dim a multiple of 4)")
+    side = int(round(v["num_position_embeddings"] ** 0.5))
+    if side * side != v["num_position_embeddings"]:
+        raise UnsupportedModel("num_position_embeddings must be a square")
+    p = preprocessor or {}
+    return {
+        "depth": v["depth"], "hidden": v["hidden_size"], "heads": v["num_heads"], "ffn": v["intermediate_size"], "out_hidden": v["out_hidden_size"],
+        "patch_size": v["patch_size"], "temporal_patch_size": v["temporal_patch_size"], "merge_size": v["spatial_merge_size"], "channels": v.get("in_channels", 3),
+        "pos_grid": side, "activation": activation, "eps": 1e-6,
+        "image_mean": list(p.get("image_mean", VISION_DEFAULT_MEAN_STD)), "image_std": list(p.get("image_std", VISION_DEFAULT_MEAN_STD)), "rescale_factor": float(p.get("rescale_factor", 1 / 255)),
+        "image_token_id": config["image_token_id"], "vision_start_token_id": config["vision_start_token_id"], "vision_end_token_id": config["vision_end_token_id"],
+        "image_prompt": IMAGE_PROMPT,
+    }
+
+
+def _qwen35_spec(config: dict, generation_config: Optional[dict], family: dict, architecture: str, preprocessor: Optional[dict] = None) -> ModelSpec:
     t = config.get("text_config", config)
     if t.get("num_experts") or t.get("moe_intermediate_size"):
         raise UnsupportedModel("Qwen3.5 mixture-of-experts models are not supported (the dense models have no experts)")
@@ -222,20 +254,26 @@ def _qwen35_spec(config: dict, generation_config: Optional[dict], family: dict, 
         max_position_embeddings=t["max_position_embeddings"], layer_types=layer_types, sliding_window=None, rope=_resolve_rope(t, layer_types), eos_token_ids=eos,
         bos_token_id=t.get("bos_token_id"), pad_token_id=t.get("pad_token_id"), tensors=family["tensors"], builder=family["builder"],
         chat_template_kwargs=dict(family.get("chat_template_kwargs", {}).get(architecture, {})), linear=linear, attn_output_gate=bool(t.get("attn_output_gate", False)),
+        vision=_qwen35_vision(config, t, family, preprocessor),
     )
+    mrope = (t.get("rope_parameters") or {})
+    if mrope.get("mrope_section"):
+        spec.mrope = {"section": list(mrope["mrope_section"]), "interleaved": bool(mrope.get("mrope_interleaved", False))}
+    if spec.vision and not (spec.mrope and spec.mrope["interleaved"] and sum(spec.mrope["section"]) * 2 == int(spec.head_dim * float(spec.rope["full_attention"].get("partial_rotary_factor", 1.0)))):
+        raise UnsupportedModel("a Qwen3.5 model with a vision tower needs interleaved MRoPE whose sections cover the rotating dims")
     spec.decoder_dims("full_attention").check()
     if spec.hidden % 128:
         raise UnsupportedModel("the hidden size must be a multiple of the quantization group size")
     return spec
 
 
-def spec_from_config(config: dict, generation_config: Optional[dict] = None) -> ModelSpec:
+def spec_from_config(config: dict, generation_config: Optional[dict] = None, preprocessor: Optional[dict] = None) -> ModelSpec:
     architecture = (config.get("architectures") or [""])[0]
     family = family_for(architecture)
     if family.get("builder") == "gemma4":
         return _gemma4_spec(config, generation_config, family, architecture)
     if family.get("builder") == "qwen35":
-        return _qwen35_spec(config, generation_config, family, architecture)
+        return _qwen35_spec(config, generation_config, family, architecture, preprocessor)
     if config.get("attention_bias") or config.get("mlp_bias"):
         raise UnsupportedModel("models with attention / MLP biases are not supported yet")
     activation = config.get("hidden_act", "silu")

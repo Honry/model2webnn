@@ -196,3 +196,23 @@ describe('Qwen3.5 decode block groups', () => {
     expect(g0.outputs.b0_new_recurrent_state.shape).toEqual([1, 4, 128, 128]);
   });
 });
+
+describe('Qwen3.5 recommended session options of the plan', () => {
+  const withRecommended = (recommended: object): PackageSource => ({
+    ...fsSource, id: 'tiny-qwen35-recommended',
+    text: async (path) => (path === 'plan.json' ? JSON.stringify({ ...JSON.parse(await fsSource.text(path)), recommended }) : fsSource.text(path)),
+  });
+  const session = async (source: PackageSource, extra: LoadOptions = {}) => {
+    installMockBuilder();
+    const llm = await Qwen35LLM.load(source, { context: new MockContext(), cache: false, ...extra });
+    return [internals(llm).groupSize, llm.chunkSizes];
+  };
+
+  it('decode groups and prefill chunk sizes are used when the caller does not choose; an explicit choice wins; what the package lacks falls back', async () => {
+    expect(await session(fsSource)).toEqual([1, [16]]);                                                                                        // no recommendation: single blocks, the smallest chunk
+    expect(await session(withRecommended({ blocks_per_graph: 3, prefill_chunks: [16, 32] }))).toEqual([3, [16, 32]]);
+    expect(await session(withRecommended({ blocks_per_graph: 3, prefill_chunks: [16, 32] }), { blocksPerGraph: 1, chunkSize: 32 })).toEqual([1, [32]]);   // the caller chose
+    expect(await session(withRecommended({ blocks_per_graph: 3, prefill_chunks: [16, 32] }), { chunkSizes: [32] })).toEqual([3, [32]]);
+    expect(await session(withRecommended({ blocks_per_graph: 4, prefill_chunks: [64, 128] }))).toEqual([1, [16]]);                              // the package has neither: no error for a default
+  });
+});

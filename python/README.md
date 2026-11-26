@@ -53,7 +53,7 @@ layer scalar, proportional RoPE with partial rotary, gelu-tanh, logit softcap. S
 
 The **qwen3.5** family (`Qwen3_5ForConditionalGeneration`; dense text decoder, e.g. Qwen3.5-4B): 3 Gated DeltaNet (linear attention) layers per full attention layer. Linear attention layers carry a conv
 state and a recurrent state instead of a KV cache and are prefilled chunk by chunk without any loop operator; full attention layers have an output gate and partial rotary embeddings. The chunk sizes
-must be multiples of 16; staged KV only, no block groups yet. Needs the `exp` and `softplus` operators. Details in [`../docs/models/qwen35.md`](../docs/models/qwen35.md); `tests/test_qwen35.py` needs torch + transformers >= 5.3.
+must be multiples of 16; staged KV only, no block groups yet. Needs the `exp` and `softplus` operators. A checkpoint with a vision tower also gets the image tower (images only; `--vision-weights int8|int4|float16`, `--vision-grids`, `--no-vision`; `m2w add-vision` adds it to an existing package), see [`../docs/models/qwen35-vision.md`](../docs/models/qwen35-vision.md). Details in [`../docs/models/qwen35.md`](../docs/models/qwen35.md); `tests/test_qwen35.py` needs torch + transformers >= 5.3.
 
 ## Limits of the target (WebNN)
 - **A tensor may not be bigger than 2^31 - 1 bytes (2 GiB)** in Chromium's WebNN: neither an MLTensor (KV cache, activations) nor an operand inside a graph. The one that bites is the dequantized lm_head matrix:

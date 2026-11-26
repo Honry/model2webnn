@@ -46,14 +46,14 @@
       "required": ["op", "inputs", "outputs"],
       "properties": {
         "op": {
-          "enum": ["add", "sub", "mul", "div", "pow", "sqrt", "sigmoid", "tanh", "exp", "log", "softplus", "cast", "reshape", "transpose", "slice", "concat", "expand",
+          "enum": ["add", "sub", "mul", "div", "pow", "sqrt", "sigmoid", "tanh", "exp", "log", "softplus", "clamp", "cast", "reshape", "transpose", "slice", "concat", "expand",
                    "reduceMean", "reduceMax", "reduceSum", "softmax", "matmul", "gemm", "conv2d", "dequantizeLinear", "tensorScatter", "scatterND"]
         },
         "inputs": { "type": "array", "items": { "type": ["string", "null"] }, "description": "operand names; null = an omitted optional operand (dequantizeLinear zero point)" },
         "outputs": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 1 },
         "options": {
           "type": "object",
-          "description": "WebNN names: cast {to}; reshape/expand {newShape}; transpose {permutation}; slice {starts,sizes}; concat/softmax/tensorScatter {axis}; reduce* {axes,keepDimensions}; gemm {aTranspose,bTranspose}; conv2d {groups,strides,dilations,padding = [begin height, end height, begin width, end width]} on nchw / oihw"
+          "description": "WebNN names: clamp {minValue,maxValue}; cast {to}; reshape/expand {newShape}; transpose {permutation}; slice {starts,sizes}; concat/softmax/tensorScatter {axis}; reduce* {axes,keepDimensions}; gemm {aTranspose,bTranspose}; conv2d {groups,strides,dilations,padding = [begin height, end height, begin width, end width]} on nchw / oihw"
         }
       }
     },

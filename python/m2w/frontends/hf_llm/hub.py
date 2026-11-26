@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 SMALL_FILES = ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "chat_template.jinja",
-               "chat_template.json", "vocab.json", "merges.txt")
+               "chat_template.json", "vocab.json", "merges.txt", "preprocessor_config.json")
 DEFAULT_ENDPOINT = "https://huggingface.co"
 
 

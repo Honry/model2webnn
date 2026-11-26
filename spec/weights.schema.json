@@ -18,6 +18,11 @@
         "embedding": {
           "type": "object",
           "properties": { "bits": { "const": 8 }, "asymmetric": { "type": "boolean" }, "granularity": { "const": "row" }, "padded_vocab": { "type": "integer" } }
+        },
+        "vision": {
+          "type": "object",
+          "description": "Qwen3.5 image tower: the format of the linear weights of the vision_* files (int8: weight [out, in] + scale [out, 1] per row symmetric; int4: group 128 like the text layers; float16: weight only)",
+          "properties": { "weights": { "enum": ["int8", "int4", "float16"] }, "granularity": { "enum": ["row", "group", "none"] }, "scale_dtype": { "const": "float16" }, "bias_dtype": { "const": "float16" }, "conv3d": { "type": "string" } }
         }
       }
     },
@@ -27,7 +32,8 @@
         "type": "object",
         "required": ["file", "role", "bytes", "sha256", "tensors"],
         "properties": {
-          "file": { "type": "string" }, "role": { "enum": ["layer", "final_norm", "embedding", "head_extra", "ple_table"] }, "kind": { "type": "string", "description": "layer files of Gemma-style models: the attention kind of the layer" }, "layer": { "type": "integer" },
+          "file": { "type": "string" }, "role": { "enum": ["layer", "final_norm", "embedding", "head_extra", "ple_table", "vision_head", "vision_block", "vision_merger", "vision_pos_embed", "vision_grid"] },
+          "grid": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "vision_grid files: the (grid_h, grid_w) preset the tables (pos_embed, rope_cos, rope_sin) belong to" }, "kind": { "type": "string", "description": "layer files of Gemma-style models: the attention kind of the layer" }, "layer": { "type": "integer" },
           "bytes": { "type": "integer" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "relative_error": { "type": "object", "description": "per projection: squared quantization error / squared norm of the weight (layer files)" },
           "tensors": {

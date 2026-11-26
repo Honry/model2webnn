@@ -22,7 +22,7 @@
 //
 // URL parameters (long name | legacy alias; the session options kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, prefillChunkSizes, computeType can also be picked on the page):
 //   device=npu|gpu     maxLength = 1152 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = 64     layers|L = 36
-//   prompt=...         autoRun|auto = 1 (load immediately, generate once, finish; otherwise the page waits for the "Load model" button)
+//   prompt=...  |  promptFile=long-prompt.txt&promptChars=N (the first N characters of a text file + an instruction)     autoRun|auto = 1 (load immediately, generate once, finish; otherwise the page waits for the "Load model" button)
 //   kvStyle=staged (default: decode updates a small staging buffer, flushed into the main cache every stagingRows=64 steps) | onehot (whole-cache update) | scatterND (in-graph KV update as scatterND, value cache in natural layout)   kvInPlace=1 (KV update writes into the tensor it reads, no second cache)   tag=<label for the result file>     parallelDownloads=6 (weight files downloaded at the same time into the OPFS cache)
 //   matmulStyle|mm = gemm|matmul    zeroPoint|zp = const|none    dequantStyle|deq = dequantizeLinear|castMultiply|scaleAfterMatmul
 //   computeType|dt = float32 (default) | float16 (no f32 inside the graphs; the RMSNorm x^2 can overflow where it is not fused, e.g. on a GPU)
@@ -957,7 +957,8 @@ async function run() {
     if (packageMode) {   // the options of a package are what it was compiled with: fill the selects from its plan and lock the rest
         const peek = await peekPackage(packageEntry.url);
         packageControls = setupPackageControls(peek, { maxLengthSelect, chunkSizeSelect, blocksSelect, prefillBlocksSelect, kvStyleSelect, stagingRowsSelect, computeTypeSelect, chunkSizesInput },
-            { kvStyle: query.get("kvStyle"), computeType: query.get("computeType") ?? query.get("dt"), stagingRows: query.get("stagingRows"), blocksPerGraph: query.get("blocksPerGraph") ?? query.get("bpg"), prefillBlocksPerGraph: query.get("prefillBlocksPerGraph") ?? query.get("pbpg") });
+            { kvStyle: query.get("kvStyle"), computeType: query.get("computeType") ?? query.get("dt"), stagingRows: query.get("stagingRows"), blocksPerGraph: query.get("blocksPerGraph") ?? query.get("bpg"), prefillBlocksPerGraph: query.get("prefillBlocksPerGraph") ?? query.get("pbpg"),
+              chunkGiven: !!(query.get("prefillChunkSize") ?? query.get("chunk")), chunkSizes: urlSessionOptions.chunkSizes });
         const want = (select, value) => { if (value && [...select.options].some((option) => option.value === String(value))) select.value = value; };
         want(maxLengthSelect, query.get("maxLength")); maxLengthSelect.dispatchEvent(new Event("change"));
         want(chunkSizeSelect, query.get("prefillChunkSize") ?? query.get("chunk"));
@@ -986,7 +987,12 @@ async function run() {
     presets.forEach(([name], index) => presetSelect.add(new Option(name, index)));
     presetSelect.add(new Option("Custom (edited text / ?prompt=… in the URL)", "custom"));
     presetSelect.onchange = () => { if (presetSelect.value !== "custom") byId("prompt").value = presets[+presetSelect.value][1]; updateTokenCount(); };
-    if (query.get("prompt")) { byId("prompt").value = query.get("prompt"); presetSelect.value = "custom"; }
+    if (query.get("promptFile")) {   // a long prompt: the first promptChars characters of a text file (long-prompt.txt: ~3.5 characters per token) + an instruction
+        const text = await (await fetch(query.get("promptFile"))).text();
+        byId("prompt").value = `${text.slice(0, +query.get("promptChars") || text.length)}
+
+Summarize the text above in two sentences.`; presetSelect.value = "custom";
+    } else if (query.get("prompt")) { byId("prompt").value = query.get("prompt"); presetSelect.value = "custom"; }
     else { presetSelect.value = 0; byId("prompt").value = presets[0][1]; }
     const updateTokenCount = () => { byId("promptTokenCount").textContent = model ? `${model.countPromptTokens(byId("prompt").value)} prompt tokens (with chat template)` : "(token count shown after the model is loaded)"; };
     byId("prompt").oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || preset[1] !== byId("prompt").value) presetSelect.value = "custom"; updateTokenCount(); };

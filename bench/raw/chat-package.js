@@ -71,6 +71,9 @@ export function setupPackageControls(pkg, c, initial = {}) {
     if (recommended.prefill_blocks_per_graph) mark(c.prefillBlocksSelect, recommended.prefill_blocks_per_graph);
     if (initial.blocksPerGraph) replace(c.blocksSelect, [...c.blocksSelect.options].map((o) => [o.value, o.text]), initial.blocksPerGraph);
     if (initial.prefillBlocksPerGraph) replace(c.prefillBlocksSelect, [...c.prefillBlocksSelect.options].map((o) => [o.value, o.text]), initial.prefillBlocksPerGraph);
+    // no chunk size in the URL: the recommended set of prefill chunks (the runtime plans every prompt with them)
+    const availableChunks = chunksOf(+c.maxLengthSelect.value), recommendedChunks = (recommended.prefill_chunks ?? []).filter((n) => availableChunks.includes(n));
+    if (!initial.chunkGiven && !initial.chunkSizes?.length && recommendedChunks.length) c.chunkSizesInput.value = recommendedChunks.join(",");
     c.chunkSizesInput.placeholder = `optional, e.g. ${plan.prefill_chunks.join(",")}`;
     const lock = () => {
         const only = (select) => select.options.length < 2;

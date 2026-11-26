@@ -105,6 +105,7 @@ function emitNode(b: BuilderLike, n: IRNode, ref: Ref): OperandLike {
   if (UNARY.has(n.op)) return b[n.op](x);
   if (REDUCE.has(n.op)) return b[n.op](x, { axes: o.axes, keepDimensions: o.keepDimensions ?? false });
   switch (n.op) {
+    case 'clamp': return b.clamp(x, { minValue: o.minValue, maxValue: o.maxValue });
     case 'cast': return b.cast(x, o.to);
     case 'reshape': return b.reshape(x, o.newShape);
     case 'transpose': return b.transpose(x, { permutation: o.permutation });

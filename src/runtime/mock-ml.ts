@@ -39,6 +39,7 @@ export class MockBuilder {
   exp = (x: MockOperand) => this.op(x.dataType, x.shape);
   log = (x: MockOperand) => this.op(x.dataType, x.shape);
   softplus = (x: MockOperand) => this.op(x.dataType, x.shape);
+  clamp = (x: MockOperand, _o: { minValue?: number; maxValue?: number } = {}) => this.op(x.dataType, x.shape);
   cast = (x: MockOperand, to: string) => this.op(to, x.shape);
   reshape = (x: MockOperand, shape: number[]) => { if (count(shape) !== count(x.shape)) throw new Error(`reshape [${x.shape}] -> [${shape}]`); return this.op(x.dataType, shape); };
   transpose = (x: MockOperand, o: { permutation: number[] }) => this.op(x.dataType, o.permutation.map((p) => x.shape[p]));

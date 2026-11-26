@@ -24,7 +24,7 @@ from m2w.reference.qwen35_runner import Qwen35PackageReader, Qwen35Runner  # noq
 def package(tmp_path_factory):
     root = tmp_path_factory.mktemp("q35")
     T.write_tiny_qwen35(root / "hf")
-    out = compile_model(str(root / "hf"), root / "pkg", max_lengths=(128,), chunks=(16, 32), staging_rows=(8,), compute_types=("float32",), progress=lambda m: None)
+    out = compile_model(str(root / "hf"), root / "pkg", max_lengths=(128,), chunks=(16, 32), staging_rows=(8,), compute_types=("float32",), vision_grids=T.GRIDS, progress=lambda m: None)
     spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text()))
     return out, spec
 
@@ -98,7 +98,7 @@ def test_logits_match_transformers(package, reference, n):
 def package_groups(tmp_path_factory):
     root = tmp_path_factory.mktemp("q35g")
     T.write_tiny_qwen35(root / "hf")
-    out = compile_model(str(root / "hf"), root / "pkg", max_lengths=(128,), chunks=(16,), staging_rows=(8,), compute_types=("float32",), blocks_per_graph=(1, 2, 3, 5), progress=lambda m: None)
+    out = compile_model(str(root / "hf"), root / "pkg", max_lengths=(128,), chunks=(16,), staging_rows=(8,), compute_types=("float32",), blocks_per_graph=(1, 2, 3, 5), vision_grids=T.GRIDS, progress=lambda m: None)
     return out, arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text()))
 
 

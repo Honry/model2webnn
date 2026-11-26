@@ -289,5 +289,93 @@
  "recommended": {
   "blocks_per_graph": 1,
   "prefill_blocks_per_graph": 1
+ },
+ "vision": {
+  "description": "the image tower in the NPUW-style split, one set of graphs per grid preset (grid = patches in height x width): HEAD (patches [N, patch_vector] -> hidden_states [1,N,hidden]: patch matmul + bias + the position embedding of the grid), BLOCK x depth (ONE graph, weights bound per layer: hidden_states -> next_hidden_states), MERGER (hidden_states -> image_embeds [1,N/4,out_hidden]). Patches are in merge-block order and in the (channel, temporal, kh, kw) order of the Conv3d kernel (protocol patchify). The external constants pos_embed (HEAD) and rope_cos / rope_sin (BLOCK) are the tensors of the manifest file with role vision_grid and this grid; the weights are the manifest files vision_head / vision_block (layer i) / vision_merger.",
+  "weights": "int8",
+  "compute_type": "float32",
+  "depth": 2,
+  "image_token_id": 290,
+  "tensors": {
+   "head": [
+    "patch_embed_weight",
+    "patch_embed_scale",
+    "patch_embed_bias"
+   ],
+   "block": [
+    "norm1_gamma",
+    "norm1_beta",
+    "qkv_weight",
+    "qkv_scale",
+    "qkv_bias",
+    "proj_weight",
+    "proj_scale",
+    "proj_bias",
+    "norm2_gamma",
+    "norm2_beta",
+    "fc1_weight",
+    "fc1_scale",
+    "fc1_bias",
+    "fc2_weight",
+    "fc2_scale",
+    "fc2_bias"
+   ],
+   "merger": [
+    "merger_norm_gamma",
+    "merger_norm_beta",
+    "merger_fc1_weight",
+    "merger_fc1_scale",
+    "merger_fc1_bias",
+    "merger_fc2_weight",
+    "merger_fc2_scale",
+    "merger_fc2_bias"
+   ],
+   "tables": [
+    "pos_embed",
+    "rope_cos",
+    "rope_sin"
+   ]
+  },
+  "presets": [
+   {
+    "grid": [
+     4,
+     4
+    ],
+    "patches": 16,
+    "tokens": 4,
+    "graphs": {
+     "head": "graphs/vision/4x4_head.json",
+     "block": "graphs/vision/4x4_block.json",
+     "merger": "graphs/vision/4x4_merger.json"
+    }
+   },
+   {
+    "grid": [
+     4,
+     6
+    ],
+    "patches": 24,
+    "tokens": 6,
+    "graphs": {
+     "head": "graphs/vision/4x6_head.json",
+     "block": "graphs/vision/4x6_block.json",
+     "merger": "graphs/vision/4x6_merger.json"
+    }
+   },
+   {
+    "grid": [
+     6,
+     4
+    ],
+    "patches": 24,
+    "tokens": 6,
+    "graphs": {
+     "head": "graphs/vision/6x4_head.json",
+     "block": "graphs/vision/6x4_block.json",
+     "merger": "graphs/vision/6x4_merger.json"
+    }
+   }
+  ]
  }
 }

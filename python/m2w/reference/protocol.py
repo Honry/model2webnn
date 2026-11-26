@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..frontends.hf_llm import rope as rope_lib
+from ..frontends.hf_llm import rope as rope_lib, vision
 from ..frontends.hf_llm.arch import ModelSpec
 
 NEG = np.float16(-65504)
@@ -290,3 +290,99 @@ def linear_prefill_controls(C: int, valid: int):
         source = 3 + r if r < pad else r - pad if r < pad + 3 else r
         perm[0, r, source] = 1
     return mask, perm
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# images (Qwen3.5 image tower, docs/models/qwen35-vision.md): preprocessing, the prompt, 3-position interleaved MRoPE
+# ---------------------------------------------------------------------------------------------------------------------
+def prepare_image(image, spec: ModelSpec, grids, grid=None):
+    """image: a PIL image (RGB) -> (patches float32 [N, patch_vector], grid): the preset whose aspect ratio / size fit the image (`vision.choose_grid`, or `grid`), the image resized to exactly
+    grid * patch pixels (bicubic like the Hugging Face image processor), rescaled by 1 / 255, normalised with the mean / std of model.json and patchified in the order of the Conv3d kernel.
+    The browser runtime does the same with a canvas (its resize differs a little from PIL's bicubic: the vision graphs are verified on the SAME pixels)."""
+    from PIL import Image
+
+    v = spec.vision
+    grid = tuple(grid) if grid else vision.choose_grid(grids, image.width, image.height, v["patch_size"])
+    size = (grid[1] * v["patch_size"], grid[0] * v["patch_size"])
+    pixels = np.asarray(image.convert("RGB").resize(size, Image.BICUBIC), np.float32).transpose(2, 0, 1)   # [3, H, W]
+    mean, std = np.asarray(v["image_mean"], np.float32).reshape(3, 1, 1), np.asarray(v["image_std"], np.float32).reshape(3, 1, 1)
+    pixels = (pixels * np.float32(v["rescale_factor"]) - mean) / std
+    return vision.patchify(pixels, grid[0], grid[1], v["patch_size"], v["temporal_patch_size"], v["merge_size"]), grid
+
+
+def image_token_count(spec: ModelSpec, grid) -> int:
+    """the image tokens of a grid: one per merge block"""
+    return grid[0] * grid[1] // spec.vision["merge_size"] ** 2
+
+
+def expand_image_tokens(spec: ModelSpec, tokens: list, grids: list) -> list:
+    """The prompt as the model sees it: every <|image_pad|> of `tokens` (one per image, in order) becomes image_token_count copies for the grid of its image; a run of pad tokens that already has
+    exactly that length stays as it is."""
+    pad, out, k, i = spec.vision["image_token_id"], [], 0, 0
+    while i < len(tokens):
+        if tokens[i] != pad:
+            out.append(tokens[i])
+            i += 1
+            continue
+        if k >= len(grids):
+            raise ValueError("the prompt has more <|image_pad|> tokens than images")
+        run = i
+        while run < len(tokens) and tokens[run] == pad:
+            run += 1
+        want = image_token_count(spec, grids[k])
+        if run - i not in (1, want):
+            raise ValueError(f"image {k}: {run - i} <|image_pad|> tokens in the prompt, expected 1 or {want}")
+        out += [pad] * want
+        i, k = run, k + 1
+    if k != len(grids):
+        raise ValueError(f"{len(grids)} images but {k} <|image_pad|> tokens in the prompt")
+    return out
+
+
+def mrope_positions(spec: ModelSpec, tokens: list, grids: list):
+    """(positions int64 [3, n], rope_delta): the (t, h, w) position of every token of the EXPANDED prompt (transformers' get_rope_index): text t = h = w = running position; the image tokens of a
+    run of grid (gh, gw) get t = start, h = start + row, w = start + column of their merge block (row-major), and the position continues at start + max(gh, gw) / merge afterwards.
+    rope_delta = max position + 1 - n: the decode token at sequence index i has position i + rope_delta (all three components)."""
+    v = spec.vision
+    pad, merge = v["image_token_id"], v["merge_size"]
+    positions, current, i, k = [], 0, 0, 0
+    while i < len(tokens):
+        if tokens[i] != pad:
+            positions.append([current] * 3)
+            current += 1
+            i += 1
+            continue
+        h, w = grids[k][0] // merge, grids[k][1] // merge
+        if i + h * w > len(tokens) or any(t != pad for t in tokens[i:i + h * w]):
+            raise ValueError(f"image {k}: the prompt does not have {h * w} consecutive image tokens")
+        positions += [[current, current + r, current + c] for r in range(h) for c in range(w)]
+        current += max(h, w)
+        i, k = i + h * w, k + 1
+    out = np.asarray(positions, np.int64).T.reshape(3, -1)
+    return out, int(out.max()) + 1 - len(tokens)
+
+
+def mrope_axes(section, count: int) -> np.ndarray:
+    """which of the 3 positions (0 t, 1 h, 2 w) drives each of the `count` rotary frequencies in the INTERLEAVED layout (transformers' apply_interleaved_mrope): t, h, w, t, h, w ...; h only up to
+    3 * section[1], w only up to 3 * section[2], the frequencies after that are t."""
+    axes = np.zeros(count, np.int64)
+    for axis, offset in ((1, 1), (2, 2)):
+        axes[offset:section[axis] * 3:3] = axis
+    return axes
+
+
+def rope_tables_mrope(spec: ModelSpec, positions: np.ndarray, rows: int, pad: int) -> dict:
+    """The `rope_tables` of a chunk with 3 positions per token: positions int64 [3, valid] (t, h, w) -> layer type -> (cos, sin) float16 [1,1,rows,head_dim]; the first `pad` rows reuse the first real
+    position. The rotating dims of the full attention layers sit at the front of the (permuted) head dim: frequency j of the first sum(section) takes its angle from position axes[j]."""
+    out = {}
+    for ltype, entry in spec.rope.items():
+        inv, factor = rope_lib.inv_freq_for(entry, spec.decoder_dims(ltype).head_dim)
+        axes = mrope_axes(spec.mrope["section"], sum(spec.mrope["section"]))
+        angles = np.zeros((positions.shape[1], len(inv)), np.float32)
+        for j, axis in enumerate(axes):
+            angles[:, j] = positions[axis].astype(np.float32) * inv[j]
+        emb = np.concatenate([angles, angles], axis=-1)
+        cos, sin = np.cos(emb) * factor, np.sin(emb) * factor
+        index = np.maximum(0, np.arange(rows) - pad)
+        out[ltype] = (cos[index][None, None].astype(np.float16), sin[index][None, None].astype(np.float16))
+    return out

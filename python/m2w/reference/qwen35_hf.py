@@ -32,3 +32,27 @@ def original_tensors(store, spec) -> dict:
     prefix = "model.language_model."
     names = [spec.tensors["embed"], spec.tensors["final_norm"]] + [n for i in range(spec.num_layers) for n in spec.layer_tensor_names(i).values()]
     return {"model." + name[len(prefix):]: store.read(name) for name in names if name in store}
+
+
+class Qwen35VisionHF:
+    """transformers' Qwen3_5VisionModel (the image tower of Qwen3.5) as the independent reference of the vision graphs; `tensors`: the names of the full model ("model.visual.blocks.0.attn.qkv.weight" ...)."""
+
+    def __init__(self, vision_config: dict, tensors: dict, prefix: str = "model.visual."):
+        import torch
+        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5VisionConfig
+        from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
+
+        self.torch = torch
+        self.model = Qwen3_5VisionModel(Qwen3_5VisionConfig(**{k: v for k, v in vision_config.items() if k != "model_type"})).eval()
+        state = {k[len(prefix):]: torch.from_numpy(np.ascontiguousarray(np.asarray(v, dtype=np.float32))) for k, v in tensors.items() if k.startswith(prefix)}
+        self.model.load_state_dict(state, strict=True)
+        self.block_outputs: list = []
+        for block in self.model.blocks:
+            block.register_forward_hook(lambda _m, _i, out: self.block_outputs.append(out.detach().float().numpy()))
+
+    def forward(self, patches, grid):
+        """patches [N, patch_vector] float32 (merge-block order), grid (h, w) -> (image_embeds [N / 4, out_hidden], last hidden [N, hidden]); block_outputs = the hidden state after every block"""
+        self.block_outputs.clear()
+        with self.torch.no_grad():
+            out = self.model(self.torch.from_numpy(np.ascontiguousarray(patches, dtype=np.float32)), grid_thw=self.torch.tensor([[1, grid[0], grid[1]]]))
+        return out.pooler_output.float().numpy(), out.last_hidden_state.float().numpy()

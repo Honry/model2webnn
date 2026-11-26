@@ -99,3 +99,19 @@ def test_tensor_size_limit_of_webnn():
         check_tensor_limit(D.build_lm_head_graph(dims, D.GraphOptions(compute_type="float32")))
     check_tensor_limit(D.build_lm_head_graph(dims, D.GraphOptions(compute_type="float16")))   # 1.25 GiB: fine
     check_tensor_limit(D.build_lm_head_graph(D.DecoderDims(hidden=2560, num_heads=8, num_kv_heads=2, head_dim=256, ffn=10240, vocab=151936), D.GraphOptions()))   # Qwen3: 1.45 GiB
+
+
+def test_clamp_and_the_float16_safe_gelu():
+    """clamp bounds the polynomial of the vision GELU (x^3 would overflow float16): equal to the exact tanh GELU for any x, finite in float16"""
+    from m2w.frontends.hf_llm.builders import qwen35_vision as QV
+    from m2w.frontends.hf_llm.builders.decoder import Ctx, DecoderDims, GraphOptions
+
+    for compute in ("float32", "float16"):
+        b = GraphBuilder("g")
+        c = Ctx(b, DecoderDims(hidden=128, num_heads=2, num_kv_heads=2, head_dim=64, ffn=128, vocab=0), GraphOptions(compute_type=compute))
+        x = b.input("x", compute, [1, 1, 9])
+        b.output("y", QV.gelu(c, x))
+        xs = np.array([-700, -40, -3, -0.5, 0, 0.5, 3, 40, 700], np.float32).reshape(1, 1, 9)
+        y = run(b.build(), {"x": xs.astype(np.float16 if compute == "float16" else np.float32)})["y"].astype(np.float32)
+        want = 0.5 * xs * (1 + np.tanh(np.sqrt(2 / np.pi) * (xs + 0.044715 * xs ** 3)))
+        assert np.isfinite(y).all() and np.abs(y - want).max() < (0.5 if compute == "float16" else 1e-3), (compute, y, want)

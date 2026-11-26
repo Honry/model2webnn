@@ -46,6 +46,8 @@ def _eval(op: str, ins: list, opt: dict, out_dtype: str):
         return (1.0 / (1.0 + np.exp(-_f32(x)))).astype(np_dtype(out_dtype))
     if op == "tanh":
         return np.tanh(_f32(x)).astype(np_dtype(out_dtype))
+    if op == "clamp":
+        return np.clip(_f32(x), opt["minValue"], opt["maxValue"]).astype(np_dtype(out_dtype))
     if op == "softplus":
         return np.logaddexp(0.0, _f32(x)).astype(np_dtype(out_dtype))
     if op in ("exp", "log"):

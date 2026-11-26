@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from .frontends.hf_llm.builders import decoder as D
+from .frontends.hf_llm.vision import parse_grid
 from .ir import serialize
 from .presets import PRESETS
 
@@ -16,8 +17,17 @@ def cmd_compile(args) -> int:
     out = compile_model(args.model, args.out, max_lengths=args.max_length, chunks=args.chunk, kv_styles=args.kv_style, staging_rows=args.staging_rows,
                         compute_types=args.compute_type, blocks_per_graph=args.blocks_per_graph, prefill_blocks_per_graph=args.prefill_blocks_per_graph,
                         merge_projections=not args.no_merge, lm_head_format=args.lm_head_format, search=not args.no_search, workers=args.workers,
-                        endpoint=args.endpoint, cache_dir=args.cache_dir)
+                        endpoint=args.endpoint, cache_dir=args.cache_dir, vision=not args.no_vision, vision_weights=args.vision_weights,
+                        vision_grids=[parse_grid(g) for g in args.vision_grids] if args.vision_grids else None, vision_compute_type=args.vision_compute_type)
     print(f"\nNext: m2w verify {out} --source {args.model}")
+    return 0
+
+
+def cmd_add_vision(args) -> int:
+    from .compile import add_vision
+
+    add_vision(args.package, args.model, vision_weights=args.vision_weights, vision_grids=[parse_grid(g) for g in args.vision_grids] if args.vision_grids else None,
+               vision_compute_type=args.vision_compute_type, search=not args.no_search, workers=args.workers, endpoint=args.endpoint, cache_dir=args.cache_dir)
     return 0
 
 
@@ -124,6 +134,11 @@ def main(argv=None) -> int:
                         "attention kinds); default: the single blocks and the recommended K of the model family (rebuild-graphs: the groups the package has)")
         sp.add_argument("--prefill-blocks-per-graph", type=int, nargs="+", default=[1], help="the same for the prefill graphs (not for Gemma 4)")
 
+    def vision_args(sp):
+        sp.add_argument("--vision-weights", choices=["int8", "int4", "float16"], default="int8", help="Qwen3.5 image tower: linear weights int8 per row symmetric (default), int4 group 128 or float16")
+        sp.add_argument("--vision-grids", nargs="+", metavar="HxW", help="image grid presets in patches of 16 (multiples of 2), e.g. 16x16 24x24 32x24; default 16x16 24x24 32x32 16x24 24x16 24x32 32x24")
+        sp.add_argument("--vision-compute-type", choices=["float32", "float16"], default="float32", help="type of the computation inside the image tower graphs (the boundaries stay f16)")
+
     def source_args(sp):
         sp.add_argument("--endpoint", help="Hugging Face endpoint (default: $HF_ENDPOINT or https://huggingface.co; e.g. https://hf-mirror.com)")
         sp.add_argument("--cache-dir", help="download cache (default: ~/.cache/m2w)")
@@ -136,8 +151,19 @@ def main(argv=None) -> int:
     c.add_argument("--lm-head-format", choices=["int8-sym", "uint8-asym"], default="int8-sym", help="tied embedding / lm_head table: int8 symmetric per row (default) or uint8 asymmetric per row (the OpenVINO export); same accuracy, see tools/lm_head_formats.py")
     c.add_argument("--no-search", action="store_true", help="plain absmax int4 scales (faster, a little less accurate)")
     c.add_argument("--workers", type=int, default=4)
+    c.add_argument("--no-vision", action="store_true", help="Qwen3.5: leave the image tower out (a text-only package)")
+    vision_args(c)
     source_args(c)
     c.set_defaults(func=cmd_compile)
+
+    av = sub.add_parser("add-vision", help="add the image tower of the source checkpoint to an existing Qwen3.5 package (no text weight is quantized again)")
+    av.add_argument("package")
+    av.add_argument("--model", required=True, help="the HF model the package was compiled from (repo id or directory)")
+    av.add_argument("--no-search", action="store_true", help="plain absmax int4 scales (--vision-weights int4)")
+    av.add_argument("--workers", type=int, default=4)
+    vision_args(av)
+    source_args(av)
+    av.set_defaults(func=cmd_add_vision)
 
     rb = sub.add_parser("rebuild-graphs", help="rewrite the graphs + plan of an existing package with other variants (the weights stay: no quantization)")
     rb.add_argument("package")

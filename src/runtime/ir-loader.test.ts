@@ -46,6 +46,14 @@ describe('ir-loader', () => {
     expect(dequantize[1].args[2]).toBeNull();       // zero point omitted
   });
 
+  it('maps clamp to the WebNN clamp options', () => {
+    const doc: GraphDoc = { format: 'm2w-graph', version: 0, name: 'c', inputs: [{ name: 'x', dataType: 'float16', shape: [4] }], constants: [],
+      nodes: [{ op: 'clamp', inputs: ['x'], outputs: ['y'], options: { minValue: -8, maxValue: 8 } }], outputs: [{ name: 'y', dataType: 'float16', shape: [4], value: 'y' }] };
+    const { builder, calls } = mockBuilder();
+    loadGraph(builder, doc);
+    expect(calls.find((c) => c.op === 'clamp')!.args[1]).toEqual({ minValue: -8, maxValue: 8 });
+  });
+
   it('builds literal constants with the right bytes', () => {
     const half = (value: number) => new Uint16Array(new Uint8Array(constantData({ name: 'c', dataType: 'float16', shape: [1], fill: value }).buffer.slice(0)).buffer)[0];
     // expected bit patterns from numpy.float16

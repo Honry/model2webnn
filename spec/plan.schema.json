@@ -41,13 +41,13 @@
     "blocks_per_graph": { "type": "array", "items": { "type": "integer" }, "description": "decode block groups the package contains" },
     "prefill_blocks_per_graph": { "type": "array", "items": { "type": "integer" } },
     "recommended": { "type": "object", "description": "the session options the model family runs best with (decode blocks per graph ...): the runtime and the pages use them when the caller does not choose",
-                     "properties": { "blocks_per_graph": { "type": "integer" }, "prefill_blocks_per_graph": { "type": "integer" } } },
+                     "properties": { "blocks_per_graph": { "type": "integer" }, "prefill_blocks_per_graph": { "type": "integer" }, "prefill_chunks": { "type": "array", "items": { "type": "integer" }, "description": "prefill chunk sizes to load together (the runtime plans every prompt with them)" } } },
     "weights": {
       "type": "object",
       "description": "tensor names of the weights manifest by the half of the layer they feed: a graph input with such a name is bound to that tensor of the layer",
       "required": ["attention", "ffn", "final_norm", "embedding"],
       "properties": {
-        "attention": { "type": "array", "items": { "type": "string" } }, "ffn": { "type": "array", "items": { "type": "string" } },
+        "attention": { "oneOf": [{ "type": "array", "items": { "type": "string" } }, { "type": "object", "description": "hybrid models: attention kind -> tensor names", "additionalProperties": { "type": "array", "items": { "type": "string" } } }] }, "ffn": { "type": "array", "items": { "type": "string" } },
         "final_norm": { "type": "array", "items": { "type": "string" } },
         "embedding": { "type": "array", "items": { "type": "string" }, "description": "lm_head_weight, lm_head_scale (+ lm_head_zero_point for uint8-asym)" }
       }
@@ -64,9 +64,9 @@
             "type": "object",
             "description": "max length -> graphs (flush: staged only)",
             "additionalProperties": {
-              "type": "object", "required": ["head", "block", "tail"],
+              "type": "object", "required": ["head", "tail"],
               "properties": {
-                "head": { "type": "string" }, "block": { "type": "string" }, "tail": { "type": "string" }, "flush": { "type": "string" },
+                "head": { "type": "string" }, "block": { "type": "string" }, "blocks": { "type": "object", "description": "hybrid models: attention kind -> block graph (instead of `block`)", "additionalProperties": { "type": "string" } }, "tail": { "type": "string" }, "flush": { "type": "string" },
                 "block_groups": {
                   "type": "object",
                   "description": "number of blocks -> graph with that many blocks (hybrid-layer models: b<j>_ controls per block when block_group_controls = per_block); Gemma 4 (decode only): number of blocks per graph -> the schedule of the N - 1 blocks (see chain.block_groups)",
@@ -87,14 +87,33 @@
             "additionalProperties": {
               "type": "object",
               "additionalProperties": {
-                "type": "object", "required": ["head", "block", "tail"],
+                "type": "object", "required": ["head", "tail"],
                 "properties": {
-                  "head": { "type": "string" }, "block": { "type": "string" }, "tail": { "type": "string" },
+                  "head": { "type": "string" }, "block": { "type": "string" }, "blocks": { "type": "object", "additionalProperties": { "type": "string" } }, "tail": { "type": "string" },
                   "block_groups": { "type": "object", "additionalProperties": { "type": "string" } }
                 }
               }
             }
           }
+        }
+      }
+    },
+    "vision": {
+      "type": "object",
+      "description": "Qwen3.5 image tower: one set of graphs (HEAD, BLOCK shared by all `depth` blocks, MERGER) per grid preset, independent of the text variants. Absent = a text-only package",
+      "required": ["weights", "compute_type", "depth", "presets", "tensors"],
+      "properties": {
+        "description": { "type": "string" }, "weights": { "enum": ["int8", "int4", "float16"] }, "compute_type": { "enum": ["float32", "float16"] }, "depth": { "type": "integer" }, "image_token_id": { "type": "integer" },
+        "tensors": {
+          "type": "object", "description": "the weight / table tensors bound to the graph inputs (head / block / merger: manifest files vision_head / vision_block (layer i) / vision_merger) and to the external constants (tables: the vision_grid file of the preset's grid)",
+          "properties": { "head": { "type": "array", "items": { "type": "string" } }, "block": { "type": "array", "items": { "type": "string" } }, "merger": { "type": "array", "items": { "type": "string" } }, "tables": { "type": "array", "items": { "type": "string" } } }
+        },
+        "presets": {
+          "type": "array", "minItems": 1,
+          "items": { "type": "object", "required": ["grid", "patches", "tokens", "graphs"],
+                     "properties": { "grid": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "(grid_h, grid_w) in patches" }, "patches": { "type": "integer" },
+                                     "tokens": { "type": "integer", "description": "image tokens = patches / merge^2" },
+                                     "graphs": { "type": "object", "required": ["head", "block", "merger"], "properties": { "head": { "type": "string" }, "block": { "type": "string" }, "merger": { "type": "string" } } } } }
         }
       }
     },

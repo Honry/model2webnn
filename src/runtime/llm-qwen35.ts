@@ -89,7 +89,8 @@ export class Qwen35LLM {
     const table = plan.graphs[variant.id];
     if (!table.decode[key]) throw new Error(`the package has no graphs for max length ${key} (it has ${plan.max_lengths.join(', ')})`);
     const available = Object.keys(table.prefill[key]).map(Number).sort((a, b) => a - b);
-    const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : [o.chunkSize ?? available[0]])].sort((a, b) => a - b);
+    const recommendedChunks = (plan.recommended?.prefill_chunks ?? []).filter((c) => available.includes(c));   // not chosen by the caller: the recommended chunk sizes of the package
+    const sizes = [...new Set(o.chunkSizes?.length ? o.chunkSizes : o.chunkSize !== undefined ? [o.chunkSize] : recommendedChunks.length ? recommendedChunks : [available[0]])].sort((a, b) => a - b);
     for (const size of sizes) if (!available.includes(size)) throw new Error(`the package has no prefill graphs for chunk ${size} at max length ${key} (it has ${available.join(', ')})`);
     if ((o.prefillBlocksPerGraph ?? 0) > 1) throw new Error('Qwen3.5 packages have block groups for decode only: prefillBlocksPerGraph must be 1');
     const groupsOf = (table.decode[key] as unknown as QwenDecodeTable).block_groups ?? {};

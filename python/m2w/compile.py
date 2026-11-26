@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import __version__
-from .frontends.hf_llm import arch, chat_format, hub, pack, pack_gemma4, pack_qwen35
+from .frontends.hf_llm import arch, chat_format, hub, pack, pack_gemma4, pack_qwen35, vision as V
 from .frontends.hf_llm.builders import decoder as D
 from .frontends.hf_llm.builders import gemma4 as G
 from .frontends.hf_llm.builders import qwen35 as Q
+from .frontends.hf_llm.builders import qwen35_vision as QV
 from .frontends.hf_llm.safetensors_io import TensorStore
 from .ir import check_tensor_limit, serialize
 
@@ -333,6 +334,36 @@ def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
     return plan
 
 
+def write_vision_graphs(spec: arch.ModelSpec, out: Path, grids, weights: str, compute_type: str) -> dict:
+    """The image tower graphs of every grid preset (graphs/vision/<grid>_head|block|merger.json; independent of the text variants) -> plan.json `vision`."""
+    gdir = out / "graphs" / "vision"
+    gdir.mkdir(parents=True, exist_ok=True)
+
+    def emit(graph) -> str:
+        check_tensor_limit(graph)
+        serialize.dump(graph, gdir / f"{graph.name}.json")
+        return f"graphs/vision/{graph.name}.json"
+
+    presets = []
+    for grid in grids:
+        V.check_grid(grid, spec.vision["merge_size"])
+        g = V.grid_name(grid)
+        graphs = {"head": emit(QV.build_head_graph(spec, grid, weights, compute_type, name=f"{g}_head")), "block": emit(QV.build_block_graph(spec, grid, weights, compute_type, name=f"{g}_block")),
+                  "merger": emit(QV.build_merger_graph(spec, grid, weights, compute_type, name=f"{g}_merger"))}
+        patches = grid[0] * grid[1]
+        presets.append({"grid": list(grid), "patches": patches, "tokens": patches // spec.vision["merge_size"] ** 2, "graphs": graphs})
+    return {
+        "description": "the image tower in the NPUW-style split, one set of graphs per grid preset (grid = patches in height x width): HEAD (patches [N, patch_vector] -> hidden_states [1,N,hidden]: patch matmul + bias + the "
+                       "position embedding of the grid), BLOCK x depth (ONE graph, weights bound per layer: hidden_states -> next_hidden_states), MERGER (hidden_states -> image_embeds [1,N/4,out_hidden]). "
+                       "Patches are in merge-block order and in the (channel, temporal, kh, kw) order of the Conv3d kernel (protocol patchify). The external constants pos_embed (HEAD) and rope_cos / rope_sin "
+                       "(BLOCK) are the tensors of the manifest file with role vision_grid and this grid; the weights are the manifest files vision_head / vision_block (layer i) / vision_merger.",
+        "weights": weights, "compute_type": compute_type, "depth": spec.vision["depth"], "image_token_id": spec.vision["image_token_id"],
+        "tensors": {"head": [n for n, _, _ in QV.head_weight_specs(spec, weights)], "block": [n for n, _, _ in QV.block_weight_specs(spec, weights)],
+                    "merger": [n for n, _, _ in QV.merger_weight_specs(spec, weights)], "tables": list(QV.TABLES)},
+        "presets": presets,
+    }
+
+
 def resolve_blocks_per_graph(spec: arch.ModelSpec, blocks_per_graph) -> tuple:
     """--blocks-per-graph not given: the single blocks and the recommended group size of the model family (so that the package contains the graphs the runtime defaults to)."""
     if blocks_per_graph is not None:
@@ -346,12 +377,19 @@ def recommended_for(spec: arch.ModelSpec, plan: dict) -> dict:
     rec = arch.recommended_session(spec)
     built = set(plan.get("blocks_per_graph", [1]))
     k = int(rec.get("blocks_per_graph", 1))
-    return {"blocks_per_graph": k if k in built else 1, "prefill_blocks_per_graph": int(rec.get("prefill_blocks_per_graph", 1)) if int(rec.get("prefill_blocks_per_graph", 1)) in set(plan.get("prefill_blocks_per_graph", [1])) else 1}
+    out = {"blocks_per_graph": k if k in built else 1, "prefill_blocks_per_graph": int(rec.get("prefill_blocks_per_graph", 1)) if int(rec.get("prefill_blocks_per_graph", 1)) in set(plan.get("prefill_blocks_per_graph", [1])) else 1}
+    chunks = [int(c) for c in rec.get("prefill_chunks", []) if int(c) in set(plan.get("prefill_chunks", []))]   # the prefill chunk sizes of the family's choice that the package has (none of them: the runtime picks the smallest)
+    if chunks:
+        out["prefill_chunks"] = chunks
+    return out
 
 
-def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
+def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph, vision: Optional[dict] = None):
+    """vision: {"weights", "grids", "compute_type"} of the image tower to write graphs for (the spec has a `vision` entry), else None."""
     graphs, plan = _graphs_and_plan_core(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     plan["recommended"] = recommended_for(spec, plan)
+    if vision:
+        plan["vision"] = write_vision_graphs(spec, out, vision["grids"], vision["weights"], vision["compute_type"])
     return graphs, plan
 
 
@@ -424,9 +462,10 @@ def _write_index(out: Path, spec: arch.ModelSpec, source_name: str, plan: dict, 
         "requires": {"webnn": {"ops": ["dequantizeLinear", "gemm", "matmul", "softmax", "concat", "slice", "expand", "reduceMean", "transpose", "reshape", "cast"]
                                + (["tensorScatter"] if any(v["kv_style"] == "tensorScatter" for v in plan["variants"]) else [])
                                + (["scatterND"] if any(v["kv_style"] == "scatterND" for v in plan["variants"]) else [])
-                               + (["tanh"] if plan.get("architecture_kind") == "gemma4" else [])
+                               + (["tanh"] if plan.get("architecture_kind") == "gemma4" or "vision" in plan else [])
+                               + (["clamp"] if "vision" in plan else [])
                                + (["exp", "softplus", "reduceSum"] if plan.get("architecture_kind") == "qwen35" else []),
-                               "dataTypes": ["float16", "float32", "int4", "uint8"], "inputs_may_be_int4": True}},
+                               "dataTypes": ["float16", "float32", "int4", "uint8"] + (["int8"] if "vision" in plan else []), "inputs_may_be_int4": True}},
         "files": [{"path": p.relative_to(out).as_posix(), "bytes": p.stat().st_size, "sha256": _sha256(p)} for p in files],
         "summary": {"layers": spec.num_layers, "max_lengths": plan["max_lengths"], "prefill_chunks": plan["prefill_chunks"], "variants": [v["id"] for v in plan["variants"]],
                     "weights_bytes": sum(f["bytes"] for f in manifest["files"])},
@@ -452,10 +491,26 @@ def _check_lengths(spec: arch.ModelSpec, max_lengths, progress) -> None:
             raise ValueError(f"max length {L} exceeds the model's max_position_embeddings {spec.max_position_embeddings}")
 
 
+def _load_preprocessor(source: Path) -> Optional[dict]:
+    path = source / "preprocessor_config.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+
+def _vision_options(spec: arch.ModelSpec, weights: str, grids, compute_type: str) -> Optional[dict]:
+    if not spec.vision:
+        return None
+    if weights not in QV.WEIGHT_FORMATS:
+        raise ValueError(f"unknown vision weight format '{weights}' ({' | '.join(QV.WEIGHT_FORMATS)})")
+    return {"weights": weights, "grids": [tuple(g) for g in (grids or V.DEFAULT_GRIDS)], "compute_type": compute_type}
+
+
 def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
                   prefill_blocks_per_graph=(1,), merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4,
-                  endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print) -> Path:
-    """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants."""
+                  endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print, vision: bool = True, vision_weights: str = "int8",
+                  vision_grids=None, vision_compute_type: str = "float32") -> Path:
+    """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants.
+    A Qwen3.5 checkpoint with a vision tower gets the image tower too (images only): `vision_weights` int8 | int4 | float16, `vision_grids` the (grid_h, grid_w) presets in patches
+    (default vision.DEFAULT_GRIDS), `vision_compute_type` of its graphs; vision=False leaves it out."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     for owned in ("graphs", "weights", "tokenizer"):   # directories the compiler owns: files of an earlier compile (another format, fewer layers ...) must not linger in the package
@@ -463,7 +518,10 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     source = hub.resolve_model(model, cache_dir=cache_dir, endpoint=endpoint, progress=progress)
     config = json.loads((source / "config.json").read_text(encoding="utf-8"))
     generation_config = json.loads((source / "generation_config.json").read_text(encoding="utf-8")) if (source / "generation_config.json").exists() else {}
-    spec = arch.spec_from_config(config, generation_config)
+    spec = arch.spec_from_config(config, generation_config, _load_preprocessor(source))
+    if not vision:
+        spec.vision = {}
+    vision_opt = _vision_options(spec, vision_weights, vision_grids, vision_compute_type)
     blocks_per_graph = resolve_blocks_per_graph(spec, blocks_per_graph)
     _check_lengths(spec, max_lengths, progress)
     if spec.builder == "gemma4" and any(k > 1 for k in prefill_blocks_per_graph):   # before the (long) quantization
@@ -476,8 +534,9 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
 
     store = TensorStore.open(source)
     packer = {"gemma4": pack_gemma4, "qwen35": pack_qwen35}.get(spec.builder, pack)
-    manifest = packer.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress)
-    graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    manifest = packer.pack_model(spec, store, out / "weights", opt, grid=pack.DEFAULT_GRID if search else None, workers=workers, progress=progress,
+                                 **({"vision": {"weights": vision_opt["weights"], "grids": vision_opt["grids"]}} if vision_opt else {}))
+    graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph, vision_opt)
     (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
     (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
 
@@ -514,11 +573,46 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     opt = D.GraphOptions(**{k: v for k, v in old["profile"].items() if k in D.GraphOptions.__dataclass_fields__})
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     shutil.rmtree(out / "graphs", ignore_errors=True)
-    graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
+    old_vision = old.get("vision")   # the image tower graphs of the package are rewritten too (same weights format and grids; the compute type is kept)
+    vision_opt = {"weights": old_vision["weights"], "grids": [tuple(p["grid"]) for p in old_vision["presets"]], "compute_type": old_vision["compute_type"]} if old_vision and spec.vision else None
+    graphs, plan = _graphs_and_plan(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph, vision_opt)
     (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
     tokenizer_files = [Path(f).name for f in index_old.get("tokenizer", [])]
     index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), tokenizer_files)
     progress(f"rewrote the graphs of {out}: variants {', '.join(index['summary']['variants'])}")
+    return out
+
+
+def add_vision(package_dir, model: str, *, vision_weights: str = "int8", vision_grids=None, vision_compute_type: str = "float32", search: bool = True, workers: int = 4,
+               endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print) -> Path:
+    """Add the image tower of the source checkpoint to an existing Qwen3.5 package (compiled without it, or with other options): vision weights + grid tables are packed, vision graphs and the plan are
+    written, model.json / manifest / m2w.json are updated. The text weights and graphs stay (no text quantization)."""
+    out = Path(package_dir)
+    spec = arch.ModelSpec.from_dict(json.loads((out / "model.json").read_text(encoding="utf-8")))
+    if spec.builder != "qwen35":
+        raise ValueError("only Qwen3.5 packages have an image tower")
+    source = hub.resolve_model(model, cache_dir=cache_dir, endpoint=endpoint, progress=progress)
+    config = json.loads((source / "config.json").read_text(encoding="utf-8"))
+    fresh = arch.spec_from_config(config, None, _load_preprocessor(source))
+    if not fresh.vision:
+        raise ValueError(f"{model} has no vision tower")
+    spec.vision, spec.mrope, spec.tensors = fresh.vision, fresh.mrope, {**spec.tensors, "vision": fresh.tensors["vision"]}
+    vision_opt = _vision_options(spec, vision_weights, vision_grids, vision_compute_type)
+    manifest = json.loads((out / "weights" / "manifest.json").read_text(encoding="utf-8"))
+    for entry in [f for f in manifest["files"] if f["role"].startswith("vision_")]:
+        (out / "weights" / entry["file"]).unlink(missing_ok=True)
+    manifest["files"] = [f for f in manifest["files"] if not f["role"].startswith("vision_")]
+    manifest["files"] += pack_qwen35.pack_vision(spec, TensorStore.open(source), out / "weights", vision_opt["weights"], vision_opt["grids"], pack.DEFAULT_GRID if search else None, workers, progress)
+    manifest["quant"]["vision"] = pack_qwen35.vision_quant_entry(vision_opt["weights"])
+    (out / "weights" / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8", newline="\n")
+    shutil.rmtree(out / "graphs" / "vision", ignore_errors=True)
+    plan = json.loads((out / "plan.json").read_text(encoding="utf-8"))
+    plan["vision"] = write_vision_graphs(spec, out, vision_opt["grids"], vision_opt["weights"], vision_opt["compute_type"])
+    (out / "model.json").write_text(json.dumps(spec.to_dict(), indent=1), encoding="utf-8", newline="\n")
+    (out / "plan.json").write_text(json.dumps(plan, indent=1), encoding="utf-8", newline="\n")
+    index_old = json.loads((out / "m2w.json").read_text(encoding="utf-8"))
+    index = _write_index(out, spec, index_old.get("source", ""), plan, manifest, index_old.get("chat_format"), [Path(f).name for f in index_old.get("tokenizer", [])])
+    progress(f"added the image tower to {out}: {len(plan['vision']['presets'])} grids, {vision_opt['weights']} weights ({index['summary']['weights_bytes'] / 2**20:.0f} MB of weights in total)")
     return out
 
 

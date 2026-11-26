@@ -16,6 +16,7 @@ from ..frontends.hf_llm.arch import ModelSpec
 from ..frontends.hf_llm.builders import decoder as D
 from ..frontends.hf_llm.builders import qwen35 as Q
 from ..frontends.hf_llm.pack_qwen35 import rope_permutation
+from ..quantize import dequantize_int4
 from ..ir import serialize
 from ..ir.interpreter import run
 from . import protocol
@@ -27,6 +28,43 @@ class Qwen35PackageReader(Gemma4PackageReader):
 
     def _gamma(self, shard, name) -> np.ndarray:
         return self.raw(shard, name).astype(np.float32).reshape(-1)
+
+    # ----------------------------------------------------------------------------------------------- the image tower
+    def vision_shard(self, role: str, layer=None, grid=None) -> dict:
+        """The manifest entry of a vision shard: role vision_head | vision_merger | vision_pos_embed | vision_block (layer) | vision_grid (grid = (h, w))."""
+        for f in self.files:
+            if f["role"] == role and (layer is None or f.get("layer") == layer) and (grid is None or tuple(f.get("grid", ())) == tuple(grid)):
+                return f
+        raise KeyError(f"the package has no {role} shard (layer {layer}, grid {grid})")
+
+    def vision_linear(self, shard: dict, name: str) -> np.ndarray:
+        """[out, in] float32 of a linear weight of the image tower as the graph sees it: dequantizeLinear gives float16 (scale dtype), int8: q * scale, int4: group-wise."""
+        mode = self.manifest["quant"]["vision"]["weights"]
+        weight = self.raw(shard, name + "_weight")
+        if mode == "int8":
+            return (weight.astype(np.float32) * self.raw(shard, name + "_scale").astype(np.float32)).astype(np.float16).astype(np.float32)
+        if mode == "int4":
+            return dequantize_int4(weight, self.raw(shard, name + "_scale"))
+        return weight.astype(np.float32)
+
+    def vision_hf_state_dict(self, prefix: str = "model.visual.") -> dict:
+        """The dequantized image tower under the transformers names (Qwen3_5VisionModel): the Conv3d kernel back to [hidden, channels, temporal, patch, patch]."""
+        v = self.spec.vision
+        flat = lambda shard, name: self.raw(shard, name).astype(np.float32).reshape(-1)  # noqa: E731
+        head, merger = self.vision_shard("vision_head"), self.vision_shard("vision_merger")
+        out = {prefix + "patch_embed.proj.weight": self.vision_linear(head, "patch_embed").reshape(v["hidden"], v["channels"], v["temporal_patch_size"], v["patch_size"], v["patch_size"]),
+               prefix + "patch_embed.proj.bias": flat(head, "patch_embed_bias"),
+               prefix + "pos_embed.weight": self.raw(self.vision_shard("vision_pos_embed"), "pos_embed_table").astype(np.float32),
+               prefix + "merger.norm.weight": flat(merger, "merger_norm_gamma"), prefix + "merger.norm.bias": flat(merger, "merger_norm_beta")}
+        for key in ("fc1", "fc2"):
+            out[f"{prefix}merger.linear_{key}.weight"], out[f"{prefix}merger.linear_{key}.bias"] = self.vision_linear(merger, "merger_" + key), flat(merger, f"merger_{key}_bias")
+        for i in range(v["depth"]):
+            shard, p = self.vision_shard("vision_block", layer=i), f"{prefix}blocks.{i}."
+            for norm in ("norm1", "norm2"):
+                out[p + norm + ".weight"], out[p + norm + ".bias"] = flat(shard, norm + "_gamma"), flat(shard, norm + "_beta")
+            for ours, theirs in (("qkv", "attn.qkv"), ("proj", "attn.proj"), ("fc1", "mlp.linear_fc1"), ("fc2", "mlp.linear_fc2")):
+                out[p + theirs + ".weight"], out[p + theirs + ".bias"] = self.vision_linear(shard, ours), flat(shard, ours + "_bias")
+        return out
 
     def hf_state_dict(self, prefix: str = "model.") -> dict:
         spec = self.spec

@@ -4,7 +4,7 @@
   "architectures": ["Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM"],
   "builder": "qwen35",
   "qk_norm": true,
-  "recommended": {"blocks_per_graph": 1, "prefill_blocks_per_graph": 1},
+  "recommended": {"blocks_per_graph": 4, "prefill_blocks_per_graph": 1, "prefill_chunks": [64, 128]},
   "chat_template_kwargs": { "Qwen3_5ForConditionalGeneration": { "enable_thinking": false }, "Qwen3_5ForCausalLM": { "enable_thinking": false } },
   "tensors": {
     "embed": "model.language_model.embed_tokens.weight",
@@ -31,6 +31,20 @@
       "dt_bias": "model.language_model.layers.{i}.linear_attn.dt_bias",
       "linear_norm": "model.language_model.layers.{i}.linear_attn.norm.weight",
       "out_proj": "model.language_model.layers.{i}.linear_attn.out_proj.weight"
+    },
+    "vision": {
+      "patch_embed_weight": "model.visual.patch_embed.proj.weight", "patch_embed_bias": "model.visual.patch_embed.proj.bias", "pos_embed": "model.visual.pos_embed.weight",
+      "merger_norm_weight": "model.visual.merger.norm.weight", "merger_norm_bias": "model.visual.merger.norm.bias",
+      "merger_fc1_weight": "model.visual.merger.linear_fc1.weight", "merger_fc1_bias": "model.visual.merger.linear_fc1.bias",
+      "merger_fc2_weight": "model.visual.merger.linear_fc2.weight", "merger_fc2_bias": "model.visual.merger.linear_fc2.bias",
+      "block": {
+        "norm1_weight": "model.visual.blocks.{i}.norm1.weight", "norm1_bias": "model.visual.blocks.{i}.norm1.bias",
+        "norm2_weight": "model.visual.blocks.{i}.norm2.weight", "norm2_bias": "model.visual.blocks.{i}.norm2.bias",
+        "qkv_weight": "model.visual.blocks.{i}.attn.qkv.weight", "qkv_bias": "model.visual.blocks.{i}.attn.qkv.bias",
+        "proj_weight": "model.visual.blocks.{i}.attn.proj.weight", "proj_bias": "model.visual.blocks.{i}.attn.proj.bias",
+        "fc1_weight": "model.visual.blocks.{i}.mlp.linear_fc1.weight", "fc1_bias": "model.visual.blocks.{i}.mlp.linear_fc1.bias",
+        "fc2_weight": "model.visual.blocks.{i}.mlp.linear_fc2.weight", "fc2_bias": "model.visual.blocks.{i}.mlp.linear_fc2.bias"
+      }
     }
   }
 }
