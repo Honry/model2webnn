@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Qwen3.5 image suite: quality of the image path on the device</title>
+<style>
+  body { font: 14px/1.5 Consolas, monospace; margin: 16px; background: #101214; color: #d6d9dd; }
+  pre { white-space: pre-wrap; }
+  .pass { color: #7fcf8a; } .fail { color: #ff7a7a; }
+  #cases { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  #cases figure { margin: 0; width: 150px; font-size: 12px; } #cases img { width: 150px; height: 110px; object-fit: contain; background: #fff; border-radius: 4px; }
+</style>
+<h3>Qwen3.5 image suite <small id="status">starting</small></h3>
+<div id="cases"></div>
+<pre id="out"></pre>
+<script type="module" src="vision-suite.js?v=1"></script>
