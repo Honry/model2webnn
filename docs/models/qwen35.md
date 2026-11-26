@@ -77,6 +77,75 @@ The point is to replace 128 tiny dependent steps (one per token) by a few big ba
 Dependent chain per 128 tokens: 16 (substitution) + 8 x ~6 (phase 2) = about 60 steps of big batched operators, against 128 x ~8 tiny steps for the token recurrence
 (`gated_delta_unrolled`, the OpenVINO-style loop body unrolled), measured 5.8 ms against 17.1 ms on the NPU. Decode (one token) is the plain one-step update (`gated_delta_step`).
 
+### Flowcharts (Mermaid)
+
+**1. From a prompt to logits: where the loops are**
+
+```mermaid
+flowchart TD
+    P["prompt of N tokens"] --> PL["runtime: plan_prefill<br/>chunks of 64 / 128 / 256 rows<br/>the last chunk is left-padded"]
+    PL --> CL{{"host loop over chunks"}}
+    CL --> CH["one chunk = static graphs<br/>HEAD, BLOCK x 31, TAIL"]
+    ST[("states per linear layer<br/>conv 3 rows + recurrent 32x128x128<br/>KV caches of the 8 full layers")] -->|"in"| CH
+    CH -->|"out, swapped with spare tensors"| ST
+    CH -->|"last chunk"| LM["lm_head, row blocks"]
+    LM --> TOK["first token"]
+    TOK --> DL{{"host loop over decode steps"}}
+    DL --> DS["decode graphs<br/>same chain, one token<br/>linear layers: one-step update"]
+    ST -->|"in"| DS
+    DS -->|"out"| ST
+    DS --> NT["next token"]
+    NT --> DL
+```
+
+**2. One linear attention layer (Gated DeltaNet) inside a BLOCK graph**
+
+```mermaid
+flowchart TD
+    H["hidden state, residual"] --> N["RMSNorm, weight 1 + w"]
+    N --> QKVZ["int4 projection qkvz<br/>8192 + 4096 outputs"]
+    N --> BA["float16 projection b, a<br/>64 outputs"]
+    QKVZ -->|"q k v, 8192 channels"| CONV["causal depthwise conv, 4 taps<br/>over concat of conv state and x<br/>prefill: pad rows moved by conv_perm<br/>then silu"]
+    CS[("conv state in")] --> CONV
+    CONV --> CSO[("conv state out<br/>last 3 rows")]
+    CONV --> L2["l2 norm of q and k<br/>repeat_interleave 16 to 32 heads"]
+    BA --> GB["beta = sigmoid b<br/>g = - exp A_log * softplus a + dt_bias<br/>prefill: times valid_mask"]
+    L2 --> CORE{{"Gated DeltaNet core<br/>prefill: chunkwise, diagram 3<br/>decode: one-step update"}}
+    GB --> CORE
+    RS[("recurrent state in")] --> CORE
+    CORE --> RSO[("recurrent state out")]
+    CORE --> GN["gated RMSNorm: norm of o, times silu of z"]
+    QKVZ -->|"z, 4096"| GN
+    GN --> OP["int4 projection out_proj"]
+    OP --> AO["attention_output"]
+    AO --> FF["feed-forward half: x1 = residual + attention_output<br/>RMSNorm, gate up, silu, down"]
+```
+
+**3. The chunkwise core for one prefill chunk of 128 tokens (8 sub-chunks of 16, 32 heads)**
+
+```mermaid
+flowchart TD
+    IN["q, k, v, g, beta<br/>32 heads x 128 tokens"] --> FO["fold: 32 heads x 8 sub-chunks = 256 batches of 16 tokens"]
+    subgraph P1["phase 1 - independent of the state, all 256 batches at once"]
+        FO --> GC["gc: cumulative sum of g<br/>matmul with a lower-triangular constant"]
+        GC --> DM["decay matrix D = exp gc_i - gc_j<br/>lower triangular"]
+        DM --> AM["A = strict lower of beta k k^T times D"]
+        FO --> RH["rhs = beta v, beta k exp gc"]
+        GC --> RH
+        AM --> SB["solve I + A, X = rhs<br/>row-by-row substitution<br/>16 dependent steps<br/>X = value, k_cumdecay"]
+        RH --> SB
+        DM --> PR["q_gate, attn = q k^T times D,<br/>k_decayed^T, total decay"]
+        GC --> PR
+    end
+    SB --> UF["unfold to 32 heads x 8 sub-chunks"]
+    PR --> UF
+    subgraph P2["phase 2 - only the state travels: 8 dependent steps, unrolled"]
+        UF --> S0["state S0 in"]
+        S0 --> LP["for each sub-chunk s:<br/>v_new = value_s - k_cumdecay_s @ S<br/>out_s = q_gate_s @ S + attn_s @ v_new<br/>S = S * total_s + k_decayed^T_s @ v_new"]
+    end
+    LP --> OUT["out: concat of out_0 .. out_7<br/>new state S"]
+```
+
 ## What OpenVINO's own IR does, and where this package differs (OpenVINO/Qwen3.5-4B-int4-ov, `openvino_language_model.xml`)
 
 The OV IR (made for the GPU) **does use control flow**: 24 `Loop` operators, one per Gated DeltaNet layer, and 64 `ReadValue` / `Assign` pairs (the stateful variables: 24 conv states, 24 recurrent states,
