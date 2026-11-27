@@ -931,7 +931,7 @@ async function run() {
     // model: the built-in hand-written Qwen3-4B graphs (all options) or a package written by `m2w compile` (see chat-package.js); a different model reloads the page
     const modelSelect = byId("modelSelect");
     const packages = (await listPackages()).filter((entry) => !entry.dev || query.get("dev") === "1" || entry.id === modelId);
-    modelSelect.add(new Option("Qwen3-4B · built-in JS graphs (all options)", "js"));
+    modelSelect.add(new Option("Qwen3-4B · built-in graphs (all options)", "js"));
     for (const entry of packages) modelSelect.add(new Option(entry.label, entry.id));
     if (![...modelSelect.options].some((option) => option.value === modelId)) modelSelect.add(new Option(`${modelId} (not found in packages/models.json)`, modelId));
     modelSelect.value = modelId;

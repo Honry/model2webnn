@@ -25,10 +25,13 @@ echo "packages: $(ls "$bench/packages" | xargs)"
 node -e '
 const fs = require("fs"), path = require("path"), dir = process.argv[1];
 const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory() || d.isSymbolicLink()).map((d) => d.name).filter((n) => fs.existsSync(path.join(dir, n, "m2w.json"))).map((id) => {
-  const index = JSON.parse(fs.readFileSync(path.join(dir, id, "m2w.json"), "utf8")), tiny = id.startsWith("tiny-"), name = id === "tiny-pkg" ? "tiny hybrid test model" : id === "tiny-qwen35-pkg" ? "tiny Qwen3.5 test model (with an image tower)" : String(index.source || id).split("/").pop();
-  const plan = JSON.parse(fs.readFileSync(path.join(dir, id, "plan.json"), "utf8")), lmHead = (plan.profile && plan.profile.lm_head_format) || "uint8-asym";
-  return { id, label: tiny ? `${name} · package` : `${name} · package · lm_head ${lmHead}${plan.vision ? ` · image tower ${plan.vision.weights}` : ""}`, url: `${id}/`, dev: tiny };
-});
+  const index = JSON.parse(fs.readFileSync(path.join(dir, id, "m2w.json"), "utf8")), plan = JSON.parse(fs.readFileSync(path.join(dir, id, "plan.json"), "utf8"));
+  // listed by default: one entry per model (text, or text + image); the test models and the experiment siblings (attention variants, other vision weight formats, the same package under a second name) only with ?dev=1
+  const experiment = /-(gqa|gqa16|split)$|^qwen35-4b-vl-(int8g128|float16|int4)-pkg$/.test(id), dev = id.startsWith("tiny-") || experiment;
+  const name = id === "tiny-pkg" ? "tiny hybrid test model" : id === "tiny-qwen35-pkg" ? "tiny Qwen3.5 test model" : String(index.source || id).split("/").pop().replace(/-Instruct$|-it$/, "");
+  const kind = plan.vision ? "text + image" : "text";
+  return { id, label: dev ? `${name} · ${kind}${experiment ? ` · ${id}` : ""}` : `${name} · ${kind}`, url: `${id}/`, dev };
+}).sort((x, y) => x.dev - y.dev || x.label.localeCompare(y.label));
 fs.writeFileSync(path.join(dir, "models.json"), JSON.stringify(entries, null, 1));
 console.log("models.json: " + entries.map((e) => e.id).join(", "));
 ' "$bench/packages"
