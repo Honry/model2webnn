@@ -231,3 +231,35 @@ describe('Gemma 4 recommended session options of the plan', () => {
     expect(await groupOf(withRecommended({ blocks_per_graph: 9 }))).toBe(1);   // not in the package: a default falls back to single blocks
   });
 });
+
+describe('Gemma 4: abort between the prefill chunks', () => {
+  beforeAll(() => { if (!(globalThis as any).Float16Array) throw new Error('needs Node 24+'); });
+
+  it('ends the generator without a token when the signal is aborted after a chunk, and the next generation starts from scratch', async () => {
+    const { llm, context } = await loaded();
+    const controller = new AbortController(), residual = (t: any) => t.shape.length === 3 && t.readable && t.shape[1] > 1;   // the read between two chunks (the logits are [1, 1, vocab])
+    let reads = 0;
+    context.onRead = (t, destination) => { destination.fill(0); destination[7] = 5; if (residual(t) && ++reads === 1) controller.abort(); };
+    const out: number[] = [];
+    for await (const token of llm.generate(prompt, { maxNewTokens: 5, stopTokens: [], temperature: 0, signal: controller.signal })) out.push(token);
+    expect(out).toEqual([]);
+    expect(reads).toBe(1);
+    expect(context.dispatches.length).toBe(N);   // only the first chunk was enqueued (no tail / lm_head), the other two never
+    // the model is not left busy: a normal generation works (and the signal-less path does not read between chunks)
+    context.dispatches.length = 0; reads = 0;
+    expect(await run(llm, prompt, 3)).toEqual([7, 7, 7]);
+    expect(reads).toBe(0);
+  });
+
+  it('a signal that is never aborted changes nothing but one readback per non-final chunk; an already aborted signal does no work at all', async () => {
+    const { llm, context } = await loaded();
+    const out: number[] = [];
+    for await (const token of llm.generate(prompt, { maxNewTokens: 3, stopTokens: [], temperature: 0, signal: new AbortController().signal })) out.push(token);
+    expect(out).toEqual([7, 7, 7]);
+    context.dispatches.length = 0;
+    const controller = new AbortController(); controller.abort();
+    for await (const token of llm.generate(prompt, { maxNewTokens: 3, stopTokens: [], temperature: 0, signal: controller.signal })) out.push(token);
+    expect(context.dispatches.length).toBe(0);
+    expect(out.length).toBe(3);
+  });
+});

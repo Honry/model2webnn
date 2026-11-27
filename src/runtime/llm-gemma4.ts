@@ -264,7 +264,7 @@ export class Gemma4LLM {
         a.maskShared[type] = sharedColumns === ownColumns ? a.mask[type] : await this.writable('float16', [1, 1, S, sharedColumns]);
       }
       for (let l = 0; l < N; l++) {
-        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden]));
+        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], l === N - 1 ? { readable: true } : {}));   // the last one is read between prefill chunks of an abortable generation
         a.attentionOutputs.push(await this.createTensor('float16', [1, S, s.hidden]));
         a.ples.push(await this.createTensor('float16', [1, S, ple]));
       }
@@ -401,7 +401,8 @@ export class Gemma4LLM {
   private get cacheFull() { return this.position >= this.P; }
 
   // ------------------------------------------------------------------------------------------------------------------------------- generation
-  private async prefill(tokens: number[]): Promise<Half> {
+  /** returns the logits of the last prompt token (null: `signal` was aborted between two chunks) */
+  private async prefill(tokens: number[], signal?: AbortSignal): Promise<Half | null> {
     const s = this.pkg.model, { P } = this, n = tokens.length, pleSize = this.N * (s.ple_dim as number);
     if (n === 0) throw new Error('empty prompt');
     const plan = this.planFor(n);
@@ -409,6 +410,7 @@ export class Gemma4LLM {
     this.stats.prefillPlan = plan;
     let start = 0;
     for (let index = 0; index < plan.length; index++) {
+      if (signal?.aborted) return null;
       const C = plan[index], last = index === plan.length - 1, set = this.prefillSets.get(C) as PrefillSet, a = set.act;
       const valid = Math.min(C, n - start), pad = C - valid, hidden = newHalf(C * s.hidden), pleToken = newHalf(C * pleSize);
       for (let i = 0; i < valid; i++) this.embedRow(tokens[start + i], hidden, (pad + i) * s.hidden);
@@ -420,6 +422,10 @@ export class Gemma4LLM {
       const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
       this.ctx.writeTensor(set.sel.keep, rowsToKeep); this.ctx.writeTensor(set.sel.select, rowSelector);
       this.enqueue(C, last);
+      if (signal && !last) {   // abortable: wait for the device to finish this chunk (read back its last residual), then look at the signal; without a signal the chunks stay queued back to back
+        await this.ctx.readTensor(a.residuals[this.N - 1], newHalf(C * s.hidden));
+        if (signal.aborted) return null;
+      }
       start += valid;
     }
     this.base = n; this.filled = 0; this.position = n;
@@ -468,7 +474,8 @@ export class Gemma4LLM {
     try {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
-      let logits = await this.prefill(tokens);
+      let logits = await this.prefill(tokens, options.signal);
+      if (!logits) return;   // aborted during the prefill: nothing was yielded
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
       t = performance.now();

@@ -258,7 +258,7 @@ export class Qwen35LLM {
         mask: await this.writable('float16', [1, 1, S, columns]), residuals: [], attentionOutputs: [], finalHidden: null };
       const readable = { readable: Qwen35LLM.debugReadback };
       for (let l = 0; l < N; l++) {
-        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], readable));
+        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], l === N - 1 ? { readable: true } : readable));   // the last one is read between prefill chunks of an abortable generation
         a.attentionOutputs.push(await this.createTensor('float16', [1, S, s.hidden]));
       }
       a.finalHidden = await this.createTensor('float16', [1, 1, s.hidden], readable);
@@ -436,7 +436,8 @@ export class Qwen35LLM {
   private get cacheFull() { return this.position >= this.P; }
 
   // ------------------------------------------------------------------------------------------------------------------------------- generation
-  private async prefill(tokens: number[], images: PreparedImage[] = []): Promise<Half> {
+  /** returns the logits of the last prompt token (null: `signal` was aborted before or between the chunks, or between two image encodes) */
+  private async prefill(tokens: number[], images: PreparedImage[] = [], signal?: AbortSignal): Promise<Half | null> {
     const s = this.pkg.model, { P } = this;
     let positions: [Int32Array, Int32Array, Int32Array] | null = null, ropeDelta = 0, imageRows: Map<number, Half> | null = null, visionMs = 0;
     if (images.length) {
@@ -452,6 +453,7 @@ export class Qwen35LLM {
         const embeds = await this.vision.encode(image);
         buildMs += this.vision.lastEncode.buildMs;
         for (let k = 0; k < image.tokens; k++) rows.set(pads[at++], embeds.subarray(k * hidden, (k + 1) * hidden));
+        if (signal?.aborted) return null;
       }
       imageRows = rows; visionMs = performance.now() - started - buildMs;
       this.stats.imageTokens = rows.size; this.stats.visionMs = visionMs; this.stats.visionBuildMs = buildMs;
@@ -465,6 +467,7 @@ export class Qwen35LLM {
     this.resetStates();
     let start = 0;
     for (let index = 0; index < plan.length; index++) {
+      if (signal?.aborted) return null;
       const C = plan[index], last = index === plan.length - 1, set = this.prefillSets.get(C) as PrefillSet, a = set.act;
       const valid = Math.min(C, n - start), pad = C - valid, hidden = newHalf(C * s.hidden);
       for (let i = 0; i < valid; i++) {
@@ -481,6 +484,10 @@ export class Qwen35LLM {
       this.ctx.writeTensor(set.validMask, validMask); this.ctx.writeTensor(set.convPerm, convPerm);
       this.enqueue(C, last);
       if (this.queue) await this.flushQueue();
+      if (signal && !last) {   // abortable: wait for the device to finish this chunk (read back its last residual), then look at the signal; without a signal the chunks stay queued back to back
+        await this.ctx.readTensor(a.residuals[this.N - 1], newHalf(C * s.hidden));
+        if (signal.aborted) return null;
+      }
       start += valid;
     }
     this.base = n; this.filled = 0; this.position = n; this.ropeDelta = ropeDelta;
@@ -530,7 +537,8 @@ export class Qwen35LLM {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
       this.stats.imageTokens = undefined; this.stats.visionMs = undefined; this.stats.visionBuildMs = undefined;
-      let logits = await this.prefill(tokens, options.images ?? []);
+      let logits = await this.prefill(tokens, options.images ?? [], options.signal);
+      if (!logits) return;   // aborted during the prefill: nothing was yielded
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: this.stats.promptTokens, graphBuilds: this.stats.graphBuilds,
         ...(options.images?.length ? { imageTokens: this.stats.imageTokens, visionMs: this.stats.visionMs, visionBuildMs: this.stats.visionBuildMs } : {}) };

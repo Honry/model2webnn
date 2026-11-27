@@ -324,7 +324,7 @@ export class LLM {
         a.mask[type] = await this.writable('float16', [1, 1, S, maskColumns]);
       }
       for (let l = 0; l < N; l++) {
-        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden]));
+        a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], l === N - 1 ? { readable: true } : {}));   // the last one is read between prefill chunks of an abortable generation
         a.attentionOutputs.push(await this.createTensor('float16', [1, S, s.num_heads * s.head_dim]));
       }
       a.finalHidden = await this.createTensor('float16', [1, 1, s.hidden]);
@@ -447,8 +447,8 @@ export class LLM {
   private get cacheFull() { return this.position + (this.style === 'tensorScatter' ? this.pad : 0) >= this.P; }
 
   // ------------------------------------------------------------------------------------------------------------------------------- generation
-  /** Chunked prefill of the prompt; returns the logits of the last prompt token. */
-  private async prefill(tokens: number[]): Promise<Half> {
+  /** Chunked prefill of the prompt; returns the logits of the last prompt token (null: `signal` was aborted between two chunks; the next prefill starts from scratch anyway). */
+  private async prefill(tokens: number[], signal?: AbortSignal): Promise<Half | null> {
     const s = this.pkg.model, { P } = this, n = tokens.length, scatter = this.style === 'tensorScatter';
     if (n === 0) throw new Error('empty prompt');
     const plan = this.planFor(n), rows = plan.reduce((a, b) => a + b, 0);
@@ -457,6 +457,7 @@ export class LLM {
     const padTotal = scatter ? rows - n : 0;
     let start = 0;
     for (let index = 0; index < plan.length; index++) {
+      if (signal?.aborted) return null;
       const C = plan[index], last = index === plan.length - 1, set = this.prefillSets.get(C) as PrefillSet, a = set.act, hidden = newHalf(C * s.hidden);
       if (scatter) {   // the chunk covers cache rows start .. start+C-1, token i is in row padTotal + i
         for (let r = 0; r < C; r++) if (start + r - padTotal >= 0) this.embedRow(tokens[start + r - padTotal], hidden, r * s.hidden);
@@ -484,6 +485,10 @@ export class LLM {
         start += valid;
       }
       this.enqueue(C, last);
+      if (signal && !last) {   // abortable: wait for the device to finish this chunk (read back its last residual), then look at the signal; without a signal the chunks stay queued back to back
+        await this.ctx.readTensor(a.residuals[this.N - 1], newHalf(C * s.hidden));
+        if (signal.aborted) return null;
+      }
     }
     this.base = n; this.filled = 0; this.pad = padTotal; this.position = n;
     return this.readLogits();
@@ -547,7 +552,8 @@ export class LLM {
     try {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
-      let logits = await this.prefill(tokens);
+      let logits = await this.prefill(tokens, options.signal);
+      if (!logits) return;   // aborted during the prefill: nothing was yielded
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };
       t = performance.now();
