@@ -33,8 +33,8 @@ import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache, annotateMaxLengths } from "./chat-package.js?v=12";
 import { looksLikeMemoryError, nextSmallerLength } from "../../lib/runtime/index.js";
 import { buildPromptOfTokens, minLengthForPrompt } from "./prompt-text.js?v=3";
-import { cacheCapacity, answerReserve, reserveRows, autoMaxNewTokens, rowsUsed, contextText, cacheText, liveSpeed, contextLevel, CONTEXT_FULL_HINT, CACHE_ALMOST_FULL_NOTE, CACHE_CUT_NOTE } from "./context-math.js?v=2";
-import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=6";
+import { cacheCapacity, answerReserve, reserveRows, autoMaxNewTokens, rowsUsed, contextText, cacheText, liveSpeed, contextLevel, contextPreview, contextNote, CONTEXT_FULL_HINT, CACHE_ALMOST_FULL_NOTE, CACHE_CUT_NOTE } from "./context-math.js?v=3";
+import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=7";
 import { chipGroup, formats } from "./chips.js?v=2";
 import { createLoadProgress } from "./progress-ui.js?v=4";
 import { createOverlays, placePopover, createTooltips } from "./overlay.js?v=1";
@@ -1234,14 +1234,24 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     // the context meter: prompt tokens / capacity. Before the first load only the capacity is known; while an answer streams it shows the running turn; otherwise the history + the draft in the box (+ attached pictures)
     const updateContext = () => {
         const out = byId("promptTokenCount");
-        if (live.active) { const level = contextLevel(live.prompt + live.generated, live.capacity); out.dataset.level = level; out.textContent = contextText(live.prompt + live.generated, live.capacity); out.title = `The running answer: ${live.prompt} prompt tokens + ${live.generated} generated of the ${live.capacity} rows of the cache.${levelHint(level)}`; return; }
+        const note = byId("ctxHint"), setNote = (value) => { note.hidden = !value; note.textContent = value?.text ?? ""; note.dataset.level = value?.level ?? ""; };
+        if (live.active) { setNote(null); const level = contextLevel(live.prompt + live.generated, live.capacity); out.dataset.level = level; out.textContent = contextText(live.prompt + live.generated, live.capacity); out.title = `The running answer: ${live.prompt} prompt tokens + ${live.generated} generated of the ${live.capacity} rows of the cache.${levelHint(level)}`; return; }
         const capacity = selectedCapacity();
-        if (!model) { out.dataset.level = "ok"; out.textContent = contextText(null, capacity); out.title = `The cache of a session with this max length holds ${capacity} rows. Token counts appear after the model is loaded.`; return; }
+        if (!model) { setNote(null); out.dataset.level = "ok"; out.textContent = contextText(null, capacity); out.title = `The cache of a session with this max length holds ${capacity} rows. Token counts appear after the model is loaded.`; return; }
         const explicit = +byId("maxNewTokensInput").value || 0, reserve = reserveOf(capacity, explicit), message = { text: promptBox.value, images: attachments?.items ?? [] };
-        const used = countConversation(liveTurns(), message), own = countConversation([], message);
-        const level = contextLevel(used, capacity);
-        out.dataset.level = level; out.textContent = contextText(used, capacity);
-        out.title = `Prompt ${used} tokens (history ${used - own} + this message ${own}) of the ${capacity} rows of the cache; the answer may use the rest. Older turns are dropped when less than ${reserve} rows would be left.${levelHint(level)}`;
+        const idle = !message.text.trim() && !message.images.length && lastTurn && lastTurn.capacity === capacity;   // nothing being composed: the rows the last turn used
+        if (idle) {
+            const level = contextLevel(lastTurn.used, capacity);
+            setNote(null); out.dataset.level = level; out.textContent = contextText(lastTurn.used, capacity);
+            out.title = `The last turn used ${lastTurn.used} of the ${capacity} rows of the cache (prompt + answer).${levelHint(level)}`;
+            return;
+        }
+        // composing: what the next prompt will hold = the history that is kept after the oldest turns that do not fit are dropped + the draft (+ picture tokens), clamped to the capacity
+        const fit = fitHistory(capacity, message, explicit), total = countConversation(liveTurns(), message), alone = countConversation([], message);
+        const preview = contextPreview({ total, kept: fit.own, own: alone, capacity, reserve });
+        const level = preview.level, shown = contextNote(preview);
+        setNote(shown); out.dataset.level = level; out.textContent = contextText(preview.used, capacity);
+        out.title = `The next prompt holds ${preview.used} tokens (history ${preview.used - alone} + this message ${alone}) of the ${capacity} rows of the cache; the answer may use the rest. ${shown ? (shown.level === "full" ? "This message alone does not leave room for an answer: choose a larger Max length (applied at Load) or shorten it." : `Older turns are dropped when less than ${reserve} rows would be left: ${preview.overflow} tokens of history go.`) : `Older turns are dropped when less than ${reserve} rows would be left.`}${levelHint(level)}`;
     };
     // another max length chip: the capacity everywhere follows at once (meter, Cache chip, the long presets)
     maxLengthSelect.addEventListener("change", () => { updateContext(); showCache(); });
@@ -1327,11 +1337,13 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
 
     /** which turns the next prompt contains: the live history + the new message must fit the cache with the answer reserved; the OLDEST whole turns go first (the system prompt and the newest message never).
      *  The newest message alone: it is sent when at least a short answer fits (`room`: the tokens left, the answer may be cut), else it is not sent. */
+    const fitHistory = (capacity, message, explicit) => {   // the oldest whole turns go until the rest + the message + the reserve fit
+        const reserve = reserveOf(capacity, explicit), kept = liveTurns(), dropped = [];
+        while (countConversation(kept, message) + reserve > capacity && kept.length) dropped.push(kept.shift());
+        return { reserve, kept, dropped, own: countConversation(kept, message) };
+    };
     const planHistory = (session, message, explicit) => {
-        const capacity = capacityOf(session), reserve = reserveOf(capacity, explicit), kept = liveTurns(), dropped = [];
-        const fits = () => countConversation(kept, message) + reserve <= capacity;
-        while (!fits() && kept.length) dropped.push(kept.shift());
-        const own = countConversation(kept, message);
+        const capacity = capacityOf(session), { reserve, kept, dropped, own } = fitHistory(capacity, message, explicit);
         if (own + reserve <= capacity) return { ok: true, kept, dropped, used: own };
         if (own + Math.min(reserve, 16) <= capacity) return { ok: true, kept, dropped, room: capacity - own, used: own };
         return { ok: false, message: `Not sent: this message needs ${own} prompt tokens, but max length ${session.maxLength} holds ${capacity} cache rows, which leaves no room for an answer. Choose a larger Max length (it is chosen at Load) or a lower picture Detail.` };

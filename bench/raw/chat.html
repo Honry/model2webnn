@@ -270,6 +270,9 @@
   #chip-images { --c: var(--pink); }
   .statsbar .grow { flex: 1; }
   .ctx { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: var(--dim); background: var(--surface2); border: 1px solid var(--line); }
+  .ctxgroup { display: inline-flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+  .ctxhint { font-size: 12px; font-weight: 600; color: var(--amber); white-space: nowrap; }
+  .ctxhint[data-level=full] { color: var(--red); }
   .ctx:empty { display: none; }
   #chip-cache { --c: var(--teal); } #chip-cache[data-level=warn] { --c: var(--amber); } #chip-cache[data-level=full], #chip-cache.full { --c: var(--red); }
   .ctx[data-level=warn] { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 10%, transparent); }
@@ -537,7 +540,7 @@
         <div class="stat" id="chip-cache"><span class="k">Cache</span><b class="v" id="sum-cache">–</b></div>
         <div class="stat" id="chip-images" hidden><span class="k">Images</span><b class="v" id="chip-images-v"></b></div>
         <span class="grow"></span>
-        <span id="promptTokenCount" class="ctx"></span>
+        <span class="ctxgroup"><span id="ctxHint" class="ctxhint" hidden></span><span id="promptTokenCount" class="ctx"></span></span>
         <button id="perfToggle" class="btn ghost" type="button" aria-expanded="false" style="height:30px;padding:0 12px;font-size:13px">Details<svg class="ic"><use href="#i-down"/></svg></button>
       </div>
     </div>
@@ -644,6 +647,6 @@
     </div>
   </div>
 </div>
-<script type="module" src="chat.js?v=20261127p"></script>
+<script type="module" src="chat.js?v=20261127q"></script>
 </body>
 </html>

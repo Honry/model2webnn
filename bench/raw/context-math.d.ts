@@ -5,6 +5,8 @@ export declare const autoMaxNewTokens: (capacity: number, promptTokens: number) 
 export declare const rowsUsed: (promptTokens: number, generated: number, capacity: number) => { used: number; full: boolean };
 export declare const contextText: (used: number | null | undefined, capacity: number) => string;
 export declare const cacheText: (used: number, capacity: number, full?: boolean) => string;
+export declare function contextPreview(input: { total: number; kept: number; own: number; capacity: number; reserve: number }): { used: number; overflow: number; tooLong: boolean; level: 'ok' | 'warn' | 'full' };
+export declare const contextNote: (preview: { overflow: number; tooLong: boolean }) => { text: string; level: 'warn' | 'full' } | null;
 export declare const CONTEXT_WARN_SHARE: number;
 export declare const CONTEXT_FULL_SHARE: number;
 export declare function contextLevel(used: number | null | undefined, capacity: number): 'ok' | 'warn' | 'full';

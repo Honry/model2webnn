@@ -1,6 +1,6 @@
 // bench/raw/context-math.js: the capacity / context arithmetic of the chat page.
 import { describe, expect, it } from 'vitest';
-import { answerReserve, autoMaxNewTokens, cacheCapacity, cacheText, CONTEXT_FULL_SHARE, CONTEXT_WARN_SHARE, contextLevel, contextText, liveSpeed, reserveRows, rowsUsed } from '../../bench/raw/context-math.js';
+import { answerReserve, autoMaxNewTokens, cacheCapacity, cacheText, CONTEXT_FULL_SHARE, CONTEXT_WARN_SHARE, contextLevel, contextNote, contextPreview, contextText, liveSpeed, reserveRows, rowsUsed } from '../../bench/raw/context-math.js';
 
 describe('capacity', () => {
   it('is max length - 1 rows (the whole max length when the protocol attends over the updated cache), and follows the chosen length', () => {
@@ -30,6 +30,7 @@ describe('rows used', () => {
   it('the texts show an unknown count as a dash and mark FULL', () => {
     expect(contextText(null, 4095)).toBe('Context – / 4095');
     expect(contextText(53, 1023)).toBe('Context 53 / 1023');
+    expect(contextText(188, 127)).toBe('Context 127 / 127');   // never more than the capacity
     expect(cacheText(63, 1023, false)).toBe('63 / 1023');
     expect(cacheText(1200, 1023, true)).toBe('1023 / 1023 · FULL');
   });
@@ -49,6 +50,32 @@ describe('context level', () => {
     expect(contextLevel(null, 1023)).toBe('ok');
     expect(contextLevel(undefined, 1023)).toBe('ok');
     expect(contextLevel(10, 0)).toBe('ok');
+  });
+});
+
+describe('context preview (what the next prompt will hold)', () => {
+  const reserve = 255, capacity = 1023;
+  it('is what fits: no note when nothing is dropped, colours by the share of the capacity', () => {
+    const p = contextPreview({ total: 300, kept: 300, own: 40, capacity, reserve });
+    expect(p).toEqual({ used: 300, overflow: 0, tooLong: false, level: 'ok' });
+    expect(contextNote(p)).toBeNull();
+    expect(contextPreview({ total: 900, kept: 900, own: 40, capacity, reserve, }).level).toBe('warn');
+  });
+  it('trimming: used is what is kept, the overflow is what trimming removes, amber note', () => {
+    const p = contextPreview({ total: 1100, kept: 600, own: 80, capacity, reserve });
+    expect(p.used).toBe(600);
+    expect(p.overflow).toBe(500);
+    expect(p.level).toBe('ok');
+    expect(contextNote(p)).toEqual({ text: '+500 tokens: older turns will be dropped', level: 'warn' });
+  });
+  it('a message that does not fit alone is red, "message too long", and used never exceeds the capacity', () => {
+    const p = contextPreview({ total: 5000, kept: 5000, own: 5000, capacity, reserve });
+    expect(p.used).toBe(capacity);
+    expect(p.tooLong).toBe(true);
+    expect(p.level).toBe('full');
+    expect(contextNote(p)).toEqual({ text: 'message too long', level: 'full' });
+    expect(contextPreview({ total: 1008, kept: 1008, own: 1008, capacity, reserve }).tooLong).toBe(true);   // 1008 + 16 > 1023
+    expect(contextPreview({ total: 1007, kept: 1007, own: 1007, capacity, reserve }).tooLong).toBe(false);   // 1007 + 16 = 1023
   });
 });
 

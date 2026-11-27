@@ -3,23 +3,24 @@
 // and re-pins. One scroll write per animation frame, instant (not smooth: smooth scrolling lags behind a stream).
 //
 //   isPinned({ scrollHeight, scrollTop, clientHeight }, threshold)    pure: is the view within `threshold` px of the bottom?
-//   const scroll = createAutoScroll(container, { threshold: 80, button })
+//   const scroll = createAutoScroll(container, { threshold: 80, button, isEmpty })   isEmpty(): true while the list holds only the empty state (a title, suggestions): it is never followed to the bottom, it stays at the TOP
 //   scroll.pin()        pin and scroll down (sending a message, a cleared chat, the button)       scroll.schedule()    follow the bottom if pinned       scroll.pinned
 export const isPinned = (metrics, threshold = 80) => metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
 
-export function createAutoScroll(container, { threshold = 80, button = null } = {}) {
+export function createAutoScroll(container, { threshold = 80, button = null, isEmpty = null } = {}) {
     let pinned = true, frame = 0, lastTop = container.scrollTop;
     const show = () => { if (button) button.hidden = pinned; };
     const apply = () => {
         frame = 0;
-        if (pinned) container.scrollTop = container.scrollHeight;
+        if (isEmpty?.()) { if (container.scrollTop !== 0) container.scrollTop = 0; }   // the empty state is taller than a small window: its top must stay reachable, not cut off by a scroll to the bottom
+        else if (pinned) container.scrollTop = container.scrollHeight;
         lastTop = container.scrollTop;
     };
     const schedule = () => { if (!frame) frame = requestAnimationFrame(apply); };   // any number of changes in a frame: one scroll
     container.addEventListener("scroll", () => {
         const up = container.scrollTop < lastTop;   // content that grows does not move scrollTop: only the reader scrolling up unpins
         lastTop = container.scrollTop;
-        if (up && !isPinned(container, threshold)) pinned = false;
+        if (up && (!isPinned(container, threshold) || container.scrollTop <= 0)) pinned = false;   // reaching the very top always lets go (a list that overflows by less than the threshold could never be scrolled to its top)
         else if (isPinned(container, threshold)) pinned = true;
         show();
     }, { passive: true });

@@ -7,7 +7,7 @@
 //        host = { byId, overlays (overlay.js), spec: model.json `vision`, presets: [[h, w], ...], detail, onChange(), setText(text), log }
 import { chooseGrid, describeGrid, imageTokenCount } from "../../lib/runtime/index.js";
 import { answerView } from "./answer-view.js?v=3";
-import { createAutoScroll } from "./autoscroll.js?v=1";
+import { createAutoScroll } from "./autoscroll.js?v=2";
 
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
 /** an inline SVG icon from the sprite of chat.html */
@@ -30,7 +30,7 @@ export function createConversation(list, { onView = null, jumpButton = null } = 
     const empty = list.querySelector(".chat-empty") ?? el("div", "chat-empty");   // the empty state of the page: a title, the model name, suggestions
     if (!empty.parentNode) list.append(empty);
     // the list follows the bottom while it is pinned there (autoscroll.js watches the content: tokens, Markdown re-renders, bubbles, bars, chips); scrolling up unpins and shows the jump button
-    const autoScroll = createAutoScroll(list, { button: jumpButton });
+    const autoScroll = createAutoScroll(list, { button: jumpButton, isEmpty: () => empty.parentNode === list });
     const scrollToEnd = (force = false) => (force ? autoScroll.pin() : autoScroll.schedule());
     const views = [];
     const append = (node) => { empty.remove(); list.append(node); scrollToEnd(); return node; };

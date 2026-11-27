@@ -11,7 +11,7 @@ export const reserveRows = (capacity, explicit = 0) => (explicit > 0 ? explicit 
 export const autoMaxNewTokens = (capacity, promptTokens) => Math.max(1, capacity - promptTokens);
 /** The rows a turn uses (prompt + generated so far), clamped to the capacity, and whether the cache is full. */
 export const rowsUsed = (promptTokens, generated, capacity) => { const total = promptTokens + generated; return { used: Math.min(total, capacity), full: total >= capacity }; };
-export const contextText = (used, capacity) => `Context ${used ?? "–"} / ${capacity}`;
+export const contextText = (used, capacity) => `Context ${used == null ? "–" : Math.min(used, capacity)} / ${capacity}`;   // never more than the capacity
 export const cacheText = (used, capacity, full) => `${Math.min(used, capacity)} / ${capacity}${full ? " · FULL" : ""}`;
 /** How full the cache is, as a share of its capacity: from CONTEXT_WARN_SHARE the level is "warn" (amber), from CONTEXT_FULL_SHARE "full" (red). The thresholds live here, in one place. */
 export const CONTEXT_WARN_SHARE = 0.8;
@@ -21,6 +21,16 @@ export function contextLevel(used, capacity) {
     const share = used / capacity;
     return share >= CONTEXT_FULL_SHARE ? "full" : share >= CONTEXT_WARN_SHARE ? "warn" : "ok";
 }
+/** The meter while composing: what the NEXT prompt will hold. `total` = history + draft (+ image tokens) as they stand, `kept` = the same after the oldest turns that do not fit were dropped, `own` = the draft alone,
+ *  `reserve` = the rows kept free for the answer. used is what is actually sent, clamped to the capacity; `overflow` = the tokens trimming removes; `tooLong` = even the newest message alone leaves no room for an answer
+ *  (the same rule the page uses to refuse sending). */
+export function contextPreview({ total, kept, own, capacity, reserve }) {
+    const tooLong = own + Math.min(reserve, 16) > capacity;
+    const used = Math.min(kept, capacity), overflow = Math.max(0, total - kept);
+    return { used, overflow, tooLong, level: tooLong ? "full" : contextLevel(used, capacity) };
+}
+/** The small note next to the meter: null, or { text, level } (amber: older turns will be dropped, red: the message does not fit at all). */
+export const contextNote = (preview) => (preview.tooLong ? { text: "message too long", level: "full" } : preview.overflow > 0 ? { text: `+${preview.overflow} tokens: older turns will be dropped`, level: "warn" } : null);
 /** What the colours of the context numbers mean (the tooltip). */
 export const CONTEXT_FULL_HINT = "When it is full, older turns are dropped before the next message is sent, and an answer is cut when the cache is full. A larger Max length is applied at Load.";
 /** The lines in a message: dimmed while the answer streams towards the end of the cache, red when it was cut. */

@@ -79,6 +79,26 @@ describe('createAutoScroll', () => {
     expect(box.scrollTop).toBe(2000);
   });
 
+  it('a list that overflows by less than the threshold can still be scrolled to its top (reaching the top lets go of the bottom)', () => {
+    const { box, scroll } = setup();
+    box.scrollHeight = 440; box.scrollTop = 40;   // 40 px of overflow: everything is "near the bottom"
+    box.scrollTo(0);
+    expect(scroll.pinned).toBe(false);
+    mutate?.(); runFrame();
+    expect(box.scrollTop).toBe(0);   // not dragged back down
+  });
+
+  it('while the list holds only the empty state it stays at the top', () => {
+    const box = new FakeContainer(); let top = 50; box.scrollHeight = 480;
+    Object.defineProperty(box, 'scrollTop', { get: () => top, set: (value: number) => { top = Math.max(0, Math.min(value, box.scrollHeight - box.clientHeight)); } });
+    let empty = true;
+    const scroll = createAutoScroll(box as unknown as HTMLElement, { threshold: 80, isEmpty: () => empty });
+    scroll.schedule(); runFrame();
+    expect(top).toBe(0);
+    empty = false; scroll.schedule(); runFrame();   // a message arrived: the list follows the bottom again
+    expect(top).toBe(80);
+  });
+
   it('pin() scrolls down at the next frame (sending a message)', () => {
     const { box, scroll } = setup();
     box.scrollTo(100); expect(scroll.pinned).toBe(false);
