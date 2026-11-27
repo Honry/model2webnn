@@ -49,7 +49,8 @@ export interface Plan {
   architecture_kind?: 'gemma4' | 'qwen35';
   vision?: VisionPlan;
   state?: { conv_channels: number; v_heads: number; k_dim: number; v_dim: number; layers: number[] };   // qwen35: the layers that carry a Gated DeltaNet state instead of a KV cache
-  profile: { merge_projections: boolean; lm_head_format: string };
+  /** sliding_cache / sliding_ring: only in a package built with --sliding-cache window (absent = full): the sliding-attention layers hold a ring of sliding_ring rows (protocol.ts cacheRows / ringOf) */
+  profile: { merge_projections: boolean; lm_head_format: string; sliding_cache?: 'full' | 'window'; sliding_ring?: number };
 }
 export interface ManifestTensor { name: string; dtype: string; shape: number[]; offset: number; bytes: number }
 export interface ManifestFile {

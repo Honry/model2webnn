@@ -1,6 +1,7 @@
 // A rough memory figure per max length: what the weights and the KV cache of a package are expected to need on the device. Browsers hide the real RAM (navigator.deviceMemory stops at 8 GB), so the page
 // shows this number as a hint on every max length and leaves the choice to the user. It is an ESTIMATE, not a measurement.
 import type { ModelSpecJson, Plan, WeightsManifest } from './package.js';
+import { cacheRows, ringOf } from './protocol.js';
 
 /** A fixed overhead added to weights + KV cache: the browser, the graph compiler and the activations. Calibrated on ONE NPU measurement (a 4B text model at the largest max length); refit when more points exist. */
 export const FIXED_OVERHEAD_BYTES = 2 * 2 ** 30;
@@ -21,10 +22,11 @@ export function deviceWeightBytes(manifest: WeightsManifest, { vision = false }:
 
 /**
  * Rows of the KV cache of a layer of this type at this max length. ONE place for it: a cache that is smaller than the whole context for some layers (a sliding window) changes only this function.
- * Today every layer holds all but one row of the max length (the row of the token being decoded sits in the staging buffer / is computed in the graph).
+ * Every layer holds all but one row of the max length (the row of the token being decoded sits in the staging buffer / is computed in the graph), except the sliding-attention layers of a package
+ * built with --sliding-cache window: they hold a ring of plan.profile.sliding_ring rows (never more than the others; protocol.ts cacheRows is the function the runtime allocates with).
  */
-export function kvRowsFor(_layerType: string, maxLength: number, _plan?: Plan): number {
-  return maxLength - 1;
+export function kvRowsFor(layerType: string, maxLength: number, plan?: Plan): number {
+  return cacheRows(layerType, maxLength - 1, plan ? ringOf(plan) : 0);
 }
 
 /** Bytes of the KV cache at this max length: K + V, f16, double buffered, of the layers that own a cache (not the layers that share the cache of an earlier one, not Gated DeltaNet layers, which carry a small state). */

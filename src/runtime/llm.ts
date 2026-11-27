@@ -2,6 +2,9 @@
 // with one of the KV protocols on a WebNN context (the NPUW-style split: HEAD / BLOCK x (N-1) / TAIL / lm_head). A port of a hand-written scheduler, driven by the
 // package (model.json, plan.json), with per-layer-type masks and RoPE tables so that hybrid (sliding / full attention) models run on the same BLOCK graph.
 // The protocol itself (what is written into the inputs) is in protocol.ts and checked against the Python reference.
+// Sliding window caches (a package built with --sliding-cache window, plan.profile.sliding_cache): the layers of type sliding_attention hold a ring of plan.profile.sliding_ring rows instead of all
+// max length - 1 (staged protocol only), so the BLOCK / flush graphs exist per layer TYPE (decode.blocks / decode.flush / prefill.blocks: type -> graph, decode.block_groups[K] = a schedule), and the
+// masks / selectors of a layer are built for the rows of its type.
 //
 // Session options (variant = KV protocol x compute type x staging rows, chunk sizes, blocks per graph, max length) can be changed with reconfigure(): the weights stay
 // on the device, the graphs are rebuilt and the state (KV cache, activations) is reallocated.
@@ -9,9 +12,9 @@ import type { PreparedImage } from './vision.js';
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import { pickToken, samplingOf } from './sampling.js';
-import { openPackage, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
+import { openPackage, type GemmaBlockGroup, type GemmaDecodeTable, type GraphTable, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
-  decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables,
+  cacheRows, decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ringOf, ropeTables,
   scatterDecodeMasks, scatterNDDecodeIndices, scatterNDDecodeMasks, scatterNDPrefillIndices, scatterNDPrefillMasks, scatterPrefillMasks, scatterPrefillRope, type Half,
 } from './protocol.js';
 
@@ -63,8 +66,12 @@ interface Activations {
   residuals: ML[]; attentionOutputs: ML[]; finalHidden: ML;
 }
 interface Selectors { keep: ML; select: ML }
-interface PrefillSet { head: Built; block: Built; tail: Built; groups: Map<number, Built>; act: Activations; sel: Selectors | null; guards: ML[]; indices: ML | null }
-interface DecodeSet { head: Built; block: Built; tail: Built; flush: Built | null; groups: Map<number, Built> }
+/** blocks (window packages): the BLOCK graph per layer type, instead of `block`; sel: the one-hot selectors of the chunk by the rows of the cache they write (a ring and the full cache differ) */
+interface PrefillSet { head: Built; block: Built; blocks: Map<string, Built> | null; tail: Built; groups: Map<number, Built>; act: Activations; sel: Map<number, Selectors> | null; guards: ML[]; indices: ML | null }
+/** window packages: blocks / flushes per layer type (instead of block / flush) and the decode groups as a schedule */
+interface DecodeSet {
+  head: Built; block: Built; blocks: Map<string, Built> | null; tail: Built; flush: Built | null; flushes: Map<string, Built> | null; groups: Map<number, Built>; schedule: { first: number; blocks: number; built: Built }[] | null;
+}
 
 /** The variant of the package that matches the options (the default variant when none is asked for). */
 export function resolveVariant(plan: ModelPackage['plan'], o: SessionOptions): Variant {
@@ -89,7 +96,7 @@ export class LLM {
   stats: Stats = emptyStats();
 
   private ctx!: ML;
-  private P = 0; private R = 0; private N: number;
+  private P = 0; private R = 0; private N: number; private ring = 0;   // ring: rows of the cache of the sliding layers of a window package (0: all P)
   private style: Variant['kv_style'] = 'staged';
   private types: string[];
   private groupSize = 1; private prefillGroupSize = 1; private fixedTokens = 200; private inPlace = false;
@@ -103,7 +110,7 @@ export class LLM {
   private kv: { key: ML; value: ML }[] = []; private kvSpare: { key: ML; value: ML }[] = [];
   private stg: { key: ML; value: ML }[] = []; private stgSpare: { key: ML; value: ML }[] = [];
   private dec!: Activations;
-  private decodeSel: Selectors | null = null; private flushSel: Selectors | null = null; private decodeIndices: ML = null;   // scatterND: kv_indices of the decode step
+  private decodeSel: Selectors | null = null; private flushSel: Map<number, Selectors> | null = null; private decodeIndices: ML = null;   // flushSel: by the rows of the cache; scatterND: kv_indices of the decode step
   private writeIndexTensor: ML = null;   // tensorScatter: the first cache row of the dispatch (prefill chunk / decode step)
   private logitsTensor!: ML; private logits!: Half;
   private weightTensors: ML[] = []; private stateTensors: ML[] = []; private builtGraphs: ML[] = [];
@@ -113,6 +120,11 @@ export class LLM {
 
   /** the first (smallest) chunk size, for callers that think in one chunk size */
   get chunkSize(): number { return this.chunkSizes[0]; }
+
+  /** rows of the K / V cache of a layer type (the ring for the sliding layers of a window package) */
+  private rowsOfType(type: string) { return cacheRows(type, this.P, this.ring); }
+  /** the distinct row counts of the caches of this session (the full cache, and the ring when the package has one) */
+  private cacheRowCounts() { return [...new Set(layerTypesOf(this.pkg.model).map((t) => this.rowsOfType(t)))]; }
 
   private constructor(pkg: ModelPackage) {
     this.pkg = pkg;
@@ -161,12 +173,13 @@ export class LLM {
       }
     }
     const inPlace = !!o.kvInPlace && (variant.kv_style === 'tensorScatter' || variant.kv_style === 'scatterND');
+    if (ringOf(plan) > 0 && variant.kv_style !== 'staged') throw new Error(`a package with sliding window caches has the staged KV protocol only (variant ${variant.id})`);
     return { maxLength: +key, variant, sizes, group, prefillGroup, fixedTokens: o.prefillFixedTokens ?? 200, inPlace };
   }
 
   private adopt(c: ReturnType<LLM['resolve']>) {
     this.maxLength = c.maxLength; this.variant = c.variant; this.style = c.variant.kv_style; this.chunkSizes = c.sizes;
-    this.P = this.maxLength - 1; this.R = c.variant.staging_rows ?? 0;
+    this.P = this.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.ring = ringOf(this.pkg.plan);
     this.groupSize = c.group; this.prefillGroupSize = c.prefillGroup; this.fixedTokens = c.fixedTokens; this.inPlace = c.inPlace;
   }
 
@@ -247,8 +260,15 @@ export class LLM {
       throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
     };
     // how many graphs this session builds (for the progress: n of m)
+    const windowed = this.ring > 0, wdecode = decode as unknown as GemmaDecodeTable;   // window packages: per layer type / a schedule of groups
     const groupCount = (files: GraphTable, size: number) => (size > 1 ? Object.keys(files.block_groups ?? {}).length : 0);
-    const expected = 1 + 3 + (this.style === 'staged' ? 1 : 0) + groupCount(decode, this.groupSize) + this.chunkSizes.reduce((n, size) => n + 3 + groupCount(table.prefill[key][String(size)], this.prefillGroupSize), 0);
+    const blockTypes = [...new Set(this.pkg.model.layer_types.slice(1))], distinct = (paths: string[]) => new Set(paths).size;   // types with the same cache rows share a graph file
+    const scheduleGraphs = windowed && this.groupSize > 1 ? distinct(wdecode.block_groups?.[String(this.groupSize)].map((e) => e.graph) ?? []) : 0;
+    const prefillExpected = (size: number) => (windowed ? 2 + distinct(blockTypes.map((t) => ((table.prefill[key][String(size)] as unknown as { blocks: Record<string, string> }).blocks[t]))) : 3 + groupCount(table.prefill[key][String(size)], this.prefillGroupSize));
+    const expected = windowed
+      ? 1 + 2 + (this.groupSize > 1 ? scheduleGraphs : distinct(blockTypes.map((t) => wdecode.blocks[t]))) + distinct(Object.values(wdecode.flush)) + this.chunkSizes.reduce((n, size) => n + prefillExpected(size), 0)
+      : 1 + 3 + (this.style === 'staged' ? 1 : 0) + groupCount(decode, this.groupSize) + this.chunkSizes.reduce((n, size) => n + prefillExpected(size), 0);
+    const built = new Map<string, Built>();   // window packages: one Built per graph file
     const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
       progress({ stage: 'build', message: label, loaded: builds.length, total: expected });
       const doc: GraphDoc = JSON.parse(await source.text(path));
@@ -265,16 +285,34 @@ export class LLM {
       if (size > 1) for (const [count, path] of Object.entries(files.block_groups ?? {})) groups.set(+count, await build(path, `${label} block x${count}`));
       return groups;
     };
-    this.lmHead = await build(table.lm_head, 'lm_head', external);
-    this.decodeSet = {
-      head: await build(decode.head, 'decode head'), block: await build(decode.block, 'decode block'), tail: await build(decode.tail, 'decode tail'),
-      flush: this.style === 'staged' ? await build(decode.flush as string, 'kv flush') : null, groups: await groupsOf(decode, this.groupSize, 'decode'),
+    const once = async (path: string, label: string) => { if (!built.has(path)) built.set(path, await build(path, label)); return built.get(path) as Built; };
+    const byType = async (paths: Record<string, string>, types: string[], label: string) => {
+      const map = new Map<string, Built>();
+      for (const type of types) map.set(type, await once(paths[type], `${label} ${type}`));
+      return map;
     };
+    this.lmHead = await build(table.lm_head, 'lm_head', external);
+    if (windowed) {
+      const schedule: DecodeSet['schedule'] = [];
+      if (this.groupSize > 1) for (const e of wdecode.block_groups?.[String(this.groupSize)] as GemmaBlockGroup[]) schedule.push({ first: e.first_block, blocks: e.blocks, built: await once(e.graph, `decode group ${e.key}`) });
+      this.decodeSet = {
+        head: await build(decode.head, 'decode head'), block: null as any, blocks: this.groupSize > 1 ? new Map() : await byType(wdecode.blocks, blockTypes, 'decode block'), tail: await build(decode.tail, 'decode tail'),
+        flush: null, flushes: await byType(wdecode.flush, [...new Set(this.pkg.model.layer_types)], 'kv flush'), groups: new Map(), schedule: this.groupSize > 1 ? schedule : null,
+      };
+    } else {
+      this.decodeSet = {
+        head: await build(decode.head, 'decode head'), block: await build(decode.block, 'decode block'), blocks: null, tail: await build(decode.tail, 'decode tail'),
+        flush: this.style === 'staged' ? await build(decode.flush as string, 'kv flush') : null, flushes: null, groups: await groupsOf(decode, this.groupSize, 'decode'), schedule: null,
+      };
+    }
     this.prefillSets = new Map();
     for (const size of this.chunkSizes) {
       const files = table.prefill[key][String(size)], label = `prefill c${size}`;
-      this.prefillSets.set(size, {
-        head: await build(files.head, `${label} head`), block: await build(files.block, `${label} block`), tail: await build(files.tail, `${label} tail`),
+      this.prefillSets.set(size, windowed ? {
+        head: await build(files.head, `${label} head`), block: null as any, blocks: await byType(files.blocks as Record<string, string>, blockTypes, `${label} block`), tail: await build(files.tail, `${label} tail`),
+        groups: new Map(), act: null as any, sel: null, guards: [], indices: null,
+      } : {
+        head: await build(files.head, `${label} head`), block: await build(files.block, `${label} block`), blocks: null, tail: await build(files.tail, `${label} tail`),
         groups: await groupsOf(files, this.prefillGroupSize, label), act: null as any, sel: null, guards: [], indices: null,
       });
     }
@@ -317,16 +355,16 @@ export class LLM {
     };
     const staged = this.style === 'staged';
     for (let l = 0; l < N; l++) {
-      const cache = await makeKv(P);
-      this.kv.push(cache); this.kvSpare.push(this.inPlace ? cache : await makeKv(P));   // in place: the "spare" IS the cache, the swaps change nothing
+      const rows = this.rowsOfType(s.layer_types[l]), cache = await makeKv(rows);   // a ring for the sliding layers of a window package
+      this.kv.push(cache); this.kvSpare.push(this.inPlace ? cache : await makeKv(rows));   // in place: the "spare" IS the cache, the swaps change nothing
       if (staged) { this.stg.push(await makeKv(R)); this.stgSpare.push(await makeKv(R)); }
     }
-    const activations = async (S: number, maskColumns: number): Promise<Activations> => {
+    const activations = async (S: number, maskColumns: (type: string) => number): Promise<Activations> => {
       const a: Activations = { hidden: await this.writable('float16', [1, S, s.hidden]), ropeCos: {}, ropeSin: {}, mask: {}, residuals: [], attentionOutputs: [], finalHidden: null };
       for (const type of this.types) {
         a.ropeCos[type] = await this.writable('float16', [1, 1, S, s.head_dim]);
         a.ropeSin[type] = await this.writable('float16', [1, 1, S, s.head_dim]);
-        a.mask[type] = await this.writable('float16', [1, 1, S, maskColumns]);
+        a.mask[type] = await this.writable('float16', [1, 1, S, maskColumns(type)]);
       }
       for (let l = 0; l < N; l++) {
         a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], l === N - 1 ? { readable: true } : {}));   // the last one is read between prefill chunks of an abortable generation
@@ -338,16 +376,16 @@ export class LLM {
     const pair = async (rows: number, columns: number): Promise<Selectors> => ({ keep: await this.writable('float16', [1, 1, rows, 1]), select: await this.writable('float16', [1, 1, rows, columns]) });
     const scatter = this.style === 'tensorScatter', scatterND = this.style === 'scatterND', inCache = scatter || scatterND;   // attention reads the updated cache (P columns)
     for (const [size, set] of this.prefillSets) {
-      set.act = await activations(size, inCache ? P : P + size);
-      set.sel = inCache ? null : await pair(P, size);
+      set.act = await activations(size, (type) => (inCache ? P : this.rowsOfType(type) + size));
+      if (!inCache) { set.sel = new Map(); for (const rows of this.cacheRowCounts()) set.sel.set(rows, await pair(rows, size)); }
       if (scatterND) set.indices = await this.writable('int32', [1, s.num_kv_heads, size, 3]);
       // transposed value cache: the prefill graphs have an attention_guard output per block (see decoder.py); the values are not needed, the tensors only receive them
       if (transposed) for (let i = 0; i <= this.prefillGroupSize; i++) set.guards.push(await this.createTensor('float16', [1, s.num_heads, P + size, 1]));
     }
-    this.dec = await activations(1, this.style === 'staged' ? P + R : inCache ? P : P + 1);
+    this.dec = await activations(1, (type) => (this.style === 'staged' ? this.rowsOfType(type) + R : inCache ? P : P + 1));
     this.decodeIndices = scatterND ? await this.writable('int32', [1, s.num_kv_heads, 1, 3]) : null;
     this.decodeSel = this.style === 'staged' ? await pair(R, 1) : this.style === 'onehot' ? await pair(P, 1) : null;
-    this.flushSel = staged ? await pair(P, R) : null;
+    if (staged) { this.flushSel = new Map(); for (const rows of this.cacheRowCounts()) this.flushSel.set(rows, await pair(rows, R)); }
     this.writeIndexTensor = scatter ? await this.writable(this.variant.scatter_index_type ?? 'int32', [1]) : null;
     this.logitsTensor = await this.createTensor('float16', [1, 1, s.vocab_padded], { readable: true });
     this.logits = newHalf(s.vocab_padded);
@@ -377,12 +415,17 @@ export class LLM {
     const decode = size === 0, set = (decode ? this.decodeSet : this.prefillSets.get(size)) as DecodeSet | PrefillSet, a = decode ? this.dec : (set as PrefillSet).act;
     const w = this.pkg.plan.weights as { attention: string[]; ffn: string[] }, types = this.pkg.model.layer_types, N = this.N, stagedDecode = decode && this.style === 'staged';
     const caches = stagedDecode ? this.stg : this.kv, spare = stagedDecode ? this.stgSpare : this.kvSpare;
-    const selectors: Record<string, ML> = this.style === 'tensorScatter' ? { kv_write_index: this.writeIndexTensor }
-      : this.style === 'scatterND' ? { kv_indices: decode ? this.decodeIndices : (set as PrefillSet).indices }
-        : stagedDecode ? { staging_rows_to_keep: (this.decodeSel as Selectors).keep, staging_row_selector: (this.decodeSel as Selectors).select }
-        : decode ? { rows_to_keep: (this.decodeSel as Selectors).keep, row_selector: (this.decodeSel as Selectors).select }
-          : { rows_to_keep: (set as PrefillSet).sel!.keep, row_selector: (set as PrefillSet).sel!.select };
-    const shared = (layer: number) => ({ rope_cos: a.ropeCos[types[layer]], rope_sin: a.ropeSin[types[layer]], attention_mask: a.mask[types[layer]], ...selectors });
+    // the one-hot selectors of a prefill chunk write the cache of the layer: one pair per distinct row count (a ring and the full cache differ); every other protocol has one set for all layers
+    const selectorsOf = (layer: number): Record<string, ML> => {
+      if (this.style === 'tensorScatter') return { kv_write_index: this.writeIndexTensor };
+      if (this.style === 'scatterND') return { kv_indices: decode ? this.decodeIndices : (set as PrefillSet).indices };
+      if (stagedDecode) return { staging_rows_to_keep: (this.decodeSel as Selectors).keep, staging_row_selector: (this.decodeSel as Selectors).select };
+      if (decode) return { rows_to_keep: (this.decodeSel as Selectors).keep, row_selector: (this.decodeSel as Selectors).select };
+      const pair = ((set as PrefillSet).sel as Map<number, Selectors>).get(this.rowsOfType(types[layer])) as Selectors;
+      return { rows_to_keep: pair.keep, row_selector: pair.select };
+    };
+    const selectors = selectorsOf(0);   // the same for every layer, except for the prefill selectors of a window package (selectorsOf)
+    const shared = (layer: number) => ({ rope_cos: a.ropeCos[types[layer]], rope_sin: a.ropeSin[types[layer]], attention_mask: a.mask[types[layer]], ...selectorsOf(layer) });
     const cacheInputs = (layer: number, prefix = '') => ({
       [prefix + 'past_key']: this.kv[layer].key, [prefix + 'past_value']: this.kv[layer].value,
       ...(stagedDecode ? { [prefix + 'staging_key']: this.stg[layer].key, [prefix + 'staging_value']: this.stg[layer].value } : {}),
@@ -398,9 +441,10 @@ export class LLM {
 
     // BLOCK i: feed-forward half of layer i + attention half of layer i+1
     const groupSize = decode ? this.groupSize : this.prefillGroupSize, groups = groupSize > 1 ? set.groups : null;
+    const windowSchedule = decode && groupSize > 1 ? this.decodeSet.schedule : null;   // window package: the graph of a group depends on the layer types of its blocks
     if (groups) {
       for (let start = 0; start < N - 1; start += groupSize) {
-        const count = Math.min(groupSize, N - 1 - start), graph = groups.get(count) as Built;
+        const count = Math.min(groupSize, N - 1 - start), graph = (windowSchedule ? (windowSchedule.find((e) => e.first === start) as { built: Built }).built : groups.get(count)) as Built;
         const perBlock = this.pkg.plan.block_group_controls === 'per_block';
         const inputs: Record<string, ML> = { residual: a.residuals[start], attention_output: a.attentionOutputs[start], ...(perBlock ? selectors : shared(start + 1)) };
         const outputs: Record<string, ML> = { next_residual: a.residuals[start + count], next_attention_output: a.attentionOutputs[start + count] };
@@ -418,7 +462,7 @@ export class LLM {
       }
     } else {
       for (let layer = 0; layer < N - 1; layer++) {
-        dispatch(set.block, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...shared(layer + 1), ...cacheInputs(layer + 1),
+        dispatch(set.blocks ? (set.blocks.get(types[layer + 1]) as Built) : set.block, { residual: a.residuals[layer], attention_output: a.attentionOutputs[layer], ...shared(layer + 1), ...cacheInputs(layer + 1),
           ...this.pick(layer, w.ffn), ...this.pick(layer + 1, w.attention) },
         { next_residual: a.residuals[layer + 1], next_attention_output: a.attentionOutputs[layer + 1], updated_key: spare[layer + 1].key, updated_value: spare[layer + 1].value, ...guardOut(0) });
         this.swap(caches, spare, layer + 1);
@@ -482,10 +526,12 @@ export class LLM {
           for (const type of this.types) this.ctx.writeTensor(a.mask[type], masks[type]);
           this.ctx.writeTensor(set.indices, scatterNDPrefillIndices(s.num_kv_heads, P, C, start, valid));
         } else {
-          const masks = prefillMasks(s, P, C, start, valid);
+          const masks = prefillMasks(s, P, C, start, valid, this.ring);
           for (const type of this.types) this.ctx.writeTensor(a.mask[type], masks[type]);
-          const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
-          this.ctx.writeTensor((set.sel as Selectors).keep, rowsToKeep); this.ctx.writeTensor((set.sel as Selectors).select, rowSelector);
+          for (const [rows, sel] of set.sel as Map<number, Selectors>) {   // a ring writes slot (start + i) mod ring
+            const { rowsToKeep, rowSelector } = prefillSelectors(rows, C, start, valid, rows < P);
+            this.ctx.writeTensor(sel.keep, rowsToKeep); this.ctx.writeTensor(sel.select, rowSelector);
+          }
         }
         start += valid;
       }
@@ -501,10 +547,13 @@ export class LLM {
   }
 
   private flush() {
-    const sel = this.flushSel as Selectors, { rowsToKeep, rowSelector } = flushSelectors(this.P, this.R, this.base);
-    this.ctx.writeTensor(sel.keep, rowsToKeep); this.ctx.writeTensor(sel.select, rowSelector);
-    const g = this.decodeSet.flush as Built;
+    for (const [rows, sel] of this.flushSel as Map<number, Selectors>) {   // one selector pair per cache size; a ring takes the staging rows at slots (base + i) mod ring
+      const { rowsToKeep, rowSelector } = flushSelectors(rows, this.R, this.base, rows < this.P);
+      this.ctx.writeTensor(sel.keep, rowsToKeep); this.ctx.writeTensor(sel.select, rowSelector);
+    }
     for (let l = 0; l < this.N; l++) {
+      const type = this.pkg.model.layer_types[l], sel = (this.flushSel as Map<number, Selectors>).get(this.rowsOfType(type)) as Selectors;
+      const g = (this.decodeSet.flushes ? this.decodeSet.flushes.get(type) : this.decodeSet.flush) as Built;
       this.ctx.dispatch(g.graph, this.bind(g, { past_key: this.kv[l].key, past_value: this.kv[l].value, new_key: this.stg[l].key, new_value: this.stg[l].value,
         rows_to_keep: sel.keep, row_selector: sel.select }),
       this.bind(g, { updated_key: this.kvSpare[l].key, updated_value: this.kvSpare[l].value }, true));
@@ -527,7 +576,7 @@ export class LLM {
     this.writeRope(ropeTables(s, [pos], 1, 0), a);
     let masks: Record<string, Half>;
     if (this.style === 'staged') {
-      masks = decodeMasks(s, P, R, pos, this.base, this.filled);
+      masks = decodeMasks(s, P, R, pos, this.base, this.filled, this.ring);
       const { rowsToKeep, rowSelector } = decodeSelectors(R, this.filled);
       this.ctx.writeTensor((this.decodeSel as Selectors).keep, rowsToKeep); this.ctx.writeTensor((this.decodeSel as Selectors).select, rowSelector);
     } else if (this.style === 'onehot') {

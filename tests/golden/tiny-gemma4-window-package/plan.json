@@ -1,0 +1,476 @@
+{
+ "format": "m2w-plan",
+ "version": 0,
+ "target": "webnn-ov-npu",
+ "architecture_kind": "gemma4",
+ "weights": {
+  "description": "tensor names of the weights manifest: attention = by attention kind (the layer type and whether the layer has K / V of its own), ffn = the feed-forward half of every layer (incl. the per-layer-embedding branch and the layer scalar), head_extra = the PLE projection bound to HEAD, ple_table = the per-layer embedding table (rows are read on the host)",
+  "attention": {
+   "full_attention_own": [
+    "input_layernorm_gamma",
+    "qkv_projection_weight",
+    "qkv_projection_scale",
+    "query_norm_gamma",
+    "key_norm_gamma",
+    "output_projection_weight",
+    "output_projection_scale",
+    "post_attention_layernorm_gamma"
+   ],
+   "full_attention_shared": [
+    "input_layernorm_gamma",
+    "query_projection_weight",
+    "query_projection_scale",
+    "query_norm_gamma",
+    "output_projection_weight",
+    "output_projection_scale",
+    "post_attention_layernorm_gamma"
+   ],
+   "sliding_attention_own": [
+    "input_layernorm_gamma",
+    "qkv_projection_weight",
+    "qkv_projection_scale",
+    "query_norm_gamma",
+    "key_norm_gamma",
+    "output_projection_weight",
+    "output_projection_scale",
+    "post_attention_layernorm_gamma"
+   ],
+   "sliding_attention_shared": [
+    "input_layernorm_gamma",
+    "query_projection_weight",
+    "query_projection_scale",
+    "query_norm_gamma",
+    "output_projection_weight",
+    "output_projection_scale",
+    "post_attention_layernorm_gamma"
+   ]
+  },
+  "ffn": [
+   "pre_feedforward_layernorm_gamma",
+   "gate_up_projection_weight",
+   "gate_up_projection_scale",
+   "down_projection_weight",
+   "down_projection_scale",
+   "post_feedforward_layernorm_gamma",
+   "per_layer_input_gate_weight",
+   "per_layer_input_gate_scale",
+   "per_layer_projection_weight",
+   "per_layer_projection_scale",
+   "post_per_layer_input_norm_gamma",
+   "layer_scalar"
+  ],
+  "head_extra": [
+   "ple_model_projection_weight",
+   "ple_model_projection_scale",
+   "ple_projection_norm_gamma"
+  ],
+  "final_norm": [
+   "final_norm_gamma"
+  ],
+  "embedding": [
+   "lm_head_weight",
+   "lm_head_scale"
+  ],
+  "ple_table": [
+   "ple_weight",
+   "ple_scale"
+  ]
+ },
+ "profile": {
+  "zero_point": "const",
+  "merge_projections": true,
+  "lm_head_format": "int8-sym",
+  "attn_split": false,
+  "gqa": "repeat",
+  "sliding_cache": "window",
+  "sliding_ring": 64
+ },
+ "variants": [
+  {
+   "id": "staged-r8-float32",
+   "kv_style": "staged",
+   "compute_type": "float32",
+   "staging_rows": 8
+  },
+  {
+   "id": "staged-r8-float16",
+   "kv_style": "staged",
+   "compute_type": "float16",
+   "staging_rows": 8
+  }
+ ],
+ "default_variant": "staged-r8-float32",
+ "max_lengths": [
+  64,
+  128
+ ],
+ "prefill_chunks": [
+  16,
+  8
+ ],
+ "blocks_per_graph": [
+  1,
+  2,
+  3
+ ],
+ "prefill_blocks_per_graph": [
+  1
+ ],
+ "graphs": {
+  "staged-r8-float32": {
+   "lm_head": "graphs/staged-r8-float32/lm_head.json",
+   "decode": {
+    "64": {
+     "head": "graphs/staged-r8-float32/decode_head_L64.json",
+     "blocks": {
+      "full_attention_own": "graphs/staged-r8-float32/decode_block_full_attention_own_L64.json",
+      "full_attention_shared": "graphs/staged-r8-float32/decode_block_full_attention_shared_L64.json",
+      "sliding_attention_own": "graphs/staged-r8-float32/decode_block_sliding_attention_own_L64.json",
+      "sliding_attention_shared": "graphs/staged-r8-float32/decode_block_sliding_attention_shared_L64.json"
+     },
+     "tail": "graphs/staged-r8-float32/decode_tail.json",
+     "flush": {
+      "full_attention": "graphs/staged-r8-float32/kv_flush_full_attention_L64.json",
+      "sliding_attention": "graphs/staged-r8-float32/kv_flush_sliding_attention_L64.json"
+     },
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "so-fo",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo_L64.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "so-fs",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fs_L64.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float32/decode_group_ss_L64.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "so-fo-so",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo-so_L64.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "fs-ss",
+        "graph": "graphs/staged-r8-float32/decode_group_fs-ss_L64.json"
+       }
+      ]
+     }
+    },
+    "128": {
+     "head": "graphs/staged-r8-float32/decode_head_L128.json",
+     "blocks": {
+      "full_attention_own": "graphs/staged-r8-float32/decode_block_full_attention_own_L128.json",
+      "full_attention_shared": "graphs/staged-r8-float32/decode_block_full_attention_shared_L128.json",
+      "sliding_attention_own": "graphs/staged-r8-float32/decode_block_sliding_attention_own_L128.json",
+      "sliding_attention_shared": "graphs/staged-r8-float32/decode_block_sliding_attention_shared_L128.json"
+     },
+     "tail": "graphs/staged-r8-float32/decode_tail.json",
+     "flush": {
+      "full_attention": "graphs/staged-r8-float32/kv_flush_full_attention_L128.json",
+      "sliding_attention": "graphs/staged-r8-float32/kv_flush_sliding_attention_L128.json"
+     },
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "so-fo",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo_L128.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "so-fs",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fs_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float32/decode_group_ss_L128.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "so-fo-so",
+        "graph": "graphs/staged-r8-float32/decode_group_so-fo-so_L128.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "fs-ss",
+        "graph": "graphs/staged-r8-float32/decode_group_fs-ss_L128.json"
+       }
+      ]
+     }
+    }
+   },
+   "prefill": {
+    "64": {
+     "16": {
+      "head": "graphs/staged-r8-float32/prefill_head_L64_C16.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float32/prefill_block_full_attention_own_L64_C16.json",
+       "full_attention_shared": "graphs/staged-r8-float32/prefill_block_full_attention_shared_L64_C16.json",
+       "sliding_attention_own": "graphs/staged-r8-float32/prefill_block_sliding_attention_own_L64_C16.json",
+       "sliding_attention_shared": "graphs/staged-r8-float32/prefill_block_sliding_attention_shared_L64_C16.json"
+      },
+      "tail": "graphs/staged-r8-float32/prefill_tail_C16.json"
+     },
+     "8": {
+      "head": "graphs/staged-r8-float32/prefill_head_L64_C8.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float32/prefill_block_full_attention_own_L64_C8.json",
+       "full_attention_shared": "graphs/staged-r8-float32/prefill_block_full_attention_shared_L64_C8.json",
+       "sliding_attention_own": "graphs/staged-r8-float32/prefill_block_sliding_attention_own_L64_C8.json",
+       "sliding_attention_shared": "graphs/staged-r8-float32/prefill_block_sliding_attention_shared_L64_C8.json"
+      },
+      "tail": "graphs/staged-r8-float32/prefill_tail_C8.json"
+     }
+    },
+    "128": {
+     "16": {
+      "head": "graphs/staged-r8-float32/prefill_head_L128_C16.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float32/prefill_block_full_attention_own_L128_C16.json",
+       "full_attention_shared": "graphs/staged-r8-float32/prefill_block_full_attention_shared_L128_C16.json",
+       "sliding_attention_own": "graphs/staged-r8-float32/prefill_block_sliding_attention_own_L128_C16.json",
+       "sliding_attention_shared": "graphs/staged-r8-float32/prefill_block_sliding_attention_shared_L128_C16.json"
+      },
+      "tail": "graphs/staged-r8-float32/prefill_tail_C16.json"
+     },
+     "8": {
+      "head": "graphs/staged-r8-float32/prefill_head_L128_C8.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float32/prefill_block_full_attention_own_L128_C8.json",
+       "full_attention_shared": "graphs/staged-r8-float32/prefill_block_full_attention_shared_L128_C8.json",
+       "sliding_attention_own": "graphs/staged-r8-float32/prefill_block_sliding_attention_own_L128_C8.json",
+       "sliding_attention_shared": "graphs/staged-r8-float32/prefill_block_sliding_attention_shared_L128_C8.json"
+      },
+      "tail": "graphs/staged-r8-float32/prefill_tail_C8.json"
+     }
+    }
+   }
+  },
+  "staged-r8-float16": {
+   "lm_head": "graphs/staged-r8-float16/lm_head.json",
+   "decode": {
+    "64": {
+     "head": "graphs/staged-r8-float16/decode_head_L64.json",
+     "blocks": {
+      "full_attention_own": "graphs/staged-r8-float16/decode_block_full_attention_own_L64.json",
+      "full_attention_shared": "graphs/staged-r8-float16/decode_block_full_attention_shared_L64.json",
+      "sliding_attention_own": "graphs/staged-r8-float16/decode_block_sliding_attention_own_L64.json",
+      "sliding_attention_shared": "graphs/staged-r8-float16/decode_block_sliding_attention_shared_L64.json"
+     },
+     "tail": "graphs/staged-r8-float16/decode_tail.json",
+     "flush": {
+      "full_attention": "graphs/staged-r8-float16/kv_flush_full_attention_L64.json",
+      "sliding_attention": "graphs/staged-r8-float16/kv_flush_sliding_attention_L64.json"
+     },
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "so-fo",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo_L64.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "so-fs",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fs_L64.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float16/decode_group_ss_L64.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "so-fo-so",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo-so_L64.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "fs-ss",
+        "graph": "graphs/staged-r8-float16/decode_group_fs-ss_L64.json"
+       }
+      ]
+     }
+    },
+    "128": {
+     "head": "graphs/staged-r8-float16/decode_head_L128.json",
+     "blocks": {
+      "full_attention_own": "graphs/staged-r8-float16/decode_block_full_attention_own_L128.json",
+      "full_attention_shared": "graphs/staged-r8-float16/decode_block_full_attention_shared_L128.json",
+      "sliding_attention_own": "graphs/staged-r8-float16/decode_block_sliding_attention_own_L128.json",
+      "sliding_attention_shared": "graphs/staged-r8-float16/decode_block_sliding_attention_shared_L128.json"
+     },
+     "tail": "graphs/staged-r8-float16/decode_tail.json",
+     "flush": {
+      "full_attention": "graphs/staged-r8-float16/kv_flush_full_attention_L128.json",
+      "sliding_attention": "graphs/staged-r8-float16/kv_flush_sliding_attention_L128.json"
+     },
+     "block_groups": {
+      "2": [
+       {
+        "first_block": 0,
+        "blocks": 2,
+        "key": "so-fo",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo_L128.json"
+       },
+       {
+        "first_block": 2,
+        "blocks": 2,
+        "key": "so-fs",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fs_L128.json"
+       },
+       {
+        "first_block": 4,
+        "blocks": 1,
+        "key": "ss",
+        "graph": "graphs/staged-r8-float16/decode_group_ss_L128.json"
+       }
+      ],
+      "3": [
+       {
+        "first_block": 0,
+        "blocks": 3,
+        "key": "so-fo-so",
+        "graph": "graphs/staged-r8-float16/decode_group_so-fo-so_L128.json"
+       },
+       {
+        "first_block": 3,
+        "blocks": 2,
+        "key": "fs-ss",
+        "graph": "graphs/staged-r8-float16/decode_group_fs-ss_L128.json"
+       }
+      ]
+     }
+    }
+   },
+   "prefill": {
+    "64": {
+     "16": {
+      "head": "graphs/staged-r8-float16/prefill_head_L64_C16.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float16/prefill_block_full_attention_own_L64_C16.json",
+       "full_attention_shared": "graphs/staged-r8-float16/prefill_block_full_attention_shared_L64_C16.json",
+       "sliding_attention_own": "graphs/staged-r8-float16/prefill_block_sliding_attention_own_L64_C16.json",
+       "sliding_attention_shared": "graphs/staged-r8-float16/prefill_block_sliding_attention_shared_L64_C16.json"
+      },
+      "tail": "graphs/staged-r8-float16/prefill_tail_C16.json"
+     },
+     "8": {
+      "head": "graphs/staged-r8-float16/prefill_head_L64_C8.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float16/prefill_block_full_attention_own_L64_C8.json",
+       "full_attention_shared": "graphs/staged-r8-float16/prefill_block_full_attention_shared_L64_C8.json",
+       "sliding_attention_own": "graphs/staged-r8-float16/prefill_block_sliding_attention_own_L64_C8.json",
+       "sliding_attention_shared": "graphs/staged-r8-float16/prefill_block_sliding_attention_shared_L64_C8.json"
+      },
+      "tail": "graphs/staged-r8-float16/prefill_tail_C8.json"
+     }
+    },
+    "128": {
+     "16": {
+      "head": "graphs/staged-r8-float16/prefill_head_L128_C16.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float16/prefill_block_full_attention_own_L128_C16.json",
+       "full_attention_shared": "graphs/staged-r8-float16/prefill_block_full_attention_shared_L128_C16.json",
+       "sliding_attention_own": "graphs/staged-r8-float16/prefill_block_sliding_attention_own_L128_C16.json",
+       "sliding_attention_shared": "graphs/staged-r8-float16/prefill_block_sliding_attention_shared_L128_C16.json"
+      },
+      "tail": "graphs/staged-r8-float16/prefill_tail_C16.json"
+     },
+     "8": {
+      "head": "graphs/staged-r8-float16/prefill_head_L128_C8.json",
+      "blocks": {
+       "full_attention_own": "graphs/staged-r8-float16/prefill_block_full_attention_own_L128_C8.json",
+       "full_attention_shared": "graphs/staged-r8-float16/prefill_block_full_attention_shared_L128_C8.json",
+       "sliding_attention_own": "graphs/staged-r8-float16/prefill_block_sliding_attention_own_L128_C8.json",
+       "sliding_attention_shared": "graphs/staged-r8-float16/prefill_block_sliding_attention_shared_L128_C8.json"
+      },
+      "tail": "graphs/staged-r8-float16/prefill_tail_C8.json"
+     }
+    }
+   }
+  }
+ },
+ "chain": {
+  "description": "HEAD = attention half of layer 0 + the per-layer-embedding prologue (outputs ple_0 .. ple_{N-1}); BLOCK i (i = 0 .. N-2) = feed-forward half of layer i (input per_layer_input = ple_i) + attention half of layer i + 1, the graph of its KIND (plan.graphs[..].blocks[kind]); TAIL = feed-forward half of layer N-1 + final norm; lm_head (with the logit softcap). The kind of layer i is model.json layer_types[i] + '_own' | '_shared' (kv_producer[i] >= 0 = it attends over the cache of that layer).",
+  "num_layers": 6,
+  "kinds": [
+   "sliding_attention_own",
+   "sliding_attention_own",
+   "full_attention_own",
+   "sliding_attention_own",
+   "full_attention_shared",
+   "sliding_attention_shared"
+  ],
+  "block_groups": {
+   "description": "decode only: graphs.<variant>.decode.<max length>.block_groups[K] = the N - 1 BLOCKs cut into runs of K ([{first_block, blocks, key, graph}], the last run may be shorter), one graph per distinct sequence of kinds (key: the kinds joined by '-', so / fo = sliding / full attention with K / V of its own, ss / fs = sliding / full attention sharing K / V). A group graph takes residual + attention_output of its first block and returns next_residual + next_attention_output of its last block. Block j (BLOCK first_block + j) has the prefix b<j>_: b<j>_per_layer_input (ple_<first_block + j>), the weights of the feed-forward half of layer first_block + j and of the attention half of layer first_block + j + 1, and b<j>_past_key / b<j>_past_value / b<j>_staging_key / b<j>_staging_value = the main cache and staging buffer of the layer whose K / V that attention half reads (model.json kv_producer); a block that reads the cache of a layer already read by an earlier block of the group has no cache inputs (it reuses that block's), and a block that reads the cache of a layer INSIDE the group attends over the staging buffer after that layer's update, computed in the graph. Output b<j>_updated_key / b<j>_updated_value (blocks with K / V of their own) = the spare staging buffer, to be swapped in. <layer type>_rope_cos / _rope_sin / _attention_mask: one per layer type (the decode masks of own and shared layers are the same). Prefill has no groups (prefill_blocks_per_graph = [1]).",
+   "kind_codes": {
+    "so": "sliding_attention_own",
+    "fo": "full_attention_own",
+    "ss": "sliding_attention_shared",
+    "fs": "full_attention_shared"
+   }
+  }
+ },
+ "per_layer_type_inputs": {
+  "description": "rope_cos / rope_sin [1,1,S,head_dim of the type] / attention_mask of an attention half are bound with the tables of the layer type of ITS layer; a shared layer's mask has the columns of the cache it reads (prefill: P, decode: P + staging rows)",
+  "inputs": [
+   "rope_cos",
+   "rope_sin",
+   "attention_mask"
+  ]
+ },
+ "kv_protocols": {
+  "description": "only the staged protocol: prefill = chunks (the last one left-padded) updating the main caches of the layers with K / V of their own; decode = the new row goes into a staging buffer, attention reads concat(main cache, staging), the flush graph (one per layer type) moves the staging rows into the main cache every staging_rows steps. Layers that share K / V read the cache of their producer: decode = its main cache + its staging buffer after this step's update; prefill = its cache after the update of the chunk.",
+  "sliding_window_cache": "profile.sliding_cache = window: the layers of type sliding_attention keep a ring of min(max_length - 1, 64) rows (profile.sliding_ring) instead of max_length - 1: position p lives in slot p mod ring (prefill chunk rows and flushed staging rows alike), and the masks / selectors of the layers of that type are built for the slots (protocol.py cache_rows / slot_positions; docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md). Staged protocol only. Qwen3-like models: the BLOCK and flush graphs exist per layer type (decode.blocks / decode.flush / prefill.blocks: type -> graph) and decode.block_groups[K] is a schedule [{first_block, blocks, key, graph}] cut per sequence of layer types."
+ },
+ "host": {
+  "embed_scale": 11.313708498984761,
+  "ple": "per prompt token a row of the ple_table (int8 * row scale, float16) is bound to HEAD's ple_token input; the graph scales it by sqrt(ple_dim)",
+  "logit_softcap": 30.0
+ },
+ "prefill_planning": "several chunk sizes: protocol plan_prefill() picks the chunk sequence of a prompt with the lowest sum of (fixed tokens + size); fixed tokens default 200",
+ "logits": {
+  "padded_vocab": 384,
+  "vocab": 300,
+  "note": "argmax / sampling over the first `vocab` entries only"
+ },
+ "recommended": {
+  "blocks_per_graph": 3,
+  "prefill_blocks_per_graph": 1,
+  "sampling": {
+   "temperature": 1.0,
+   "top_p": 0.95,
+   "top_k": 64
+  }
+ }
+}

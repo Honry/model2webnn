@@ -7,13 +7,15 @@
 //  * decode block groups (blocksPerGraph = K > 1, a package built with --blocks-per-graph K): the N - 1 BLOCKs in runs of K, one dispatch per run (plan.chain.block_groups); the inputs of a group graph
 //    are bound by NAME: residual / attention_output of its first block, <layer type>_rope_cos / _rope_sin / _attention_mask, and b<j>_ = the weights, per-layer input and caches of block j. Prefill has no groups.
 // Python counterpart (the executable specification): python/m2w/reference/gemma4_runner.py. Only the staged KV protocol exists.
+// Sliding window caches (a package built with --sliding-cache window, plan.profile.sliding_cache): the caches of the sliding layers are rings of plan.profile.sliding_ring rows (protocol.ts cacheRows);
+// their masks and the chunk / flush selectors are built for those rows, one selector pair per distinct cache size; the graphs already differ per kind, only the cache length of the sliding kinds changes.
 import { loadGraph, type GraphDoc } from './ir-loader.js';
 import { checkTensorSize, emptyStats, Prefetcher, type Built, type Stats } from './llm-common.js';
 import { pickToken, samplingOf } from './sampling.js';
 import type { GenerateOptions, LoadOptions, SessionOptions } from './llm.js';
 import { openPackage, type GemmaBlockGroup, type GemmaDecodeTable, type GraphTable, type ManifestFile, type ModelPackage, type PackageSource, type Progress, type Variant } from './package.js';
 import {
-  decodeMasks, decodeSelectors, flushSelectors, incachePrefillMasks, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ropeTables, type Half,
+  cacheRows, decodeMasks, decodeSelectors, flushSelectors, incachePrefillMasks, layerTypesOf, newHalf, planPrefill, prefillMasks, prefillSelectors, ringOf, ropeTables, type Half,
 } from './protocol.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -24,7 +26,7 @@ interface Activations {
   residuals: ML[]; attentionOutputs: ML[]; ples: ML[]; finalHidden: ML;
 }
 interface Selectors { keep: ML; select: ML }
-interface PrefillSet { head: Built; blocks: Map<string, Built>; tail: Built; act: Activations; sel: Selectors }
+interface PrefillSet { head: Built; blocks: Map<string, Built>; tail: Built; act: Activations; sel: Map<number, Selectors> }   // sel: by the rows of the cache the chunk is written into
 type Cache = { key: ML; value: ML };
 
 export class Gemma4LLM {
@@ -35,7 +37,7 @@ export class Gemma4LLM {
   stats: Stats = emptyStats();
 
   private ctx!: ML;
-  private P = 0; private R = 0; private N: number;
+  private P = 0; private R = 0; private N: number; private ring = 0;   // ring: rows of the caches of the sliding layers of a window package (0: all P)
   private fixedTokens = 200; private groupSize = 1;
   private types: string[]; private kinds: string[]; private producer: number[];
   private weights: Record<string, ML>[] = [];
@@ -46,7 +48,7 @@ export class Gemma4LLM {
   private prefillSets = new Map<number, PrefillSet>();
   private kv = new Map<number, Cache>(); private kvSpare = new Map<number, Cache>(); private stg = new Map<number, Cache>(); private stgSpare = new Map<number, Cache>();
   private dec!: Activations;
-  private decodeSel!: Selectors; private flushSel!: Selectors;
+  private decodeSel!: Selectors; private flushSel!: Map<number, Selectors>;   // flushSel: by the rows of the cache
   private logitsTensor!: ML; private logits!: Half;
   private embed!: { weight: Int8Array; scale: Half };
   private ple!: { path: string; weightOffset: number; width: number; scale: Half };
@@ -103,8 +105,13 @@ export class Gemma4LLM {
   }
 
   private adopt(c: ReturnType<Gemma4LLM['resolve']>) {
-    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.fixedTokens = c.fixedTokens; this.groupSize = c.group;
+    this.maxLength = c.maxLength; this.variant = c.variant; this.chunkSizes = c.sizes; this.P = c.maxLength - 1; this.R = c.variant.staging_rows ?? 0; this.ring = ringOf(this.pkg.plan); this.fixedTokens = c.fixedTokens; this.groupSize = c.group;
   }
+
+  /** rows of the K / V cache of a layer type (the ring for the sliding layers of a window package) */
+  private rowsOfType(type: string) { return cacheRows(type, this.P, this.ring); }
+  /** the distinct row counts of the caches of this session */
+  private cacheRowCounts() { return [...new Set(layerTypesOf(this.pkg.model).map((t) => this.rowsOfType(t)))]; }
 
   private async createTensor(dataType: string, shape: number[], flags: { writable?: boolean; readable?: boolean } = {}, into = this.stateTensors) {
     checkTensorSize(dataType, shape);
@@ -244,7 +251,7 @@ export class Gemma4LLM {
   }
 
   private async allocateState() {
-    const s = this.pkg.model, { P, R, N } = this, ple = s.ple_dim as number;
+    const s = this.pkg.model, { R, N } = this, ple = s.ple_dim as number;
     const makeCache = async (layer: number, rows: number): Promise<Cache> => {
       const d = this.dims(this.types[layer]), shape = [1, d.kvHeads, rows, d.headDim], zeros = newHalf(d.kvHeads * rows * d.headDim);
       const c = { key: await this.writable('float16', shape), value: await this.writable('float16', shape) };
@@ -253,18 +260,19 @@ export class Gemma4LLM {
     };
     for (let l = 0; l < N; l++) {
       if (this.producer[l] !== l) continue;   // a layer that shares K / V has no cache
-      this.kv.set(l, await makeCache(l, P)); this.kvSpare.set(l, await makeCache(l, P));
+      const rows = this.rowsOfType(this.types[l]);
+      this.kv.set(l, await makeCache(l, rows)); this.kvSpare.set(l, await makeCache(l, rows));
       this.stg.set(l, await makeCache(l, R)); this.stgSpare.set(l, await makeCache(l, R));
     }
-    const activations = async (S: number, ownColumns: number, sharedColumns: number): Promise<Activations> => {
+    const activations = async (S: number, ownColumns: (type: string) => number, sharedColumns: (type: string) => number): Promise<Activations> => {
       const a: Activations = { hidden: await this.writable('float16', [1, S, s.hidden]), pleToken: await this.writable('float16', [1, S, N * ple]), ropeCos: {}, ropeSin: {}, mask: {}, maskShared: {},
         residuals: [], attentionOutputs: [], ples: [], finalHidden: null };
       for (const type of layerTypesOf(s)) {
         const d = this.dims(type);
         a.ropeCos[type] = await this.writable('float16', [1, 1, S, d.headDim]);
         a.ropeSin[type] = await this.writable('float16', [1, 1, S, d.headDim]);
-        a.mask[type] = await this.writable('float16', [1, 1, S, ownColumns]);
-        a.maskShared[type] = sharedColumns === ownColumns ? a.mask[type] : await this.writable('float16', [1, 1, S, sharedColumns]);
+        a.mask[type] = await this.writable('float16', [1, 1, S, ownColumns(type)]);
+        a.maskShared[type] = sharedColumns(type) === ownColumns(type) ? a.mask[type] : await this.writable('float16', [1, 1, S, sharedColumns(type)]);
       }
       for (let l = 0; l < N; l++) {
         a.residuals.push(await this.createTensor('float16', [1, S, s.hidden], l === N - 1 ? { readable: true } : {}));   // the last one is read between prefill chunks of an abortable generation
@@ -276,12 +284,14 @@ export class Gemma4LLM {
     };
     const pair = async (rows: number, columns: number): Promise<Selectors> => ({ keep: await this.writable('float16', [1, 1, rows, 1]), select: await this.writable('float16', [1, 1, rows, columns]) });
     for (const [size, set] of this.prefillSets) {
-      set.act = await activations(size, P + size, P);   // a layer with K / V of its own attends over concat(cache, chunk rows); a shared layer over the updated cache of its producer
-      set.sel = await pair(P, size);
+      set.act = await activations(size, (type) => this.rowsOfType(type) + size, (type) => this.rowsOfType(type));   // a layer with K / V of its own attends over concat(cache, chunk rows); a shared layer over the updated cache of its producer
+      set.sel = new Map();
+      for (const rows of this.cacheRowCounts()) set.sel.set(rows, await pair(rows, size));
     }
-    this.dec = await activations(1, P + R, P + R);
+    this.dec = await activations(1, (type) => this.rowsOfType(type) + R, (type) => this.rowsOfType(type) + R);
     this.decodeSel = await pair(R, 1);
-    this.flushSel = await pair(P, R);
+    this.flushSel = new Map();
+    for (const rows of this.cacheRowCounts()) this.flushSel.set(rows, await pair(rows, R));
     this.logitsTensor = await this.createTensor('float16', [1, 1, s.vocab_padded], { readable: true });
     this.logits = newHalf(s.vocab_padded);
   }
@@ -306,15 +316,20 @@ export class Gemma4LLM {
   private enqueue(size: number, lastChunk: boolean) {
     const decode = size === 0, set = decode ? this.decodeSet : (this.prefillSets.get(size) as PrefillSet), a = decode ? this.dec : (set as PrefillSet).act;
     const plan = this.pkg.plan, N = this.N, attentionNames = plan.weights.attention as Record<string, string[]>, ffnNames = plan.weights.ffn;
-    const sel = decode ? this.decodeSel : (set as PrefillSet).sel;
-    const selectors = decode ? { staging_rows_to_keep: sel.keep, staging_row_selector: sel.select } : { rows_to_keep: sel.keep, row_selector: sel.select };
+    // decode: the staging selectors; a prefill chunk: the one-hot selectors of the cache of the layer type (a ring and the full cache have different rows)
+    const stagingSelectors = { staging_rows_to_keep: this.decodeSel.keep, staging_row_selector: this.decodeSel.select };
+    const selectorsOf = (type: string) => {
+      if (decode) return stagingSelectors;
+      const sel = (set as PrefillSet).sel.get(this.rowsOfType(type)) as Selectors;
+      return { rows_to_keep: sel.keep, row_selector: sel.select };
+    };
     const caches = decode ? this.stg : this.kv, spare = decode ? this.stgSpare : this.kvSpare;
     const dispatch = (graph: Built, inputs: Record<string, ML>, outputs: Record<string, ML>) => this.ctx.dispatch(graph.graph, this.bind(graph, inputs), this.bind(graph, outputs, true));
     // the inputs of the attention half of `layer`: rope / mask of its type, its weights, the cache it reads (its own or its producer's)
     const attentionInputs = (layer: number) => {
       const type = this.types[layer], p = this.producer[layer], shared = p !== layer;
       return {
-        rope_cos: a.ropeCos[type], rope_sin: a.ropeSin[type], attention_mask: shared ? a.maskShared[type] : a.mask[type], ...selectors,
+        rope_cos: a.ropeCos[type], rope_sin: a.ropeSin[type], attention_mask: shared ? a.maskShared[type] : a.mask[type], ...selectorsOf(type),
         past_key: (this.kv.get(p) as Cache).key, past_value: (this.kv.get(p) as Cache).value,
         ...(decode ? { staging_key: (this.stg.get(p) as Cache).key, staging_value: (this.stg.get(p) as Cache).value } : {}),
         ...this.pick(attentionNames[this.kinds[layer]], layer),
@@ -335,7 +350,7 @@ export class Gemma4LLM {
       const bindGroup = (first: number, name: string): ML => {
         if (name === 'residual') return a.residuals[first];
         if (name === 'attention_output') return a.attentionOutputs[first];
-        if (name in selectors) return (selectors as Record<string, ML>)[name];
+        if (name in stagingSelectors) return (stagingSelectors as Record<string, ML>)[name];
         const block = /^b(\d+)_(.+)$/.exec(name);
         if (block) {
           const ffnLayer = first + +block[1], layer = ffnLayer + 1, rest = block[2], p = this.producer[layer];
@@ -420,10 +435,12 @@ export class Gemma4LLM {
       await this.pleRows(tokens.slice(start, start + valid), pleToken, Array.from({ length: valid }, (_, i) => (pad + i) * pleSize));
       this.ctx.writeTensor(a.hidden, hidden); this.ctx.writeTensor(a.pleToken, pleToken);
       this.writeRope(ropeTables(s, Array.from({ length: valid }, (_, i) => start + i), C, pad), a);
-      const own = prefillMasks(s, P, C, start, valid), shared = incachePrefillMasks(s, P, C, start, valid);
+      const own = prefillMasks(s, P, C, start, valid, this.ring), shared = incachePrefillMasks(s, P, C, start, valid, this.ring);
       for (const type of layerTypesOf(s)) { this.ctx.writeTensor(a.mask[type], own[type]); this.ctx.writeTensor(a.maskShared[type], shared[type]); }
-      const { rowsToKeep, rowSelector } = prefillSelectors(P, C, start, valid);
-      this.ctx.writeTensor(set.sel.keep, rowsToKeep); this.ctx.writeTensor(set.sel.select, rowSelector);
+      for (const [rows, sel] of set.sel) {   // a ring writes slot (start + i) mod ring
+        const { rowsToKeep, rowSelector } = prefillSelectors(rows, C, start, valid, rows < P);
+        this.ctx.writeTensor(sel.keep, rowsToKeep); this.ctx.writeTensor(sel.select, rowSelector);
+      }
       this.enqueue(C, last);
       if (signal && !last) {   // abortable: wait for the device to finish this chunk (read back its last residual), then look at the signal; without a signal the chunks stay queued back to back
         await this.ctx.readTensor(a.residuals[this.N - 1], newHalf(C * s.hidden));
@@ -437,11 +454,14 @@ export class Gemma4LLM {
   }
 
   private flush() {
-    const { rowsToKeep, rowSelector } = flushSelectors(this.P, this.R, this.base);
-    this.ctx.writeTensor(this.flushSel.keep, rowsToKeep); this.ctx.writeTensor(this.flushSel.select, rowSelector);
+    for (const [rows, sel] of this.flushSel) {   // one selector pair per cache size; a ring takes the staging rows at slots (base + i) mod ring
+      const { rowsToKeep, rowSelector } = flushSelectors(rows, this.R, this.base, rows < this.P);
+      this.ctx.writeTensor(sel.keep, rowsToKeep); this.ctx.writeTensor(sel.select, rowSelector);
+    }
     for (const layer of this.kv.keys()) {
       const g = this.decodeSet.flush.get(this.types[layer]) as Built, main = this.kv.get(layer) as Cache, staging = this.stg.get(layer) as Cache;
-      this.ctx.dispatch(g.graph, this.bind(g, { past_key: main.key, past_value: main.value, new_key: staging.key, new_value: staging.value, rows_to_keep: this.flushSel.keep, row_selector: this.flushSel.select }),
+      const sel = this.flushSel.get(this.rowsOfType(this.types[layer])) as Selectors;
+      this.ctx.dispatch(g.graph, this.bind(g, { past_key: main.key, past_value: main.value, new_key: staging.key, new_value: staging.value, rows_to_keep: sel.keep, row_selector: sel.select }),
         this.bind(g, { updated_key: (this.kvSpare.get(layer) as Cache).key, updated_value: (this.kvSpare.get(layer) as Cache).value }, true));
       this.swap(this.kv, this.kvSpare, layer);
     }
@@ -459,7 +479,7 @@ export class Gemma4LLM {
     await this.pleRows([token], pleToken, [0]);
     this.ctx.writeTensor(a.hidden, hidden); this.ctx.writeTensor(a.pleToken, pleToken);
     this.writeRope(ropeTables(s, [pos], 1, 0), a);
-    const masks = decodeMasks(s, P, R, pos, this.base, this.filled);
+    const masks = decodeMasks(s, P, R, pos, this.base, this.filled, this.ring);
     for (const type of layerTypesOf(s)) this.ctx.writeTensor(a.mask[type], masks[type]);   // maskShared is the same tensor in decode
     const { rowsToKeep, rowSelector } = decodeSelectors(R, this.filled);
     this.ctx.writeTensor(this.decodeSel.keep, rowsToKeep); this.ctx.writeTensor(this.decodeSel.select, rowSelector);

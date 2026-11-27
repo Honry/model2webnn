@@ -1,7 +1,9 @@
 """A tiny random hybrid-layer model compiled into a package (tests/golden/tiny-package, committed) with a verification record: the fast way to test the browser runtime
 (scheduler, bindings, masks, every KV protocol / compute type / chunk plan) on a WebNN device before loading a real model.   python scripts/make-tiny-package.py [max_length] [chunk] [staging_rows]
 Also writes tests/golden/tiny-gemma4-package, the same for a tiny Gemma 4 style model (per-layer head dims, KV sharing, per-layer embeddings),
-and tests/golden/tiny-qwen35-package for a tiny Qwen3.5 (Gated DeltaNet layers + gated full attention + a tiny image tower with three grid presets; needs torch + transformers)."""
+and tests/golden/tiny-qwen35-package for a tiny Qwen3.5 (Gated DeltaNet layers + gated full attention + a tiny image tower with three grid presets; needs torch + transformers),
+and the sliding window variants tests/golden/tiny-window-package / tiny-gemma4-window-package (--sliding-cache window: the sliding layers hold a ring; staged protocol only; two max lengths: 64 =
+the ring is not smaller than the cache, max_length = the ring wraps). `--window-only` writes just these two."""
 import sys
 from pathlib import Path
 
@@ -14,22 +16,35 @@ from m2w.verify import verify_package  # noqa: E402
 from tiny_gemma4 import write_tiny_gemma4  # noqa: E402
 from tiny_model import write_tiny_model  # noqa: E402
 
-max_length, chunk, staging = (int(a) for a in (sys.argv[1:4] + ["128", "16", "8"][len(sys.argv[1:4]):]))
+window_only = "--window-only" in sys.argv
+args = [a for a in sys.argv[1:] if a != "--window-only"]
+max_length, chunk, staging = (int(a) for a in (args[:3] + ["128", "16", "8"][len(args[:3]):]))
 small_chunk = max(chunk // 2, 1)
 out = root / "_out"
 golden = root.parent / "tests" / "golden"
 write_tiny_model(out / "tiny-hf", dtype="BF16")
-pkg = compile_model(str(out / "tiny-hf"), golden / "tiny-package", max_lengths=(max_length,), chunks=(chunk, small_chunk),
-                    kv_styles=("staged", "onehot", "tensorScatter", "scatterND"), staging_rows=(staging,), compute_types=("float32", "float16"), blocks_per_graph=(1, 2), prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
-ids = [int(t) for t in np.random.default_rng(0).integers(3, 300, 45)]
-status = verify_package(pkg, str(out / "tiny-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk])
-
 write_tiny_gemma4(out / "tiny-gemma4-hf", dtype="BF16")
-gemma = compile_model(str(out / "tiny-gemma4-hf"), golden / "tiny-gemma4-package", max_lengths=(max_length,), chunks=(chunk, small_chunk), staging_rows=(staging,),
-                      compute_types=("float32", "float16"), blocks_per_graph=(1, 2, 3, 4, 5), workers=2, progress=lambda m: None)
-status |= verify_package(gemma, str(out / "tiny-gemma4-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk])
+ids = [int(t) for t in np.random.default_rng(0).integers(3, 300, 45)]
+status = 0
+if not window_only:
+    pkg = compile_model(str(out / "tiny-hf"), golden / "tiny-package", max_lengths=(max_length,), chunks=(chunk, small_chunk),
+                        kv_styles=("staged", "onehot", "tensorScatter", "scatterND"), staging_rows=(staging,), compute_types=("float32", "float16"), blocks_per_graph=(1, 2), prefill_blocks_per_graph=(1, 2), workers=2, progress=lambda m: None)
+    status = verify_package(pkg, str(out / "tiny-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk])
+
+    gemma = compile_model(str(out / "tiny-gemma4-hf"), golden / "tiny-gemma4-package", max_lengths=(max_length,), chunks=(chunk, small_chunk), staging_rows=(staging,),
+                          compute_types=("float32", "float16"), blocks_per_graph=(1, 2, 3, 4, 5), workers=2, progress=lambda m: None)
+    status |= verify_package(gemma, str(out / "tiny-gemma4-hf"), prompt="", steps=12, token_ids=ids, variants=["all"], chunks=[chunk, small_chunk])
+
+# sliding window caches: 64 steps after the 45 token prompt wrap the ring (64 rows) of the sliding layers; checked against the independent reference with and without decode block groups
+window = {"max_lengths": (64, max_length), "chunks": (chunk, small_chunk), "staging_rows": (staging,), "compute_types": ("float32", "float16"), "sliding_cache": "window", "workers": 2, "progress": lambda m: None}
+for name, hf, groups in (("tiny-window-package", "tiny-hf", (1, 2)), ("tiny-gemma4-window-package", "tiny-gemma4-hf", (1, 2, 3))):
+    package = compile_model(str(out / hf), golden / name, blocks_per_graph=groups, **window)
+    for group in (max(groups), 1):   # the verification record of the package is the last run (no groups)
+        status |= verify_package(package, str(out / hf), prompt="", steps=64, token_ids=ids, max_length=max_length, variants=["all"], chunks=[chunk, small_chunk], decode_group=group)
 
 try:   # a tiny Qwen3.5 (Gated DeltaNet hybrid) needs torch + transformers >= 5.3 to create its random weights
+    if window_only:
+        raise SystemExit(status)
     from tiny_qwen35 import GRIDS, write_tiny_qwen35
 except ImportError:
     print("skipping tests/golden/tiny-qwen35-package: torch / transformers are not installed")
