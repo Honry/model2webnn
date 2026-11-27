@@ -3,7 +3,7 @@
 // (generate takes the whole conversation: options.turns, the pictures of all its turns in options.images, a signal to stop).
 // What a package offers is fixed when it is compiled (max lengths, prefill chunks, graph variants = KV protocol x compute type x staging rows, blocks per graph): the page offers exactly that,
 // and a change of any session option rebuilds the graphs of the loaded model (LLM.reconfigure) while the weights stay on the device.
-import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
+import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs, kvBytes, expectedMemory, formatBytes, WEIGHT_OVERHEAD } from "../../lib/runtime/index.js";
 
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 const packagesUrl = new URL("../packages/", import.meta.url);
@@ -19,17 +19,18 @@ export async function listPackages() {
 export const peekPackage = (url) => openPackage(url, true);
 export const clearPackageCache = (url) => new CachedSource(new UrlSource(url)).clear();
 
-/** K + V (double buffered) of the layers that have a cache of their own; the head dim / KV heads can differ per layer type (Gemma 4) */
-const kvCacheMegabytes = (model, maxLength) => {
-    let bytes = 0;
-    for (let i = 0; i < model.num_layers; i++) {
-        if (model.kv_producer && model.kv_producer[i] >= 0) continue;
-        if (model.layer_types[i] === "linear_attention") continue;   // Gated DeltaNet layers carry a small state instead of a KV cache
-        const d = model.layer_dims?.[model.layer_types[i]];
-        bytes += 2 * 2 * (d?.num_kv_heads ?? model.num_kv_heads) * (maxLength - 1) * (d?.head_dim ?? model.head_dim) * 2;
+const kvCacheMegabytes = (model, plan, maxLength) => kvBytes(model, plan, maxLength) / 2 ** 20;   // the runtime's formula (src/runtime/memory.ts): K + V, f16, double buffered, the layers that own a cache
+
+/** Mark every max length option with the memory it is expected to need (data-memory: "~5.1 GB") and a tooltip with the breakdown. An estimate, not a measurement: the browser hides the real RAM. `vision`: the image tower is loaded. */
+export function annotateMaxLengths(select, pkg, vision) {
+    for (const option of select.options) {
+        const need = expectedMemory({ model: pkg.model, plan: pkg.plan, manifest: pkg.manifest, maxLength: +option.value, vision: !!vision && !!pkg.plan.vision });
+        option.dataset.memory = `~${formatBytes(need.totalBytes)}`;
+        option.title = `max length ${need.maxLength}: about ${formatBytes(need.totalBytes)} of memory in total\n`
+            + `device weights ${formatBytes(need.weightBytes)} + overhead x${WEIGHT_OVERHEAD} (an assumption: staging copies, compiled graphs) ${formatBytes(need.overheadBytes)} + KV cache ${formatBytes(need.kvBytes)}\n`
+            + "An estimate, not a measurement: the browser hides the real RAM, so pick what your machine can hold.";
     }
-    return bytes / 2 ** 20;
-};
+}
 
 /** Fill and lock the option selects of the page from what the package contains. `initial`: the session options of the URL. Returns { lock } to call whenever the page re-enables its controls. */
 export function setupPackageControls(pkg, c, initial = {}) {
@@ -38,7 +39,7 @@ export function setupPackageControls(pkg, c, initial = {}) {
     const lengths = plan.max_lengths.slice().sort((a, b) => a - b);
     const chunksOf = (length) => Object.keys(plan.graphs[defaultVariant.id].prefill[String(length)] ?? {}).map(Number).sort((a, b) => a - b);
     const replace = (select, entries, keep) => { select.innerHTML = ""; for (const [value, text] of entries) select.add(new Option(text, value)); if (keep !== undefined && [...select.options].some((o) => o.value === String(keep))) select.value = keep; };
-    replace(c.maxLengthSelect, lengths.map((l) => [l, `${l} tokens  (KV cache ${Math.round(kvCacheMegabytes(model, l))} MB)`]));
+    replace(c.maxLengthSelect, lengths.map((l) => [l, `${l} tokens  (KV cache ${Math.round(kvCacheMegabytes(model, plan, l))} MB)`]));
     const fillChunks = () => replace(c.chunkSizeSelect, chunksOf(+c.maxLengthSelect.value).map((s) => [s, `${s} tokens`]), c.chunkSizeSelect.value);
     fillChunks();
     const singleType = new Set(model.layer_types).size === 1 || plan.block_group_controls === "per_block";   // hybrid models: groups take a mask / RoPE table per block

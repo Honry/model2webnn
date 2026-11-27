@@ -30,9 +30,10 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=9";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache, annotateMaxLengths } from "./chat-package.js?v=10";
+import { looksLikeMemoryError, nextSmallerLength } from "../../lib/runtime/index.js";
 import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=5";
-import { chipGroup, formats } from "./chips.js?v=1";
+import { chipGroup, formats } from "./chips.js?v=2";
 import { createLoadProgress } from "./progress-ui.js?v=2";
 import { createOverlays, placePopover, createTooltips } from "./overlay.js?v=1";
 import { renderPipeline, updatePipelineSession } from "./pipeline.js?v=1";
@@ -986,7 +987,7 @@ async function run() {
     computeTypeSelect.value = computeType;
     kvStyleSelect.value = kvStyle; stagingRowsSelect.value = urlSessionOptions.stagingRows; blocksSelect.value = urlSessionOptions.blocksPerGraph;
     prefillBlocksSelect.value = urlSessionOptions.prefillBlocksPerGraph || 0; chunkSizesInput.value = urlSessionOptions.chunkSizes.join(",");
-    let packageControls = null, attachments = null, busy = false, packageInfo = "", packagePeek = null, packageChatFormat = false, attachmentsChanged = () => {};
+    let offerSmaller = () => {}, packageControls = null, attachments = null, busy = false, packageInfo = "", packagePeek = null, packageChatFormat = false, attachmentsChanged = () => {};
     // the image tower (a package that has one): loaded with the model, a picture attached to a message gets the grid preset the runtime chooses from its size and the Detail level; graphs of a preset are built on first use.
     // URL: visionGrids=24x24,16x24 (advanced: only these presets may be chosen)   vision=0 | visionGrids=none (load no image tower)   detail=auto|low|high   image=<url> (attached to the first message)   question=<text> (the message; with autoRun it is sent)   tab=vision (kept: autoRun then needs image=)
     const visionSetting = () => {   // true: every preset of the package | [[h, w], ...] the override | null: no image tower
@@ -1002,13 +1003,23 @@ async function run() {
             { kvStyle: query.get("kvStyle"), computeType: query.get("computeType") ?? query.get("dt"), stagingRows: query.get("stagingRows"), blocksPerGraph: query.get("blocksPerGraph") ?? query.get("bpg"), prefillBlocksPerGraph: query.get("prefillBlocksPerGraph") ?? query.get("pbpg"),
               chunkGiven: !!(query.get("prefillChunkSize") ?? query.get("chunk")), chunkSizes: urlSessionOptions.chunkSizes });
         const want = (select, value) => { if (value && [...select.options].some((option) => option.value === String(value))) select.value = value; };
-        want(maxLengthSelect, query.get("maxLength")); maxLengthSelect.dispatchEvent(new Event("change"));
+        // every max length chip shows the memory it is expected to need (an estimate); the default is what the plan recommends (plan.recommended.max_length), else the first length; the URL maxLength wins
+        annotateMaxLengths(maxLengthSelect, peek, peek.plan.vision && visionSetting() !== null);
+        want(maxLengthSelect, query.get("maxLength") ?? peek.plan.recommended?.max_length); maxLengthSelect.dispatchEvent(new Event("change"));
         if (query.get("maxLength") && maxLengthSelect.value !== query.get("maxLength")) {   // the package only has the lengths it was compiled with: say so instead of silently using another one
             const have = [...maxLengthSelect.options].map((option) => option.value).join(", ");
             byId("optionWarning").textContent = `maxLength=${query.get("maxLength")} is not in this package (it has ${have}): using ${maxLengthSelect.value}`;
             log("option_not_available", byId("optionWarning").textContent, { requested_max_length: +query.get("maxLength"), available_max_lengths: [...maxLengthSelect.options].map((option) => +option.value) });
         }
         want(chunkSizeSelect, query.get("prefillChunkSize") ?? query.get("chunk"));
+        const fitBox = byId("fitWarning");
+        offerSmaller = (error, length) => {   // a load that fails with a memory / size error: one click to the next smaller length
+            const smaller = nextSmallerLength([...maxLengthSelect.options].map((option) => +option.value), length);
+            if (!smaller || !looksLikeMemoryError(error)) return;
+            const button = document.createElement("button"); button.type = "button"; button.className = "btn"; button.textContent = `Try ${smaller}`;
+            fitBox.hidden = false; fitBox.replaceChildren(`Loading failed at max length ${length}: probably not enough memory. `, button);
+            button.onclick = () => { maxLengthSelect.value = String(smaller); maxLengthSelect.dispatchEvent(new Event("change")); loadModel(); };
+        };
         if (peek.plan.vision && visionSetting() !== null) {   // Qwen3.5 with an image tower: Attach image in the composer
             for (const element of document.querySelectorAll(".vision-only")) element.hidden = false;
             const override = visionSetting(), detail = ["low", "auto", "high"].includes(query.get("detail")) ? query.get("detail") : "auto";
@@ -1219,7 +1230,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             byId("loadedLabel").title = packageMode ? session.label : `max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
             byId("loadButton").querySelector(".lbl").textContent = "Apply"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
             setStatus("ready"); progressUi.done();
-        } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); }
+        } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); offerSmaller(error, +maxLengthSelect.value); }
         finally { setBusy(false); showSession(sessionSummary()); updateContext(); }
     };
 
@@ -1305,7 +1316,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             const full = showRunResult(result, session);
             bubble.setMeta(turnMeta(result, full), result.stopped ? "stopped" : full ? "full" : "");
         } catch (error) {
-            log("fatal", "Generation failed: " + error); setStatus("FAILED: " + error);
+            log("fatal", "Generation failed: " + error); setStatus("FAILED: " + error); offerSmaller(error, +maxLengthSelect.value);
             const failed = turn !== null; undo();
             conversation.addNotice(`Generation failed: ${error}${failed ? " (the message is back in the box)" : ""}`, { warn: true });
         } finally { activeBubble = null; bubble?.setProgress(null); setBusy(false); controller = null; updateContext(); conversation.scrollToEnd(); }
