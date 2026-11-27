@@ -7,7 +7,7 @@
 //      detail=low|auto|high   how much detail the automatic grid choice allows (auto: up to 24x24 = 144 image tokens; low 16x16 = 64; high 32x32 = 256)
 //      grids=24x24,16x24      restrict the presets a picture may get (default: every preset of the package); a single one forces it
 //      case=ocr-small         run one case (or a comma separated list)      repeat=2   run the list N times (first-use graph builds only count once)
-//      maxNewTokens=24  maxLength=1152  chunk=64  suite=vision-suite/  cache=0 (no OPFS cache of the weights)
+//      maxNewTokens=24  maxLength=1024  chunk=64  suite=vision-suite/  cache=0 (no OPFS cache of the weights)
 import { loadModel, buildPrompt, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
 
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";

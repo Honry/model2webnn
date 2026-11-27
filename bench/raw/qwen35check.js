@@ -1,7 +1,7 @@
 // Runs a Qwen3.5 package on the device for the prompt of a reference trace (python tools/qwen35_trace.py -> bench/data/qwen35-trace/) and compares the hidden state entering every layer, after the
 // last prefill chunk and after the first decode step, with the numpy interpreter's: where does the device first deviate?  (f16 graphs are checked HERE: the NPU's compiler returned silently wrong
 // results for some operator patterns, see bench/raw/gdn.html.)
-// URL: qwen35check.html?package=../packages/qwen35-4b-pkg/&trace=../data/qwen35-trace/&device=npu&maxLength=1152&computeType=float32&threshold=0.05&chunk=64&stepwise=1&bpg=1
+// URL: qwen35check.html?package=../packages/qwen35-4b-pkg/&trace=../data/qwen35-trace/&device=npu&maxLength=1024&computeType=float32&threshold=0.05&chunk=64&stepwise=1&bpg=1
 //      (bpg: decode blocks per graph, default 1: the per-layer comparison needs the hidden state of every layer; chunk: the prefill chunk size to run, any size of the package: the prompt is one chunk of any of them; stepwise=0: queue everything like the real runtime)
 import { Qwen35LLM } from "../../lib/runtime/index.js";
 
@@ -29,7 +29,7 @@ async function main() {
     const reference = (entry) => new Float16Array(blob, entry.offset, entry.bytes / 2);
     log(`prompt ${trace.tokens.length} tokens, plan ${trace.plan}, decode token ${trace.decode_token}; reference variant ${trace.variant}`);
     Qwen35LLM.debugReadback = true;
-    const options = { device: param("device", "npu"), maxLength: +param("maxLength", 1152), chunkSize: +param("chunk", trace.chunk), computeType: param("computeType", "float32"), blocksPerGraph: +param("bpg", 1), cache: param("cache", "1") !== "0",
+    const options = { device: param("device", "npu"), maxLength: +param("maxLength", 1024), chunkSize: +param("chunk", trace.chunk), computeType: param("computeType", "float32"), blocksPerGraph: +param("bpg", 1), cache: param("cache", "1") !== "0",
         onProgress: (p) => { if (p.stage === "build" || p.stage === "ready") log(`${p.stage} ${p.message ?? ""}`); } };
     const llm = await Qwen35LLM.load(packageUrl, options);
     log(`loaded: variant ${llm.variant.id}, graphs built in ${(llm.stats.buildMs / 1000).toFixed(1)} s`);

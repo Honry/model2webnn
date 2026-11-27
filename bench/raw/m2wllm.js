@@ -1,5 +1,5 @@
 // Browser test page for the model2webnn runtime (src/runtime, built to lib/runtime by `npm run build:lib`): loads a package written by `m2w compile`, checks it against the tokens the
-// Python reference produced (verification.json), and chats. URL parameters pre-fill the form: ?package=..&device=npu&maxLength=1152&chunk=64&bpg=1&variant=onehot-float32&pbpg=1&auto=check|chat
+// Python reference produced (verification.json), and chats. URL parameters pre-fill the form: ?package=..&device=npu&maxLength=1024&chunk=64&bpg=1&variant=onehot-float32&pbpg=1&auto=check|chat
 // (chunk may list several sizes: 64,128; empty variant / chunk = what verification.json was made with, else the package defaults)
 import { loadModel, UrlSource, CachedSource, openPackage, chat, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
 

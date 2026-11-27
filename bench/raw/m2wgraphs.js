@@ -1,5 +1,5 @@
 // Times every graph of a package ON ITS OWN (random inputs, N back-to-back dispatches of the same tensors, one readback): which graph of a model is slow?
-// URL: m2wgraphs.html?package=../packages/aion-2.3b-i8/&device=npu&maxLength=1152&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
+// URL: m2wgraphs.html?package=../packages/aion-2.3b-i8/&device=npu&maxLength=1024&chunk=64&chain=20&variant=onehot-float32   (variant: default = the package's default variant)
 //      m2wgraphs.html?package=../packages/gemma4-e4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Gemma 4: one block graph per attention kind, and the sum over the layers = an estimate of a decode step)
 //      m2wgraphs.html?package=../packages/qwen35-4b-pkg/&chunk=64&only=prefill_head&inputs=zero_state,pad,hidden_pad   (inputs of a real prompt instead of constant data: found a crash that constant data does not show)
 //      m2wgraphs.html?package=../packages/qwen35-4b-pkg/&only=decode_head,decode_block,decode_tail,lm_head   (Qwen3.5: linear_attention / full_attention blocks; chunk=128&only=prefill_block for the prefill)

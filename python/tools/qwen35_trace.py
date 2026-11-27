@@ -1,7 +1,7 @@
 """Write the reference trace of a Qwen3.5 package for the on-device layer-by-layer comparison (bench/raw/qwen35check.html): the hidden state entering every layer in the LAST prefill chunk and in
 the first decode step, the final hidden state and the logits, computed by the numpy interpreter on the compiled graphs (the executable specification of the runtime).
 
-  python tools/qwen35_trace.py <package> --out ../bench/data/qwen35-trace [--prompt "..."] [--tokens 1,2,3] [--chunk 64] [--max-length 1152] [--variant staged-r64-float32]
+  python tools/qwen35_trace.py <package> --out ../bench/data/qwen35-trace [--prompt "..."] [--tokens 1,2,3] [--chunk 64] [--max-length 1024] [--variant staged-r64-float32]
 """
 import argparse
 import datetime
