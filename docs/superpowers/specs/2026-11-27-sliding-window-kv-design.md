@@ -18,7 +18,7 @@ from that. Nothing inside the graphs changes except the length of the cache inpu
 * prefill chunk of `valid <= C` rows: a layer with K / V of its own attends `concat(ring before the chunk, chunk rows)`: the first row needs `W - 1` cached rows. The chunk is written into
   the ring by the one-hot selectors (`C <= ring`: no two rows of a chunk share a slot).
 * a layer that SHARES K / V (Gemma 4) attends the producer's cache AFTER the chunk update (mask columns = slots), which must still hold `[q - W + 1, q]` of the first row of the chunk:
-  `ring >= W - 1 + valid`. That is the `slack = Cmax` term (only when a sliding layer reads another layer's cache; Aion has no sharing, so `slack = 0`).
+  `ring >= W - 1 + valid`. That is the `slack = Cmax` term (only when a sliding layer reads another layer's cache; Aion has no sharing, so `slack = 0`). Only the last row of the prompt reaches the logits, so a smaller ring would still give the same logits (the shared layers are the last ones and write no K / V); the slack keeps the mask of EVERY row what the specification says instead of relying on that.
 * `Cmax` = largest prefill chunk of the package, `Rmax` = largest staging row count of its variants: one ring size per package, whatever chunk / variant the session picks.
 
 ## Host side (protocol.py / protocol.ts, `ring` argument, 0 = the old behaviour)
