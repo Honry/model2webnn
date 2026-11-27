@@ -4,6 +4,8 @@
 Per layer i the attention half has the kind `spec.layer_kind(i)` and the BLOCK graph that runs it is the one of the kind of layer i + 1 (BLOCK i = feed-forward half of layer i +
 attention half of layer i + 1); HEAD is the attention half of layer 0 plus the per-layer-embedding prologue (it outputs ple_0 .. ple_{N-1}). A layer that shares K / V reads the cache
 of its producer layer: in a decode step the main cache and the staging buffer AFTER this step's update, in a prefill chunk the cache after the update of the chunk (mask columns = cache rows).
+Sliding window caches (opt.sliding_cache = "window"): the caches of the sliding layers are rings of opt.sliding_ring rows (protocol.cache_rows); the masks and the selectors of a prefill chunk / flush
+are built for the rows of the cache of the layer type (the graphs already differ per kind, only their cache length changes).
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ class Gemma4Runner:
         self.group = blocks_per_graph   # decode block groups (the prefill chain always runs one dispatch per block)
         self.opt = opt or D.GraphOptions(kv_style="staged", staging_rows=staging_rows)
         self.R, self.P = self.opt.staging_rows, max_length - 1
+        self.ring = self.opt.sliding_ring if self.opt.sliding_cache == "window" else 0   # rows of the ring of the sliding layers (0: they hold all P rows)
         self.sizes = sorted(set(chunk_sizes))
         self.fixed_tokens = prefill_fixed_tokens
         self.reader = Gemma4PackageReader(spec, weights_dir)
@@ -47,7 +50,7 @@ class Gemma4Runner:
     # ----------------------------------------------------------------------------------------------- graphs
     def _build_graphs(self) -> dict:
         s, opt, P = self.spec, self.opt, self.P
-        flush = {t: G.build_flush_graph(s, t, staging_rows=self.R, past_len=P) for t in sorted(set(s.layer_types))}
+        flush = {t: G.build_flush_graph(s, t, staging_rows=self.R, past_len=P, opt=opt) for t in sorted(set(s.layer_types))}
         decode = {"head": G.build_head_graph(s, opt, seq=1, past_len=P), "blocks": {k: G.build_block_graph(s, opt, k, seq=1, past_len=P) for k in sorted(set(s.layer_kind(i) for i in range(s.num_layers)))},
                   "tail": G.build_tail_graph(s, opt, seq=1), "flush": flush}
         if self.group > 1:
@@ -114,11 +117,15 @@ class Gemma4Runner:
         s = self.spec
         zeros = lambda i, rows: np.zeros((1, s.decoder_dims(s.layer_types[i]).num_kv_heads, rows, s.decoder_dims(s.layer_types[i]).head_dim), np.float16)  # noqa: E731
         own = [i for i in range(s.num_layers) if self.producer[i] == i]
-        self.k = {i: zeros(i, self.P) for i in own}
-        self.v = {i: zeros(i, self.P) for i in own}
+        self.k = {i: zeros(i, self.rows_of(i)) for i in own}
+        self.v = {i: zeros(i, self.rows_of(i)) for i in own}
         self.sk = {i: zeros(i, self.R) for i in own}
         self.sv = {i: zeros(i, self.R) for i in own}
         self.base = self.filled = self.position = 0
+
+    def rows_of(self, layer: int) -> int:
+        """Rows of the K / V cache of a layer (a shared layer: of its producer's, which is of the same type)."""
+        return protocol.cache_rows(self.types[layer], self.P, self.ring)
 
     @property
     def cache_full(self) -> bool:
@@ -127,13 +134,14 @@ class Gemma4Runner:
     # ----------------------------------------------------------------------------------------------- one forward pass
     def _chain(self, graphs: dict, decode: bool, hidden, ple_token, rope, masks, selectors, last: bool):
         s, N = self.spec, self.spec.num_layers
+        per_type = not decode   # the prefill selectors exist per layer type: selectors = {type: {name: array}} (a ring layer and a full layer write different numbers of rows)
 
         def feeds_for(layer: int) -> dict:
             kind, t = self.kinds[layer], self.types[layer]
             cos, sin = rope[t]
             mode = "shared" if G.kind_shared(kind) else "own"
             p = self.producer[layer]
-            feeds = {"rope_cos": cos, "rope_sin": sin, "attention_mask": masks[(t, mode)], "past_key": self.k[p], "past_value": self.v[p], **selectors,
+            feeds = {"rope_cos": cos, "rope_sin": sin, "attention_mask": masks[(t, mode)], "past_key": self.k[p], "past_value": self.v[p], **(selectors[t] if per_type else selectors),
                      **self._weights(layer, self.attention_names[kind])}
             if decode:
                 feeds.update(staging_key=self.sk[p], staging_value=self.sv[p])
@@ -224,17 +232,22 @@ class Gemma4Runner:
                 hidden[0, pad + i] = self._embed(tokens[start + i])
                 ple_token[0, pad + i] = self._ple_row(tokens[start + i])
             rope = protocol.rope_tables(s, list(range(start, start + valid)), C, pad)
-            own, shared = protocol.prefill_masks(s, P, C, start, valid), protocol.incache_prefill_masks(s, P, C, start, valid)
+            own, shared = protocol.prefill_masks(s, P, C, start, valid, self.ring), protocol.incache_prefill_masks(s, P, C, start, valid, self.ring)
             masks = {**{(t, "own"): m for t, m in own.items()}, **{(t, "shared"): m for t, m in shared.items()}}
-            keep, selector = protocol.prefill_selectors(P, C, start, valid)
-            logits = self._chain(self.g["prefill"][C], False, hidden, ple_token, rope, masks, {"rows_to_keep": keep, "row_selector": selector}, index == len(plan) - 1)
+            selectors = {}
+            for t in s.mask_types():
+                rows = protocol.cache_rows(t, P, self.ring)
+                keep, selector = protocol.prefill_selectors(rows, C, start, valid, wrap=rows < P)
+                selectors[t] = {"rows_to_keep": keep, "row_selector": selector}
+            logits = self._chain(self.g["prefill"][C], False, hidden, ple_token, rope, masks, selectors, index == len(plan) - 1)
             start += valid
         self.base, self.filled, self.position = n, 0, n
         return logits
 
     def _flush(self) -> None:
-        keep, selector = protocol.flush_selectors(self.P, self.R, self.base)
         for i in self.k:
+            rows = self.rows_of(i)
+            keep, selector = protocol.flush_selectors(rows, self.R, self.base, wrap=rows < self.P)
             out = run(self.g["decode"]["flush"][self.types[i]], {"past_key": self.k[i], "past_value": self.v[i], "new_key": self.sk[i], "new_value": self.sv[i],
                                                                   "rows_to_keep": keep, "row_selector": selector})
             self.k[i], self.v[i] = out["updated_key"], out["updated_value"]
@@ -249,7 +262,7 @@ class Gemma4Runner:
             self._flush()
         pos = self.position
         rope = protocol.rope_tables(s, [pos], 1, 0)
-        decode_masks = protocol.decode_masks(s, P, R, pos, self.base, self.filled)
+        decode_masks = protocol.decode_masks(s, P, R, pos, self.base, self.filled, self.ring)
         masks = {**{(t, "own"): m for t, m in decode_masks.items()}, **{(t, "shared"): m for t, m in decode_masks.items()}}
         keep, selector = protocol.decode_selectors(R, self.filled)
         logits = self._chain(self.g["decode"], True, self._embed(token).reshape(1, 1, -1), self._ple_row(token).reshape(1, 1, -1), rope, masks,

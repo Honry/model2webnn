@@ -6,6 +6,9 @@ Layer types: the BLOCK graph for layer i also holds the attention half of layer 
 of layer i+1 (HEAD: layer 0). A sliding-attention layer differs from a full one only in that mask (and its RoPE table): the graph is the same.
 
 Two ways to get the graphs: built from GraphOptions (unit tests), or read from a package (`PackageRunner.from_package`: the files `m2w compile` wrote, the ones the browser loads).
+
+Sliding window caches (opt.sliding_cache = "window", staged protocol): the sliding layers hold a ring of opt.sliding_ring rows (protocol.cache_rows), so the BLOCK / flush graphs exist per layer
+TYPE (graphs["decode"]["blocks"] / ["flush"]: type -> graph, prefill: ["blocks"]) and the decode block groups per (first block, blocks); masks and selectors are built per layer type.
 """
 from __future__ import annotations
 
@@ -36,6 +39,10 @@ class PackageRunner:
         self.fixed_tokens = prefill_fixed_tokens
         self.decode_group, self.prefill_group = decode_group, prefill_group
         self.per_block = len(set(spec.layer_types)) > 1 if per_block_controls is None else per_block_controls   # block groups: rope / mask per block (hybrid models)
+        self.windowed = self.opt.sliding_cache == "window"   # sliding layers hold a ring of `ring` rows
+        self.ring = self.opt.sliding_ring if self.windowed else 0
+        if self.windowed and (self.style != "staged" or prefill_group > 1):
+            raise ValueError("sliding window caches need the staged KV protocol and no prefill block groups")
         if self.P < min(self.sizes):
             raise ValueError("max_length is smaller than the prefill chunk")
         manifest = json.loads((self.dir / "manifest.json").read_text())
@@ -49,7 +56,30 @@ class PackageRunner:
         self.reset()
 
     # -------------------------------------------------------------------------------------------------- graphs
+    def rows_of(self, layer: int) -> int:
+        """Rows of the K / V cache of a layer."""
+        return protocol.cache_rows(self.spec.layer_types[layer], self.P, self.ring)
+
+    def _build_windowed_graphs(self, dims) -> dict:
+        opt, P, n, types = self.opt, self.P, self.spec.num_layers, self.spec.layer_types
+        rows = lambda t: D.cache_rows(opt, t, P)   # noqa: E731
+        blocks = lambda seq: {t: D.build_block_graph(dims, opt, seq=seq, past_len=rows(t)) for t in sorted(set(types[1:]))}   # noqa: E731
+        groups = {}
+        if self.decode_group > 1:
+            for first in range(0, n - 1, self.decode_group):
+                count = min(self.decode_group, n - 1 - first)
+                lens = [rows(types[first + j + 1]) for j in range(count)]
+                groups[(first, count)] = D.build_block_group_graph(dims, opt, block_count=count, seq=1, past_len=P, past_lens=lens, per_block_controls=True)
+        g = {"decode": {"head": D.build_head_graph(dims, opt, seq=1, past_len=rows(types[0])), "blocks": blocks(1), "tail": D.build_tail_graph(dims, opt, seq=1), "groups": groups,
+                        "flush": {t: D.build_kv_update_graph(dims, seq=self.R, past_len=rows(t)) for t in sorted(set(types))}},
+             "prefill": {}, "lm_head": D.build_lm_head_graph(dims, opt)}
+        for C in self.sizes:
+            g["prefill"][C] = {"head": D.build_head_graph(dims, opt, seq=C, past_len=rows(types[0])), "blocks": blocks(C), "tail": D.build_tail_graph(dims, opt, seq=C)}
+        return g
+
     def _build_graphs(self, dims) -> dict:
+        if self.windowed:
+            return self._build_windowed_graphs(dims)
         opt, P, n = self.opt, self.P, self.spec.num_layers
         counts = lambda k: sorted({k, (n - 1) % k} - {0})   # noqa: E731
         g = {"decode": {"head": D.build_head_graph(dims, opt, seq=1, past_len=P), "block": D.build_block_graph(dims, opt, seq=1, past_len=P),
@@ -78,15 +108,26 @@ class PackageRunner:
         sizes = sorted(chunk_sizes or [min(int(c) for c in table["prefill"][str(L)])])
         load = lambda path: serialize.load(package / path)   # noqa: E731
         decode_files = table["decode"][str(L)]
-        decode = {"head": load(decode_files["head"]), "block": load(decode_files["block"]), "tail": load(decode_files["tail"]),
-                  "groups": {int(c): load(path) for c, path in decode_files.get("block_groups", {}).items()} if decode_group > 1 else {}}
-        if decode_files.get("flush"):
-            decode["flush"] = load(decode_files["flush"])
+        windowed = plan["profile"].get("sliding_cache") == "window"
+        loaded: dict = {}
+        load_once = lambda path: loaded.setdefault(path, load(path))   # noqa: E731  (types with the same cache rows share a graph file)
+        if windowed:   # per layer type: blocks / flush; the groups are a schedule of [first_block, blocks, graph]
+            decode = {"head": load(decode_files["head"]), "blocks": {t: load_once(p) for t, p in decode_files["blocks"].items()}, "tail": load(decode_files["tail"]),
+                      "flush": {t: load_once(p) for t, p in decode_files["flush"].items()},
+                      "groups": {(e["first_block"], e["blocks"]): load_once(e["graph"]) for e in decode_files["block_groups"][str(decode_group)]} if decode_group > 1 else {}}
+        else:
+            decode = {"head": load(decode_files["head"]), "block": load(decode_files["block"]), "tail": load(decode_files["tail"]),
+                      "groups": {int(c): load(path) for c, path in decode_files.get("block_groups", {}).items()} if decode_group > 1 else {}}
+            if decode_files.get("flush"):
+                decode["flush"] = load(decode_files["flush"])
         prefill = {}
         for C in sizes:
             files = table["prefill"][str(L)][str(C)]
-            prefill[C] = {"head": load(files["head"]), "block": load(files["block"]), "tail": load(files["tail"]),
-                          "groups": {int(c): load(path) for c, path in files.get("block_groups", {}).items()} if prefill_group > 1 else {}}
+            if windowed:
+                prefill[C] = {"head": load(files["head"]), "blocks": {t: load_once(p) for t, p in files["blocks"].items()}, "tail": load(files["tail"])}
+            else:
+                prefill[C] = {"head": load(files["head"]), "block": load(files["block"]), "tail": load(files["tail"]),
+                              "groups": {int(c): load(path) for c, path in files.get("block_groups", {}).items()} if prefill_group > 1 else {}}
         opt = D.GraphOptions(**{**plan["profile"], "compute_type": info["compute_type"], "kv_style": info["kv_style"], "staging_rows": info.get("staging_rows", 64),
                                        "scatter_index_type": info.get("scatter_index_type", "int32"),
                                        "value_layout": info.get("value_layout", "natural")})
@@ -115,9 +156,9 @@ class PackageRunner:
     def reset(self) -> None:
         s = self.spec
         zeros = lambda rows: np.zeros((1, s.num_kv_heads, rows, s.head_dim), np.float16)  # noqa: E731
-        self.k = [zeros(self.P) for _ in range(s.num_layers)]
+        self.k = [zeros(self.rows_of(i)) for i in range(s.num_layers)]
         transposed = self.opt.value_layout == "transposed"
-        self.v = [np.zeros((1, s.num_kv_heads, s.head_dim, self.P) if transposed else (1, s.num_kv_heads, self.P, s.head_dim), np.float16) for _ in range(s.num_layers)]
+        self.v = [np.zeros((1, s.num_kv_heads, s.head_dim, self.P) if transposed else (1, s.num_kv_heads, self.rows_of(i), s.head_dim), np.float16) for i in range(s.num_layers)]
         self.sk = [zeros(self.R) for _ in range(s.num_layers)]
         self.sv = [zeros(self.R) for _ in range(s.num_layers)]
         self.base = self.filled = self.pad = self.position = 0
@@ -137,8 +178,10 @@ class PackageRunner:
             cos, sin = rope[types[layer]]
             return {prefix + "rope_cos": cos, prefix + "rope_sin": sin, prefix + "attention_mask": masks[types[layer]]}
 
+        per_type = self.windowed and not decode   # the prefill selectors of a window package exist per layer type (ring rows / full rows): selectors = {type: {name: array}}
+
         def shared(layer):
-            return {**controls(layer), **selectors}
+            return {**controls(layer), **(selectors[types[layer]] if per_type else selectors)}
 
         def cache_feeds(layer, prefix=""):
             feeds = {prefix + "past_key": self.k[layer], prefix + "past_value": self.v[layer]}
@@ -152,6 +195,7 @@ class PackageRunner:
             else:
                 self.k[layer], self.v[layer] = out[prefix + "updated_key"], out[prefix + "updated_value"]
 
+        block_of = (lambda layer: graphs["blocks"][types[layer]]) if self.windowed else (lambda layer: graphs["block"])   # the graph of the attention half of `layer`
         out = run(graphs["head"], {"hidden_states": hidden, **shared(0), **cache_feeds(0), **self._layer_weights(0, self.attention_names)})
         store(0, out)
         residual, attention = out["residual"], out["attention_output"]
@@ -159,7 +203,7 @@ class PackageRunner:
         while layer < s.num_layers - 1:
             count = min(group, s.num_layers - 1 - layer) if group > 1 else 1
             if count == 1:
-                out = run(graphs["block"], {"residual": residual, "attention_output": attention, **shared(layer + 1), **cache_feeds(layer + 1),
+                out = run(block_of(layer + 1), {"residual": residual, "attention_output": attention, **shared(layer + 1), **cache_feeds(layer + 1),
                                             **self._layer_weights(layer + 1, self.attention_names), **self._layer_weights(layer, self.ffn_names)})
                 store(layer + 1, out)
             else:
@@ -171,7 +215,7 @@ class PackageRunner:
                     feeds.update(self._layer_weights(layer + j, self.ffn_names, prefix))
                     feeds.update(self._layer_weights(layer + j + 1, self.attention_names, prefix))
                     feeds.update(cache_feeds(layer + j + 1, prefix))
-                out = run(graphs["groups"][count], feeds)
+                out = run(graphs["groups"][(layer, count)] if self.windowed else graphs["groups"][count], feeds)
                 for j in range(count):
                     store(layer + j + 1, out, f"b{j}_")
             residual, attention = out["next_residual"], out["next_attention_output"]
@@ -222,9 +266,14 @@ class PackageRunner:
                     masks = protocol.scatternd_prefill_masks(s, P, C, start, valid)
                     selectors = {"kv_indices": protocol.scatternd_prefill_indices(s.num_kv_heads, P, C, start, valid)}
                 else:
-                    masks = protocol.prefill_masks(s, P, C, start, valid)
-                    keep, selector = protocol.prefill_selectors(P, C, start, valid)
-                    selectors = {"rows_to_keep": keep, "row_selector": selector}
+                    masks = protocol.prefill_masks(s, P, C, start, valid, self.ring)
+                    selectors = {}
+                    for t in s.mask_types():   # one pair per layer type (a ring layer writes slot (start + i) mod ring)
+                        rows = protocol.cache_rows(t, P, self.ring)
+                        keep, selector = protocol.prefill_selectors(rows, C, start, valid, wrap=rows < P)
+                        selectors[t] = {"rows_to_keep": keep, "row_selector": selector}
+                    if not self.windowed:
+                        selectors = selectors[s.mask_types()[0]]
                 start += valid
             logits = self._chain(self.g["prefill"][C], False, hidden, rope, masks, selectors, last, self.prefill_group)
         self.base, self.filled, self.pad = n, 0, pad_total   # staged: the prompt is in the main cache, the staging buffer is empty
@@ -235,8 +284,12 @@ class PackageRunner:
     def _flush(self) -> None:
         keep, selector = protocol.flush_selectors(self.P, self.R, self.base)
         for layer in range(self.spec.num_layers):
-            out = run(self.g["decode"]["flush"], {"past_key": self.k[layer], "past_value": self.v[layer], "new_key": self.sk[layer], "new_value": self.sv[layer],
-                                                  "rows_to_keep": keep, "row_selector": selector})
+            graph = self.g["decode"]["flush"]
+            if self.windowed:
+                graph, rows = graph[self.spec.layer_types[layer]], self.rows_of(layer)
+                keep, selector = protocol.flush_selectors(rows, self.R, self.base, wrap=rows < self.P)
+            out = run(graph, {"past_key": self.k[layer], "past_value": self.v[layer], "new_key": self.sk[layer], "new_value": self.sv[layer],
+                              "rows_to_keep": keep, "row_selector": selector})
             self.k[layer], self.v[layer] = out["updated_key"], out["updated_value"]
         self.base += self.R
         self.filled = 0
@@ -252,7 +305,7 @@ class PackageRunner:
         if self.style == "staged":
             if self.filled == R:
                 self._flush()
-            masks = protocol.decode_masks(s, P, R, pos, self.base, self.filled)
+            masks = protocol.decode_masks(s, P, R, pos, self.base, self.filled, self.ring)
             keep, selector = protocol.decode_selectors(R, self.filled)
             selectors = {"staging_rows_to_keep": keep, "staging_row_selector": selector}
         elif self.style == "onehot":

@@ -16,7 +16,7 @@ def cmd_compile(args) -> int:
 
     out = compile_model(args.model, args.out, max_lengths=args.max_length, chunks=args.chunk, kv_styles=args.kv_style, staging_rows=args.staging_rows,
                         compute_types=args.compute_type, blocks_per_graph=args.blocks_per_graph, prefill_blocks_per_graph=args.prefill_blocks_per_graph,
-                        merge_projections=not args.no_merge, lm_head_format=args.lm_head_format, search=not args.no_search, workers=args.workers,
+                        merge_projections=not args.no_merge, lm_head_format=args.lm_head_format, search=not args.no_search, workers=args.workers, sliding_cache=args.sliding_cache,
                         endpoint=args.endpoint, cache_dir=args.cache_dir, vision=not args.no_vision, vision_weights=args.vision_weights,
                         vision_grids=[parse_grid(g) for g in args.vision_grids] if args.vision_grids else None, vision_compute_type=args.vision_compute_type)
     print(f"\nNext: m2w verify {out} --source {args.model}")
@@ -35,7 +35,7 @@ def cmd_rebuild_graphs(args) -> int:
     from .compile import rebuild_graphs
 
     rebuild_graphs(args.package, max_lengths=args.max_length, chunks=args.chunk, kv_styles=args.kv_style, staging_rows=args.staging_rows, compute_types=args.compute_type,
-                   blocks_per_graph=args.blocks_per_graph, prefill_blocks_per_graph=args.prefill_blocks_per_graph)
+                   blocks_per_graph=args.blocks_per_graph, prefill_blocks_per_graph=args.prefill_blocks_per_graph, sliding_cache=args.sliding_cache)
     return 0
 
 
@@ -79,7 +79,7 @@ def cmd_inspect(args) -> int:
     print(f"  rope {json.dumps(spec.rope)}")
     print(f"  eos {spec.eos_token_ids}  max_position_embeddings {spec.max_position_embeddings}")
     print(f"  estimated package: ~{weights / 2**20:.0f} MB of weights (int4 g{spec.group_size} + u8 embedding), {spec.num_layers + 4} weight files")
-    print(f"  compile with:  m2w compile {args.model} --out <dir> --max-length 1152")
+    print(f"  compile with:  m2w compile {args.model} --out <dir> --max-length 1024")
     return 0
 
 
@@ -123,9 +123,13 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="m2w", description="Compile Hugging Face LLMs into static-shape WebNN graphs + weights")
     sub = p.add_subparsers(dest="command", required=True)
 
+    def sliding_cache_arg(sp, default):
+        sp.add_argument("--sliding-cache", choices=["full", "window"], default=default, help="K / V cache of the sliding-attention layers: full = max_length - 1 rows like every layer (default), window = a ring of "
+                        "window + chunk rows (staged protocol only; much less memory at long max lengths; docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md)" + ("" if default else "; default: the package's"))
+
     def graph_options(sp, defaults=True):
         """The graph variants of a package: kv style x staging rows (staged only) x compute type; the first of each list is the default. Weights are shared by all variants."""
-        sp.add_argument("--max-length", type=int, nargs="+", default=[1152] if defaults else None, help="KV cache capacities to build graphs for (static shapes)")
+        sp.add_argument("--max-length", type=int, nargs="+", default=[1024] if defaults else None, help="KV cache capacities to build graphs for (static shapes)")
         sp.add_argument("--chunk", type=int, nargs="+", default=[64] if defaults else None, help="prefill chunk sizes (several: the runtime plans the chunk sequence of a prompt)")
         sp.add_argument("--kv-style", nargs="+", choices=["staged", "onehot", "tensorScatter", "scatterND"], default=["staged"], help="KV cache protocols (see plan.json kv_protocols)")
         sp.add_argument("--staging-rows", type=int, nargs="+", default=[64], help="rows of the staging buffer (staged only)")
@@ -133,6 +137,7 @@ def main(argv=None) -> int:
         sp.add_argument("--blocks-per-graph", type=int, nargs="+", default=None, help="also build decode graphs with K blocks each (fewer dispatches, longer compile; Gemma 4 too: groups are cut per sequence of "
                         "attention kinds); default: the single blocks and the recommended K of the model family (rebuild-graphs: the groups the package has)")
         sp.add_argument("--prefill-blocks-per-graph", type=int, nargs="+", default=[1], help="the same for the prefill graphs (not for Gemma 4)")
+        sliding_cache_arg(sp, "full" if defaults else None)
 
     def vision_args(sp):
         sp.add_argument("--vision-weights", choices=["int8", "int8g128", "int4", "float16"], default="int8g128", help="Qwen3.5 image tower: linear weights int8 with a scale per 128 input channels (int8g128, default: the best size / quality trade-off), int8 per row symmetric (least accurate of the int8 variants), int4 group 128 (smallest, but its image tokens are clearly off the original tower: check your pictures first) or float16")
@@ -201,7 +206,7 @@ def main(argv=None) -> int:
     g = sub.add_parser("graphs", help="write the subgraphs of a preset as graph JSON (spike)")
     g.add_argument("--preset", choices=sorted(PRESETS), default="qwen3-4b")
     g.add_argument("--out", required=True)
-    g.add_argument("--max-length", type=int, default=1152)
+    g.add_argument("--max-length", type=int, default=1024)
     g.add_argument("--chunk", type=int, default=64)
     g.add_argument("--staging-rows", type=int, default=64)
     g.add_argument("--kv-style", choices=["staged", "onehot", "tensorScatter", "scatterND"], default="staged")

@@ -14,7 +14,9 @@
       "description": "the GraphOptions the weights and all variants share (what differs between variants is in `variants`)",
       "properties": {
         "zero_point": { "enum": ["const", "none"] }, "merge_projections": { "type": "boolean" },
-        "lm_head_format": { "enum": ["int8-sym", "uint8-asym"], "description": "absent in older packages = uint8-asym" }
+        "lm_head_format": { "enum": ["int8-sym", "uint8-asym"], "description": "absent in older packages = uint8-asym" },
+        "sliding_cache": { "enum": ["full", "window"], "description": "K / V cache of the sliding-attention layers; absent = full (every layer holds max_length - 1 rows). window: the sliding layers hold a ring of min(max_length - 1, sliding_ring) rows, position p in slot p mod ring (staged variants only; see kv_protocols.sliding_window_cache)" },
+        "sliding_ring": { "type": "integer", "description": "window packages: rows of the ring of a sliding layer (a multiple of 64 >= window - 1, the largest prefill chunk and staging row count; + the chunk for models whose sliding layers share K / V)" }
       }
     },
     "variants": {
@@ -68,7 +70,8 @@
             "additionalProperties": {
               "type": "object", "required": ["head", "tail"],
               "properties": {
-                "head": { "type": "string" }, "block": { "type": "string" }, "blocks": { "type": "object", "description": "hybrid models: attention kind -> block graph (instead of `block`)", "additionalProperties": { "type": "string" } }, "tail": { "type": "string" }, "flush": { "type": "string" },
+                "head": { "type": "string" }, "block": { "type": "string" }, "blocks": { "type": "object", "description": "hybrid models: attention kind -> block graph (instead of `block`); window packages: layer type -> block graph", "additionalProperties": { "type": "string" } }, "tail": { "type": "string" },
+                "flush": { "oneOf": [{ "type": "string" }, { "type": "object", "description": "Gemma 4 and window packages: layer type -> flush graph (the caches of the types have different head dims / rows)", "additionalProperties": { "type": "string" } }] },
                 "block_groups": {
                   "type": "object",
                   "description": "number of blocks -> graph with that many blocks (hybrid-layer models: b<j>_ controls per block when block_group_controls = per_block); Gemma 4 (decode only): number of blocks per graph -> the schedule of the N - 1 blocks (see chain.block_groups)",
@@ -76,7 +79,7 @@
                     "oneOf": [
                       { "type": "string" },
                       { "type": "array", "items": { "type": "object", "required": ["first_block", "blocks", "key", "graph"],
-                                                     "properties": { "first_block": { "type": "integer" }, "blocks": { "type": "integer" }, "key": { "type": "string", "description": "the kinds of the blocks joined by '-' (so / fo / ss / fs)" }, "graph": { "type": "string" } } } }
+                                                     "properties": { "first_block": { "type": "integer" }, "blocks": { "type": "integer" }, "key": { "type": "string", "description": "the kinds of the blocks joined by '-' (so / fo / ss / fs; window packages of Qwen3-like models: the layer types s / f)" }, "graph": { "type": "string" } } } }
                     ]
                   }
                 }

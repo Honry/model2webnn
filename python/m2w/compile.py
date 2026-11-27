@@ -68,6 +68,94 @@ def expand_variants(kv_styles, staging_rows, compute_types) -> list:
     return variants
 
 
+SLIDING_CACHES = ("full", "window")
+
+
+def resolve_sliding_cache(spec: arch.ModelSpec, opt: D.GraphOptions, variants, chunks, prefill_blocks_per_graph=(1,)) -> D.GraphOptions:
+    """opt with the ring size of a sliding_cache = "window" package filled in (see docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md); "full": opt without a ring.
+    Window caches need sliding layers with a window, the staged KV protocol and no prefill block groups (the main-cache selectors of the prefill graphs are shared by name)."""
+    if opt.sliding_cache not in SLIDING_CACHES:
+        raise ValueError(f"unknown sliding cache '{opt.sliding_cache}' ({' | '.join(SLIDING_CACHES)})")
+    if opt.sliding_cache == "full":
+        return D.with_options(opt, sliding_ring=0)
+    if not spec.sliding_window or "sliding_attention" not in spec.layer_types:
+        raise ValueError(f"sliding cache 'window': {spec.architecture} has no sliding-attention layers with a window")
+    if any(v["kv_style"] != "staged" for v in variants):
+        raise ValueError("sliding cache 'window' supports the staged KV protocol only (the one-hot / scatter variants address the cache by absolute row)")
+    if any(k > 1 for k in prefill_blocks_per_graph):
+        raise ValueError("sliding cache 'window': prefill block groups are not supported (prefill blocks per graph must be 1)")
+    shared_reader = any(p >= 0 and spec.layer_types[i] == "sliding_attention" for i, p in enumerate(spec.kv_producer or []))
+    return D.with_options(opt, sliding_ring=D.sliding_ring_rows(spec.sliding_window, max(chunks), max(v["staging_rows"] for v in variants), shared_reader))
+
+
+def profile_of(opt: D.GraphOptions, skip=()) -> dict:
+    """plan.profile: the GraphOptions the weights and all variants share (what differs between variants is in `variants`); the sliding window cache keys only for a window package (absent = full)."""
+    skipped = {"kv_style", "staging_rows", "compute_type", "scatter_index_type", *skip} | (set() if opt.sliding_cache == "window" else {"sliding_cache", "sliding_ring"})
+    return {k: v for k, v in asdict(opt).items() if k not in skipped}
+
+
+def type_code(layer_type: str) -> str:
+    return {"sliding_attention": "s", "full_attention": "f"}[layer_type]
+
+
+def write_graphs_windowed(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph) -> dict:
+    """The graphs of a Qwen3-like hybrid model with sliding window caches (staged protocol): a sliding and a full layer differ in the length of the cache, so BLOCK / flush exist per layer TYPE
+    (decode.blocks / decode.flush: type -> graph; prefill.blocks), HEAD is built for the type of layer 0, and the decode block groups are cut per sequence of layer types
+    (decode.block_groups[K] = [{first_block, blocks, key, graph}], key = s / f joined by '-'). Types whose caches have the same length share a graph file."""
+    dims = spec.decoder_dims()
+    types = spec.layer_types
+    block_types, cache_types = sorted(set(types[1:])), sorted(set(types))
+    tables: dict = {}
+    for variant in variants:
+        vopt = D.with_options(opt, kv_style="staged", compute_type=variant["compute_type"], staging_rows=variant["staging_rows"])
+        gdir = out / "graphs" / variant["id"]
+        gdir.mkdir(parents=True, exist_ok=True)
+
+        def emit(graph) -> str:
+            check_tensor_limit(graph)
+            serialize.dump(graph, gdir / f"{graph.name}.json")
+            return f"graphs/{variant['id']}/{graph.name}.json"
+
+        table: dict = {"lm_head": emit(D.build_lm_head_graph(dims, vopt)), "decode": {}, "prefill": {}}
+        for L in max_lengths:
+            past = L - 1
+            rows = lambda t: D.cache_rows(vopt, t, past)   # noqa: E731
+
+            def per_type(names, make) -> dict:   # layer type -> graph file; one graph for the types with the same cache rows
+                by_rows: dict = {}
+                return {t: by_rows[rows(t)] if rows(t) in by_rows else by_rows.setdefault(rows(t), emit(make(t))) for t in names}
+
+            decode = {"head": emit(D.build_head_graph(dims, vopt, seq=1, past_len=rows(types[0]), name=f"decode_head_L{L}")),
+                      "blocks": per_type(block_types, lambda t: D.build_block_graph(dims, vopt, seq=1, past_len=rows(t), name=f"decode_block_{t}_L{L}")),
+                      "tail": emit(D.build_tail_graph(dims, vopt, seq=1, name="decode_tail")),
+                      "flush": per_type(cache_types, lambda t: D.build_kv_update_graph(dims, seq=vopt.staging_rows, past_len=rows(t), name=f"kv_flush_{t}_L{L}")),
+                      "block_groups": {}}
+            for k in blocks_per_graph:
+                if k > 1:
+                    schedule, built = [], {}
+                    for first in range(0, spec.num_layers - 1, k):
+                        count = min(k, spec.num_layers - 1 - first)
+                        block_layers = [types[first + j + 1] for j in range(count)]   # the attention half of block j is that of layer first + j + 1
+                        key = "-".join(type_code(t) for t in block_layers)
+                        lens = tuple(rows(t) for t in block_layers)
+                        if lens not in built:
+                            built[lens] = emit(D.build_block_group_graph(dims, vopt, block_count=count, seq=1, past_len=past, past_lens=list(lens), per_block_controls=True,
+                                                                         name=f"decode_group_{key}_L{L}"))
+                        schedule.append({"first_block": first, "blocks": count, "key": key, "graph": built[lens]})
+                    decode["block_groups"][str(k)] = schedule
+            table["decode"][str(L)] = decode
+            table["prefill"][str(L)] = {}
+            for C in chunks:
+                if C > past:
+                    continue
+                table["prefill"][str(L)][str(C)] = {
+                    "head": emit(D.build_head_graph(dims, vopt, seq=C, past_len=rows(types[0]), name=f"prefill_head_L{L}_C{C}")),
+                    "blocks": per_type(block_types, lambda t: D.build_block_graph(dims, vopt, seq=C, past_len=rows(t), name=f"prefill_block_{t}_L{L}_C{C}")),
+                    "tail": emit(D.build_tail_graph(dims, vopt, seq=C, name=f"prefill_tail_C{C}"))}
+        tables[variant["id"]] = table
+    return tables
+
+
 def write_graphs(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph=(1,)) -> dict:
     """Write the graphs of every variant (graphs/<variant id>/) and return the plan's 'graphs' table: variant id -> lm_head / decode / prefill (names relative to the package root)."""
     dims = spec.decoder_dims()
@@ -139,7 +227,7 @@ def write_graphs_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, va
                 "head": emit(G.build_head_graph(spec, vopt, seq=1, past_len=past, name=f"decode_head_L{L}")),
                 "blocks": {k: emit(G.build_block_graph(spec, vopt, k, seq=1, past_len=past, name=f"decode_block_{k}_L{L}")) for k in block_kinds},
                 "tail": emit(G.build_tail_graph(spec, vopt, seq=1, name="decode_tail")),
-                "flush": {t: emit(G.build_flush_graph(spec, t, staging_rows=vopt.staging_rows, past_len=past, name=f"kv_flush_{t}_L{L}")) for t in cache_types}}
+                "flush": {t: emit(G.build_flush_graph(spec, t, staging_rows=vopt.staging_rows, past_len=past, name=f"kv_flush_{t}_L{L}", opt=vopt)) for t in cache_types}}
             groups = {str(k): _gemma4_block_groups(spec, vopt, k, past, L, emit) for k in blocks_per_graph if k > 1}
             if groups:
                 table["decode"][str(L)]["block_groups"] = groups
@@ -171,6 +259,16 @@ def _gemma4_block_groups(spec: arch.ModelSpec, vopt: D.GraphOptions, count: int,
     return schedule
 
 
+def _window_note(opt: D.GraphOptions) -> dict:
+    """kv_protocols entry of a package with sliding window caches (profile.sliding_cache = window)."""
+    if opt.sliding_cache != "window":
+        return {}
+    return {"sliding_window_cache": f"profile.sliding_cache = window: the layers of type sliding_attention keep a ring of min(max_length - 1, {opt.sliding_ring}) rows (profile.sliding_ring) instead of "
+                                    "max_length - 1: position p lives in slot p mod ring (prefill chunk rows and flushed staging rows alike), and the masks / selectors of the layers of that type "
+                                    "are built for the slots (protocol.py cache_rows / slot_positions; docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md). Staged protocol only. Qwen3-like models: the BLOCK and flush graphs "
+                                    "exist per layer type (decode.blocks / decode.flush / prefill.blocks: type -> graph) and decode.block_groups[K] is a schedule [{first_block, blocks, key, graph}] cut per sequence of layer types."}
+
+
 def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict, max_lengths, chunks, blocks_per_graph=(1,)) -> dict:
     kinds = sorted({spec.layer_kind(i) for i in range(spec.num_layers)})
     plan = {
@@ -185,7 +283,7 @@ def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
             "embedding": [n for n, _, _ in G.lm_head_weight_specs(spec)],
             "ple_table": ["ple_weight", "ple_scale"],
         },
-        "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type", "value_layout")},
+        "profile": profile_of(opt, skip=("value_layout",)),
         "variants": variants, "default_variant": variants[0]["id"],
         "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": [1],
         "graphs": graphs,
@@ -204,6 +302,7 @@ def build_plan_gemma4(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
             "description": "only the staged protocol: prefill = chunks (the last one left-padded) updating the main caches of the layers with K / V of their own; decode = the new row goes into a staging buffer, "
                            "attention reads concat(main cache, staging), the flush graph (one per layer type) moves the staging rows into the main cache every staging_rows steps. Layers that share K / V read "
                            "the cache of their producer: decode = its main cache + its staging buffer after this step's update; prefill = its cache after the update of the chunk.",
+            **_window_note(opt),
         },
         "host": {"embed_scale": spec.embed_scale, "ple": "per prompt token a row of the ple_table (int8 * row scale, float16) is bound to HEAD's ple_token input; the graph scales it by sqrt(ple_dim)",
                  "logit_softcap": spec.logit_softcap},
@@ -293,7 +392,7 @@ def build_plan_qwen35(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graph
             "final_norm": ["final_norm_gamma"],
             "embedding": [n for n, _, _ in Q.lm_head_weight_specs(spec)],
         },
-        "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type", "value_layout")},
+        "profile": profile_of(opt, skip=("value_layout",)),
         "variants": variants, "default_variant": variants[0]["id"],
         "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": [1],
         "graphs": graphs,
@@ -396,6 +495,7 @@ def _graphs_and_plan(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, varia
 
 
 def _graphs_and_plan_core(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph):
+    opt = resolve_sliding_cache(spec, opt, variants, chunks, prefill_blocks_per_graph)   # the ring size of a window package
     if spec.builder == "qwen35":
         if any(v["kv_style"] != "staged" for v in variants):
             raise ValueError("Qwen3.5 packages support the staged KV protocol only")
@@ -410,6 +510,9 @@ def _graphs_and_plan_core(spec: arch.ModelSpec, opt: D.GraphOptions, out: Path, 
             raise ValueError("block groups of Gemma 4 packages are for decode only: prefill blocks per graph must be 1 (prefill grouping gave no TTFT gain)")
         graphs = write_graphs_gemma4(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph)
         return graphs, build_plan_gemma4(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph)
+    if opt.sliding_cache == "window":
+        graphs = write_graphs_windowed(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph)
+        return graphs, build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     graphs = write_graphs(spec, opt, out, variants, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
     return graphs, build_plan(spec, opt, variants, graphs, max_lengths, chunks, blocks_per_graph, prefill_blocks_per_graph)
 
@@ -425,7 +528,7 @@ def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict
             "final_norm": ["final_norm_gamma"],
             "embedding": [n for n, _, _ in D.lm_head_weight_specs(dims, opt)],
         },
-        "profile": {k: v for k, v in asdict(opt).items() if k not in ("kv_style", "staging_rows", "compute_type", "scatter_index_type")},
+        "profile": profile_of(opt),
         "variants": variants, "default_variant": variants[0]["id"],
         "block_group_controls": "per_block" if len(set(spec.layer_types)) > 1 else "shared",
         "max_lengths": list(max_lengths), "prefill_chunks": list(chunks), "blocks_per_graph": list(blocks_per_graph), "prefill_blocks_per_graph": list(prefill_blocks_per_graph),
@@ -444,6 +547,7 @@ def build_plan(spec: arch.ModelSpec, opt: D.GraphOptions, variants, graphs: dict
             "description": "how the KV cache is written and attended, by the kv_style of a variant (cache rows P = max_length - 1; row j holds position j; protocol.py / protocol.ts)",
             "staged": "prefill: chunks of the chunk size, the last chunk is left-padded, one-hot row selectors write the real rows; decode: the new row goes into a staging buffer "
                       "(staging_rows rows), attention reads concat(main cache, staging), the flush graph moves the staging rows into the main cache every staging_rows steps",
+            **_window_note(opt),
             "onehot": "prefill as staged; decode: the graph writes the new row into the main cache with one-hot selectors (rows_to_keep / row_selector), attention reads concat(cache, new row)",
             "scatterND": "prefill and decode: scatterND(cache, kv_indices, new rows) with the (0, head, cache row) of every new row, attention reads the updated cache; the pad rows of the "
                          "left-padded last chunk are parked behind the real rows",
@@ -534,11 +638,12 @@ def _vision_options(spec: arch.ModelSpec, weights: str, grids, compute_type: str
     return {"weights": weights, "grids": [tuple(g) for g in (grids or V.DEFAULT_GRIDS)], "compute_type": compute_type}
 
 
-def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
+def compile_model(model: str, out_dir, *, max_lengths=(1024,), chunks=(64,), kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
                   prefill_blocks_per_graph=(1,), merge_projections: bool = True, lm_head_format: str = "int8-sym", search: bool = True, workers: int = 4,
                   endpoint: Optional[str] = None, cache_dir=None, progress: Callable[[str], None] = print, vision: bool = True, vision_weights: str = "int8g128",
-                  vision_grids=None, vision_compute_type: str = "float32") -> Path:
+                  vision_grids=None, vision_compute_type: str = "float32", sliding_cache: str = "full") -> Path:
     """Graph variants = kv_styles x staging_rows (staged only) x compute_types; the first one is the default variant. Weights are shared by all variants.
+    `sliding_cache` "window": the sliding-attention layers keep a ring of window + chunk rows instead of the whole max length (staged protocol only; see the design note).
     A Qwen3.5 checkpoint with a vision tower gets the image tower too (images only): `vision_weights` int8 | int8g128 | int4 | float16, `vision_grids` the (grid_h, grid_w) presets in patches
     (default vision.DEFAULT_GRIDS), `vision_compute_type` of its graphs; vision=False leaves it out."""
     out = Path(out_dir)
@@ -557,7 +662,7 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
     if spec.builder == "gemma4" and any(k > 1 for k in prefill_blocks_per_graph):   # before the (long) quantization
         raise ValueError("block groups of Gemma 4 packages are for decode only: prefill blocks per graph must be 1")
     hybrid = spec.builder in ("gemma4", "qwen35")
-    opt = D.GraphOptions(merge_projections=merge_projections or hybrid, lm_head_format="int8-sym" if hybrid else lm_head_format)
+    opt = D.GraphOptions(merge_projections=merge_projections or hybrid, lm_head_format="int8-sym" if hybrid else lm_head_format, sliding_cache=sliding_cache)
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     progress(f"{spec.architecture}: {spec.num_layers} layers, hidden {spec.hidden}, {spec.num_heads}/{spec.num_kv_heads} heads, vocab {spec.vocab} (padded {spec.vocab_padded}), "
              f"layer types {sorted(set(spec.layer_types))}")
@@ -590,9 +695,9 @@ def compile_model(model: str, out_dir, *, max_lengths=(1152,), chunks=(64,), kv_
 
 
 def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("staged",), staging_rows=(64,), compute_types=("float32",), blocks_per_graph=None,
-                   prefill_blocks_per_graph=(1,), progress: Callable[[str], None] = print) -> Path:
+                   prefill_blocks_per_graph=(1,), sliding_cache: Optional[str] = None, progress: Callable[[str], None] = print) -> Path:
     """Rewrite graphs/, plan.json and the file index of an existing package with other graph variants; the weights, tokenizer and model.json stay (no quantization).
-    max_lengths / chunks default to those of the package."""
+    max_lengths / chunks default to those of the package; sliding_cache (full | window) to the one of the package."""
     out = Path(package_dir)
     old = json.loads((out / "plan.json").read_text(encoding="utf-8"))
     index_old = json.loads((out / "m2w.json").read_text(encoding="utf-8"))
@@ -602,6 +707,8 @@ def rebuild_graphs(package_dir, *, max_lengths=None, chunks=None, kv_styles=("st
     blocks_per_graph = tuple(blocks_per_graph) if blocks_per_graph is not None else tuple(old.get("blocks_per_graph", [1]))   # not given: keep the groups the package has
     _check_lengths(spec, max_lengths, progress)
     opt = D.GraphOptions(**{k: v for k, v in old["profile"].items() if k in D.GraphOptions.__dataclass_fields__})
+    if sliding_cache:
+        opt = D.with_options(opt, sliding_cache=sliding_cache)
     variants = expand_variants(kv_styles, staging_rows, compute_types)
     shutil.rmtree(out / "graphs", ignore_errors=True)
     old_vision = old.get("vision")   # the image tower graphs of the package are rewritten too (same weights format and grids; the compute type is kept)

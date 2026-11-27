@@ -8,13 +8,15 @@ What differs from decoder.py (see docs/models/gemma4-e4b.md):
     producer layers are read by the shared layers (decode: main cache + the staging buffer AFTER this step's update; prefill: the updated cache itself, mask columns = cache rows);
   * attention scale 1.0, a weightless v norm, RMSNorm weights used as they are, gelu-tanh, a logit softcap in the lm_head graph.
 Only the staged KV protocol (decode) with the one-hot chunk update (prefill) is built.
+Sliding window caches (opt.sliding_cache = "window"): `past_len` is the length of the FULL cache; the layers of a sliding kind hold a ring of cache_rows() rows (a graph of such a kind is
+built with that length: cache inputs, mask columns, selectors). The kinds already separate sliding from full layers, so no graph is shared between the two.
 """
 from __future__ import annotations
 
 import math
 
 from ....ir import GraphBuilder, Value
-from .decoder import Ctx, DecoderDims, GraphOptions, apply_rotary, build_kv_update_graph, quantized_linear, repeat_kv, rms_norm, update_kv_cache
+from .decoder import Ctx, DecoderDims, GraphOptions, apply_rotary, build_kv_update_graph, cache_rows, quantized_linear, repeat_kv, rms_norm, update_kv_cache
 
 KINDS = ("sliding_attention_own", "full_attention_own", "sliding_attention_shared", "full_attention_shared")
 
@@ -96,6 +98,7 @@ def attention_half(c: Ctx, spec, kind: str, residual: Value, w: dict, seq: int, 
     b, d = c.b, c.dims
     c.seq = seq
     shared, decode = kind_shared(kind), seq == 1
+    past_len = cache_rows(opt, kind_type(kind), past_len)
     R = opt.staging_rows
     to_c = c.to_compute
     # which K / V does the attention read, and how long is it
@@ -278,11 +281,12 @@ def build_block_group_graph(spec, opt: GraphOptions, layout: list, *, seq: int =
         per_layer_input = c.declare(prefix + "per_layer_input", "float16", [1, seq, spec.ple_dim])
         layer_output = feed_forward_half(c, spec, residual, attention_output, per_layer_input, c.weights(feed_forward_weight_specs(spec), prefix), seq)
         attention_weights = c.weights(attention_weight_specs(spec, kind), prefix)
+        rows = cache_rows(opt, t, past_len)   # the cache of this layer type (a ring for sliding layers of a window package)
         if t not in controls:
             controls[t] = {"cos": c.declare(f"{t}_rope_cos", "float16", [1, 1, seq, d.head_dim], "control"), "sin": c.declare(f"{t}_rope_sin", "float16", [1, 1, seq, d.head_dim], "control"),
-                           "mask": c.declare(f"{t}_attention_mask", mask_dtype, [1, 1, seq, past_len + R], "control")}
+                           "mask": c.declare(f"{t}_attention_mask", mask_dtype, [1, 1, seq, rows + R], "control")}
         if owner == j:
-            shape, staging = [1, d.num_kv_heads, past_len, d.head_dim], [1, d.num_kv_heads, R, d.head_dim]
+            shape, staging = [1, d.num_kv_heads, rows, d.head_dim], [1, d.num_kv_heads, R, d.head_dim]
             caches[j] = {"past_key": c.declare(prefix + "past_key", "float16", shape, "kv"), "past_value": c.declare(prefix + "past_value", "float16", shape, "kv"),
                          "staging_key": c.declare(prefix + "staging_key", "float16", staging, "kv"), "staging_value": c.declare(prefix + "staging_value", "float16", staging, "kv")}
         elif owner not in caches:
@@ -354,6 +358,6 @@ def build_lm_head_graph(spec, opt: GraphOptions, *, name: str = "lm_head"):
     return b.build()
 
 
-def build_flush_graph(spec, layer_type: str, *, staging_rows: int, past_len: int, name: str = "kv_flush"):
-    """the main cache <- the staging rows, for the caches of one layer type (the head dims differ per type)."""
-    return build_kv_update_graph(spec.decoder_dims(layer_type), seq=staging_rows, past_len=past_len, name=name)
+def build_flush_graph(spec, layer_type: str, *, staging_rows: int, past_len: int, name: str = "kv_flush", opt: "GraphOptions | None" = None):
+    """the main cache <- the staging rows, for the caches of one layer type (the head dims differ per type; `opt`: a sliding window package has the ring rows for a sliding type)."""
+    return build_kv_update_graph(spec.decoder_dims(layer_type), seq=staging_rows, past_len=cache_rows(opt, layer_type, past_len) if opt else past_len, name=name)

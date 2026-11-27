@@ -67,6 +67,25 @@ class GraphOptions:
     #                           sum of two matmuls; the whole K / V cache is not concatenated (copied) with the new rows every step. Qwen3.5 only so far; gqa = "repeat" only.
     gqa: str = "repeat"  # how the attention of a GQA model reads K / V: "repeat" (K / V expanded to every query head: 4x the memory traffic) | "grouped" (the query heads of a K / V head are rows of ONE matmul,
     #                      no expansion) | "grouped16" (the same with the rows padded to 16: activation x activation matmuls with dim 4 / 8 failed to compile on the NPU in other graphs). Qwen3.5 only so far.
+    sliding_cache: str = "full"  # K / V cache of the sliding-attention layers: "full" (every layer holds max_length - 1 rows, the window is only a mask) | "window" (a ring of `sliding_ring` rows: position p
+    #                              lives in slot p mod ring; staged KV protocol only, see docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md)
+    sliding_ring: int = 0        # rows of the ring of a "window" package (sliding_ring_rows()); 0 = not used
+
+
+def cache_rows(opt: GraphOptions, layer_type: str, past_len: int) -> int:
+    """Rows of the K / V cache of a layer of this type when the full cache has `past_len` rows: a sliding layer of a "window" package holds a ring of at most `sliding_ring` rows
+    (a ring that is not smaller than the full cache is the full cache: slot = position)."""
+    if opt.sliding_cache == "window" and layer_type == "sliding_attention":
+        return min(past_len, opt.sliding_ring)
+    return past_len
+
+
+def sliding_ring_rows(window: int, chunk_max: int, staging_max: int, shared_reader: bool, multiple: int = 64) -> int:
+    """Rows of the ring of a sliding layer, a multiple of 64 for the NPU. It holds W - 1 earlier positions for the first query of a chunk / decode step and must take a whole chunk
+    (`chunk_max`) / flush (`staging_max`) without two rows sharing a slot; a layer that reads the cache of another layer AFTER the update of a chunk (`shared_reader`, Gemma 4) needs the
+    window below the FIRST row of the chunk to survive the write of the chunk too: W - 1 + chunk rows."""
+    rows = max(window - 1 + (chunk_max if shared_reader else 0), chunk_max, staging_max)
+    return -(-rows // multiple) * multiple
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -362,10 +381,13 @@ def build_block_graph(dims: DecoderDims, opt: GraphOptions, *, seq: int, past_le
 
 
 def build_block_group_graph(dims: DecoderDims, opt: GraphOptions, *, block_count: int, seq: int, past_len: int, mask_dtype: str = "float16", name: str | None = None,
-                            per_block_controls: bool = False):
+                            per_block_controls: bool = False, past_lens: "list | None" = None):
     """``block_count`` consecutive BLOCKs in one graph (fewer dispatches). Block j declares its inputs / outputs with the prefix ``b<j>_``;
     selectors are shared; rope / mask are shared too, unless ``per_block_controls``: then every block declares ``b<j>_rope_cos`` / ``b<j>_rope_sin`` /
-    ``b<j>_attention_mask`` (a model whose layers have different types, e.g. sliding and full attention, groups any consecutive blocks that way)."""
+    ``b<j>_attention_mask`` (a model whose layers have different types, e.g. sliding and full attention, groups any consecutive blocks that way).
+    ``past_lens``: the cache rows of every block when they differ (sliding window caches; needs per_block_controls and the decode form: the main-cache selectors would be shared otherwise)."""
+    if past_lens is not None and (not per_block_controls or len(past_lens) != block_count or (seq != 1 and len(set(past_lens)) > 1)):
+        raise ValueError("past_lens needs per_block_controls, one entry per block and the decode form (seq = 1)")
     b = GraphBuilder(name or f"block_x{block_count}")
     c = Ctx(b, dims, opt)
     c.per_block_controls = per_block_controls
@@ -375,7 +397,7 @@ def build_block_group_graph(dims: DecoderDims, opt: GraphOptions, *, block_count
     for j in range(block_count):
         prefix = f"b{j}_"
         layer_output = feed_forward_half(c, residual, attention_output, c.weights(feed_forward_weight_specs(dims, opt), prefix), seq)
-        attention, kv_out = attention_half(c, layer_output, c.weights(attention_weight_specs(dims, opt), prefix), seq, past_len, mask_dtype, prefix=prefix)
+        attention, kv_out = attention_half(c, layer_output, c.weights(attention_weight_specs(dims, opt), prefix), seq, past_lens[j] if past_lens else past_len, mask_dtype, prefix=prefix)
         for k, v in kv_out.items():
             b.output(prefix + k, v)
         residual, last_attention = layer_output, attention
