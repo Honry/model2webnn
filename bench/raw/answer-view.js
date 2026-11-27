@@ -8,21 +8,31 @@ const MODE_KEY = "m2w.answerMode";
 const views = new Set();
 const readMode = () => { try { return localStorage.getItem(MODE_KEY) === "raw" ? "raw" : "markdown"; } catch { return "markdown"; } };
 
-export function answerView(box, { interval = 100 } = {}) {
+/** a Copy button on every code block of the rendered answer (DOM only: the renderer's HTML stays button-free) */
+function addCodeCopy(box) {
+    for (const pre of box.querySelectorAll("pre.md-code")) {
+        const button = document.createElement("button"), code = pre.textContent;
+        button.type = "button"; button.className = "code-copy"; button.textContent = "Copy"; button.title = "copy this code";
+        button.onclick = async () => { try { await navigator.clipboard.writeText(code); button.textContent = "Copied"; } catch { button.textContent = "Failed"; } setTimeout(() => { button.textContent = "Copy"; }, 1200); };
+        pre.append(button);
+    }
+}
+
+export function answerView(box, { interval = 100, barParent = null } = {}) {   // barParent: put the bar there instead of in front of the box (a conversation message keeps it in its toolbar)
     if (box.answerView) return box.answerView;
     let raw = "", mode = readMode(), timer = null, lastRender = -Infinity;
     const compact = box.dataset.compactBar !== undefined;   // a conversation bubble: the bar is small and sits above the text
     const bar = document.createElement("div");
     bar.className = "answer-bar";
-    bar.innerHTML = '<span class="seg"><button type="button" data-mode="markdown">Markdown</button><button type="button" data-mode="raw">Raw</button></span><button type="button" class="copy" title="copy the raw text (Markdown source) of the answer">Copy raw</button>';
-    box.parentNode.insertBefore(bar, box);
+    bar.innerHTML = '<span class="seg"><button type="button" data-mode="markdown">Markdown</button><button type="button" data-mode="raw">Raw</button></span><button type="button" class="copy" title="copy the raw text (Markdown source) of the answer">Copy</button>';
+    if (barParent) barParent.append(bar); else box.parentNode.insertBefore(bar, box);
     box.classList.add("answer-box");
 
     function render() {
         clearTimeout(timer); timer = null; lastRender = performance.now();
         const follow = box.scrollHeight - box.scrollTop - box.clientHeight < 40;   // at the bottom (or not scrollable): keep following the new text
         box.classList.toggle("md", mode === "markdown");
-        if (mode === "markdown") box.innerHTML = markdownToHtml(raw); else box.textContent = raw;
+        if (mode === "markdown") { box.innerHTML = markdownToHtml(raw); addCodeCopy(box); } else box.textContent = raw;
         for (const button of bar.querySelectorAll("[data-mode]")) button.classList.toggle("on", button.dataset.mode === mode);
         if (follow) box.scrollTop = box.scrollHeight;
     }
@@ -50,7 +60,7 @@ export function answerView(box, { interval = 100 } = {}) {
     bar.querySelector(".copy").onclick = async (event) => {
         const button = event.currentTarget;
         try { await navigator.clipboard.writeText(raw); button.textContent = "Copied"; } catch { button.textContent = "Copy failed"; }
-        setTimeout(() => { button.textContent = "Copy raw"; }, 1200);
+        setTimeout(() => { button.textContent = "Copy"; }, 1200);
     };
     box.answerView = view; views.add(view);
     if (compact) bar.classList.add("compact");

@@ -6,9 +6,15 @@
 //   renderImageRows(body, images, spec)       the image rows of the Summary table: one group per picture of the last prompt
 //        host = { byId, spec: model.json `vision`, presets: [[h, w], ...], detail, onChange(), setText(text), log }
 import { chooseGrid, describeGrid, imageTokenCount } from "../../lib/runtime/index.js";
-import { answerView } from "./answer-view.js?v=2";
+import { answerView } from "./answer-view.js?v=3";
 
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
+/** an inline SVG icon from the sprite of chat.html */
+export function icon(name, className = "") {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"), use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    svg.setAttribute("class", `ic ${className}`.trim()); use.setAttribute("href", `#i-${name}`); svg.append(use);
+    return svg;
+}
 
 /** a small canvas with the picture centre-cropped to a square */
 function thumbnail(bitmap, size) {
@@ -17,11 +23,11 @@ function thumbnail(bitmap, size) {
     canvas.getContext("2d").drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
     return canvas;
 }
-export const imageSummary = (image) => `${image.grid.join("x")} grid · ${image.tokens} image tokens · ${image.detail}`;
+export const imageSummary = (image) => `${image.tokens} image tokens (${image.grid.join("x")}, ${image.detail})`;
 
 export function createConversation(list) {
-    const empty = el("div", "chat-empty", "Ask something, or attach a picture. The conversation stays on this page; every message re-reads the whole history (TTFT grows with it).");
-    list.append(empty);
+    const empty = list.querySelector(".chat-empty") ?? el("div", "chat-empty");   // the empty state of the page: a title, the model name, suggestions
+    if (!empty.parentNode) list.append(empty);
     const follow = () => list.scrollHeight - list.scrollTop - list.clientHeight < 60;
     const scrollToEnd = (force = false) => { if (force || list.dataset.follow !== "off") list.scrollTop = list.scrollHeight; };
     list.addEventListener("scroll", () => { list.dataset.follow = follow() ? "on" : "off"; });
@@ -41,17 +47,21 @@ export function createConversation(list) {
             list.dataset.follow = "on";
             return append(message);
         },
-        /** an assistant bubble: { element, box, view, setMeta(text, state) } */
+        /** an assistant message: { element, box, view, setMeta(text, state) } (an avatar, the answer, a toolbar with the stats of the turn and the Markdown | Raw / Copy bar) */
         addAssistant() {
-            const message = el("div", "msg assistant"), bubble = el("div", "bubble"), box = el("div", "answer-box");
-            box.dataset.compactBar = ""; box.dataset.placeholder = "…";
-            const meta = el("div", "meta");
-            bubble.append(box, meta); message.append(bubble);
+            const message = el("div", "msg assistant"), avatar = el("div", "avatar"), body = el("div", "body"), box = el("div", "answer-box"), toolbar = el("div", "toolbar"), meta = el("span", "meta");
+            box.dataset.placeholder = "…";
+            avatar.append(icon("zap")); toolbar.append(meta, el("span", "spacer")); body.append(box, toolbar); message.append(avatar, body);
             append(message);
-            const view = answerView(box);
+            const view = answerView(box, { barParent: toolbar });
             views.push(view);
             return { element: message, box, view,
-                setMeta(text, state = "") { meta.textContent = text; meta.dataset.state = state; message.dataset.state = state; scrollToEnd(); } };
+                /** text: "stopped · TTFT 1.6 s · TPOT 58 ms/token · 27 + 64 tokens": one small chip per part */
+                setMeta(text, state = "") {
+                    meta.replaceChildren();
+                    for (const part of text.split(" · ").filter(Boolean)) meta.append(el("span", "mchip" + (/^TTFT/.test(part) ? " ttft" : /^TPOT/.test(part) ? " tpot" : /tokens$/.test(part) ? " tok" : /stopped|full|cut/i.test(part) ? " warn" : ""), part));
+                    message.dataset.state = state; scrollToEnd();
+                } };
         },
         /** a dimmed line between messages; `after`: put it behind this message (where turns were dropped), default at the end; warn: amber */
         addNotice(text, { after = null, warn = false } = {}) {
@@ -120,6 +130,7 @@ export function createAttachments(host) {
             chips.append(chip);
         });
         chips.hidden = !state.items.length;
+        const quick = byId("quickQuestions"); if (quick) quick.hidden = !state.items.length;   // the quick questions of a picture appear with the first picture
         drawPreview();
         host.onChange?.();
     }
@@ -159,7 +170,7 @@ export function createAttachments(host) {
     composer.addEventListener("drop", async (event) => { event.preventDefault(); composer.classList.remove("over"); for (const file of event.dataTransfer.files) await api.addFile(file); });
     document.addEventListener("paste", async (event) => { for (const file of [...(event.clipboardData?.files ?? [])]) await api.addFile(file); });
     const samples = byId("sampleSelect");
-    samples.add(new Option("Sample picture…", ""));
+    samples.add(new Option("", ""));
     let sampleCases = [];
     fetch(new URL("vision-suite/cases.json", location.href)).then((r) => (r.ok ? r.json() : null)).then((json) => {
         sampleCases = json?.cases ?? [];

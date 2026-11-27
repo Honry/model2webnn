@@ -31,7 +31,8 @@
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=8";
-import { createConversation, createAttachments, renderImageRows } from "./chat-ui.js?v=1";
+import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=2";
+import { chipGroup, formats } from "./chips.js?v=1";
 import { renderPipeline, updatePipelineSession } from "./pipeline.js?v=1";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
@@ -135,13 +136,13 @@ function log(eventName, message, fields = {}) {
     const elapsed = ((performance.now() - pageStartTime) / 1000).toFixed(1).padStart(7);
     byId("log").textContent += `[${elapsed} s] ${message}\n`;
     byId("log").scrollTop = byId("log").scrollHeight;
-    if (eventName === "fatal") byId("log").closest("details")?.setAttribute("open", "");
+    if (eventName === "fatal") { byId("hood")?.setAttribute("open", ""); byId("log").closest("details")?.setAttribute("open", ""); }
     const record = JSON.stringify({ experiment: "chat", tag: resultTag, device: deviceType, layers: layerCount, weight_format: weightFormat, kv_in_place: keyValueInPlace, kv_style: kvStyle, value_layout: naturalValueLayout ? 'natural' : 'transposed', blocks_per_graph: blocksPerGraph, ...graphOptions, event: eventName, message, ...fields });
     console.log(record);
     fetch("/log", { method: "POST", body: record }).catch(() => {});
 }
 // the status pill: idle (nothing loaded yet) | busy (a spinner while something runs) | ready | error
-const IDLE_STATUS = "Not loaded: choose the session options, then press Load model";
+const IDLE_STATUS = "Not loaded";
 const setStatus = (text) => {
     const pill = byId("status");
     pill.firstElementChild.textContent = text; pill.title = text;
@@ -149,7 +150,10 @@ const setStatus = (text) => {
 };
 // summary cell: a short value, the long explanation as a hover tip; headline tile: big value + one line below it
 const setCell = (id, value, tip = "") => { const cell = byId(id); cell.textContent = value; if (tip) cell.dataset.tip = tip; else delete cell.dataset.tip; };
-const setMetric = (id, value, unit = "", sub = "") => { byId(id).innerHTML = unit ? `${value}<small>${unit}</small>` : value; byId(id + "-sub").textContent = sub; };
+const setMetric = (id, value, unit = "", sub = "") => {
+    byId(id).innerHTML = unit ? `${value}<small>${unit}</small>` : value; byId(id + "-sub").textContent = sub;
+    const chip = byId(id).closest(".stat"); if (chip) { if (sub) chip.dataset.tip = sub; else delete chip.dataset.tip; }   // the line under the value is the tooltip of the stat chip
+};
 // rows: [label, ms, tip (hover), kind (colour)]; the last row is the total, every other row gets a bar for its share of it
 function fillTimingTable(rows) {
     const table = byId("timingTable");
@@ -1001,7 +1005,7 @@ async function run() {
             attachments = createAttachments({ byId, log, spec: peek.model.vision, presets: override === true ? peek.plan.vision.presets.map((p) => p.grid) : override, detail,
                 onChange: () => attachmentsChanged(), onDetail: () => syncUrl(), setText: (text) => { byId("prompt").value = text; byId("promptPreset").value = "custom"; attachmentsChanged(); } });
         }
-        byId("pageTitle").textContent = packageEntry.label; byId("pageSubtitle").textContent = "on WebNN";
+        byId("pageTitle").textContent = packageEntry.label; byId("pageSubtitle").textContent = "WebNN";
         document.title = `${packageEntry.label} · WebNN chat`;
         packageInfo = `compiled by m2w (${peek.index.compiler}), target ${peek.index.target}`;
     }
@@ -1044,9 +1048,9 @@ The options come from the package plan; the hand-written Qwen3-4B graphs offer t
         "Engineers keep moving work from general purpose processors to specialised units because moving data costs far more energy than computing on it. ";
     const repeated = (count) => "Summarize the following text in two sentences.\n\n" + Array(count).fill(paragraph).join("\n");
     const presets = [
-        ["Default: short poem about the sea", "Write a short poem about the sea."],
-        ["Short (~25 tokens): capital of France", "What is the capital of France?"],
-        ["Medium (~250 tokens)", repeated(3)], ["Long (~500 tokens)", repeated(6)], ["Long (~900 tokens)", repeated(11)],
+        ["Poem", "Write a short poem about the sea."],
+        ["Capital", "What is the capital of France?"],
+        ["~250 tok", repeated(3)], ["~500 tok", repeated(6)], ["~900 tok", repeated(11)],
     ];
     const QUESTIONS = {   // the quick questions of a picture
         describe: "Describe this image in detail.",
@@ -1056,7 +1060,7 @@ The options come from the package plan; the hand-written Qwen3-4B graphs offer t
     };
     const promptBox = byId("prompt"), presetSelect = byId("promptPreset"), runButton = byId("runButton"), greedyBox = byId("visionGreedy");
     presets.forEach(([name], index) => presetSelect.add(new Option(name, index)));
-    presetSelect.add(new Option("Custom (edited text / ?prompt=… in the URL)", "custom"));
+    presetSelect.add(new Option("Custom", "custom"));
     presetSelect.onchange = () => { if (presetSelect.value !== "custom") promptBox.value = presets[+presetSelect.value][1]; scheduleContext(); promptBox.focus(); };
     if (query.get("promptFile")) {   // a long prompt: the first promptChars characters of a text file (long-prompt.txt: ~3.5 characters per token) + an instruction
         const text = await (await fetch(query.get("promptFile"))).text();
@@ -1069,16 +1073,50 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     else if (query.get("image") && attachments && !query.get("prompt") && !query.get("promptFile")) { promptBox.value = QUESTIONS.describe; presetSelect.value = "custom"; }
     for (const button of document.querySelectorAll("[data-question]")) button.onclick = () => { promptBox.value = QUESTIONS[button.dataset.question]; presetSelect.value = "custom"; scheduleContext(); promptBox.focus(); };
 
+    // ---- the controls of the page are chip groups over the (hidden) selects: the selects stay the source of truth for every script
+    chipGroup(modelSelect, { variant: "rows", format: formats.model, label: "Model" });
+    chipGroup(deviceSelect, { variant: "segmented", format: (option) => ({ main: option.textContent }), label: "Device" });
+    chipGroup(maxLengthSelect, { format: formats.maxLength, label: "Max length" });
+    chipGroup(chunkSizeSelect, { label: "Prefill chunk" });
+    for (const [select, label] of [[blocksSelect, "Decode blocks per graph"], [prefillBlocksSelect, "Prefill blocks per graph"], [computeTypeSelect, "Compute type"], [kvStyleSelect, "KV update"], [stagingRowsSelect, "Staging rows"]]) chipGroup(select, { label });
+    chipGroup(presetSelect, { label: "Prompt preset", format: (option) => ({ main: option.textContent, title: presets[+option.value]?.[1]?.slice(0, 120) ?? "" }) });
+    if (attachments) { chipGroup(byId("sampleSelect"), { label: "Sample picture", format: (option) => (option.value ? { main: option.value } : null) }); chipGroup(byId("detailSelect"), { variant: "segmented", label: "Picture detail", format: (option) => ({ main: option.textContent }) }); }
+    // the empty state: a few things to try
+    const suggestions = byId("suggestions");
+    const suggest = (iconName, text, action) => { const button = document.createElement("button"); button.type = "button"; button.className = "sg"; button.append(icon(iconName), text); button.onclick = action; suggestions.append(button); };
+    const usePreset = (index) => { presetSelect.value = index; presetSelect.dispatchEvent(new Event("change")); };
+    suggest("text", "Write a short poem about the sea", () => usePreset(0));
+    suggest("text", "What is the capital of France?", () => usePreset(1));
+    suggest("text", "Summarize a ~250-token text", () => usePreset(2));
+    if (attachments) {
+        suggest("image", "Describe a picture", () => { promptBox.value = QUESTIONS.describe; presetSelect.value = "custom"; scheduleContext(); byId("attachButton").click(); });
+        suggest("image", "Read the text in a picture", () => { promptBox.value = QUESTIONS.ocr; presetSelect.value = "custom"; scheduleContext(); byId("attachButton").click(); });
+    }
+    // sidebar drawer (narrow screens), the details of the last answer, a growing message box
+    byId("sidebarToggle").onclick = () => document.body.classList.toggle("sidebar-open");
+    document.body.addEventListener("click", (event) => { if (document.body.classList.contains("sidebar-open") && !event.target.closest(".sidebar, #sidebarToggle")) document.body.classList.remove("sidebar-open"); });
+    const perfPanel = byId("perfPanel"), perfToggle = byId("perfToggle");
+    const showPerf = (open) => { perfPanel.hidden = !open; perfToggle.setAttribute("aria-expanded", String(open)); };
+    perfToggle.onclick = () => showPerf(perfPanel.hidden);
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") showPerf(false); });
+    document.addEventListener("click", (event) => { if (!perfPanel.hidden && !event.target.closest("#perfPanel, #perfToggle")) showPerf(false); });
+    const autosize = () => { promptBox.style.height = "auto"; promptBox.style.height = Math.min(promptBox.scrollHeight, 220) + "px"; };
+    promptBox.addEventListener("input", autosize);
+
     // ---- the conversation: the turns stay on the page; every send re-reads the whole history (no KV reuse across turns)
     let model = null;
     const conversation = createConversation(byId("conversation"));
     const turns = [];   // { text, images: [{ bitmap, name, detail, grid, tokens, ... }], assistant (the answer, also a stopped one), dropped, elements: [message elements] }
     const system = query.get("system") || undefined;   // system=<text>: a system prompt for the whole conversation (packages with a chat format)
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-    const setHint = (text, warn = false) => { const hint = byId("runHint"); hint.textContent = text; hint.style.color = warn ? "var(--warn)" : ""; };
+    const setHint = (text, warn = false) => {   // a warning shows above the composer; the standing hint is the tooltip of the (i) next to the send button
+        const hint = byId("runHint");
+        hint.hidden = !warn; hint.textContent = warn ? text : "";
+        if (!warn) byId("composerInfo").dataset.tip = text;
+    };
     const baseHint = () => (packageMode && packageChatFormat ? "Every message re-reads the whole conversation: the time to first token grows with the history."
         : packageMode ? "This package has no chat format: every message is answered on its own." : "The hand-written Qwen3-4B graphs answer every message on its own (no history); load a package for a conversation.") + (model ? "" : " The first Generate loads the model.");
-    byId("conversation").querySelector(".chat-empty").textContent = `Ask something${attachments ? " or attach a picture" : ""}. ${packageMode && packageChatFormat ? "The conversation stays on this page and every message re-reads the whole history, so the time to first token grows with it." : "Every message is answered on its own."}`;
+    byId("emptyModel").textContent = packageMode ? packageEntry.label : "Qwen3-4B · hand-written graphs";
     setHint(baseHint());
     const liveTurns = () => (model?.multiTurn ? turns.filter((turn) => !turn.dropped) : []);   // what the next prompt contains (the dropped turns stay on the screen only)
     const runtimeTurn = (turn, answered) => ({ user: turn.text, images: turn.images.length, ...(answered ? { assistant: turn.assistant ?? "" } : {}) });
@@ -1088,14 +1126,15 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
 
     // the line under the composer: how full the context is (needs the tokenizer, so after the first load)
     let contextTimer = null;
-    const scheduleContext = () => { clearTimeout(contextTimer); contextTimer = setTimeout(() => updateContext(), 150); };
+    const scheduleContext = () => { autosize(); clearTimeout(contextTimer); contextTimer = setTimeout(() => updateContext(), 150); };
     const updateContext = () => {
         const out = byId("promptTokenCount"), session = model?.currentSession?.();
         out.classList.remove("over");
-        if (!model || !session) { out.textContent = "Token counts appear after the model is loaded."; return; }
+        if (!model || !session) { out.textContent = ""; return; }
         const reserve = +byId("maxNewTokensInput").value || 0, capacity = capacityOf(session), message = { text: promptBox.value, images: attachments?.items ?? [] };
         const used = countConversation(liveTurns(), message), own = countConversation([], message);
-        out.textContent = `Prompt ${used} tokens (history ${used - own} + message ${own}) · ${reserve} reserved for the answer · ${capacity} cache rows`;
+        out.textContent = `Context ${used} / ${Math.max(0, capacity - reserve)}`;
+        out.title = `Prompt ${used} tokens (history ${used - own} + this message ${own}); ${reserve} are reserved for the answer; the cache of this session holds ${capacity} rows`;
         out.classList.toggle("over", used + reserve > capacity);
     };
     attachmentsChanged = scheduleContext;
@@ -1109,7 +1148,8 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     let generating = false, stopping = false, controller = null;
     const renderRunButton = () => {   // one button: Generate, then Stop while a generation runs
         runButton.classList.toggle("stop", generating);
-        runButton.textContent = stopping ? "Stopping…" : generating ? "Stop" : "Generate";
+        const label = stopping ? "Stopping…" : generating ? "Stop" : "Generate";
+        runButton.querySelector(".sr").textContent = label; runButton.title = generating ? "Stop" : "Generate (Enter)"; runButton.setAttribute("aria-label", label);
         runButton.disabled = stopping || (busy && !generating);
         byId("newChatButton").disabled = busy;
     };
@@ -1142,8 +1182,9 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             setCell("sum-build", seconds(model.sharedBuildMs + session.buildMs), `shared ${seconds(model.sharedBuildMs)} + max-length / chunk / option specific ${seconds(session.buildMs)}`);
             setCell("sum-startup", seconds(startupMs), firstLoad ? "tokenizer + load weights + build graphs" : reused ? "same settings: the session was already loaded" : "reload: weights were already loaded, only the session graphs were rebuilt");
             setMetric("metric-startup", (startupMs / 1000).toFixed(1), "s", firstLoad ? `incl. weights; graphs built in ${seconds(model.sharedBuildMs + session.buildMs)}` : reused ? "already loaded" : `reload, weights kept; graphs ${seconds(session.buildMs)}`);
-            byId("loadedLabel").textContent = packageMode ? `loaded: ${session.label}` : `loaded: max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
-            byId("loadButton").textContent = "Apply options"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
+            byId("loadedLabel").textContent = "Loaded";   // the full session is the tooltip and the session line of the details
+            byId("loadedLabel").title = packageMode ? session.label : `max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
+            byId("loadButton").querySelector(".lbl").textContent = "Apply"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
             setStatus("ready");
         } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); }
         finally { setBusy(false); showSession(sessionSummary()); updateContext(); }
@@ -1153,7 +1194,9 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     const showRunResult = (result, session) => {
         const capacity = capacityOf(session), used = result.promptTokens + result.generated, full = used >= capacity;
         setCell("sum-tokens", `${result.promptTokens}${result.imageTokens ? ` (${result.imageTokens} image)` : ""} + ${result.generated}`);
-        setCell("sum-cache", `${Math.min(used, capacity)} of ${capacity} rows${full ? " (FULL: the answer was cut)" : ""}`);
+        setCell("sum-cache", `${Math.min(used, capacity)} / ${capacity}${full ? " · FULL" : ""}`, full ? "the KV cache is full: the answer was cut" : "rows of the KV cache this turn used, of what the session holds");
+        byId("chip-cache").classList.toggle("full", full);
+        byId("chip-images").hidden = !(result.images ?? []).length; byId("chip-images-v").textContent = `${result.imageTokens ?? 0} tok`;
         renderImageRows(byId("sumImages"), result.images ?? [], packagePeek?.model.vision, result.visionMs);
         return full;
     };
@@ -1161,6 +1204,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         for (const id of ["metric-ttft", "metric-tpot", "metric-tps"]) setMetric(id, "–", "", "");
         for (const id of ["sum-prefill", "sum-decode", "sum-inference", "sum-tokens", "sum-cache"]) setCell(id, "–");
         byId("summaryLine").textContent = ""; byId("sumImages").replaceChildren();
+        byId("chip-cache").classList.remove("full"); byId("chip-images").hidden = true;
         const table = byId("timingTable");
         while (table.rows.length > 1) table.deleteRow(1);
         const row = table.insertRow(); row.className = "empty"; row.insertCell().textContent = "Generate an answer to see the split."; row.cells[0].colSpan = 3;

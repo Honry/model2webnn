@@ -1,406 +1,518 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chat on WebNN</title>
+<title>WebNN Chat</title>
 <style>
-  :root { color-scheme: dark; --bg: #0f1114; --card: #171a1f; --inset: #12151a; --line: #2a3037; --line2: #3a4048; --text: #d9dde2; --label: #b4bbc3; --dim: #8b929a; --accent: #6cb6ff; --good: #7fcf8a; --warn: #ffb454; --bad: #ff7a7a;
-          --host: #b8855f; --device: #5b8fc4; --helper: #5fa86a; --primary: #1f4f7a; --primary-line: #2d6aa0; --radius: 8px; }
-  * { box-sizing: border-box; }
-  body { font: 15px/1.55 "Segoe UI", system-ui, sans-serif; margin: 0 auto; padding: 18px 20px 48px; background: var(--bg); color: var(--text); max-width: 1480px; }
-
-  /* header: the title and the status pill */
-  header { display: flex; align-items: center; justify-content: space-between; gap: 8px 20px; flex-wrap: wrap; margin-bottom: 4px; }
-  h1 { font-size: 22px; font-weight: 700; margin: 0; line-height: 1.25; }
-  h1 small { color: var(--dim); font-weight: 500; font-size: 15px; margin-left: 10px; }
-  #status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; color: var(--dim); background: #161a1f; border: 1px solid var(--line2); border-radius: 14px; padding: 3px 14px; font-size: 14px; font-weight: 600; }
-  #status::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: currentColor; opacity: .7; }
-  #status[data-state=busy] { color: var(--accent); background: #16222e; border-color: #25405a; }
-  #status[data-state=busy]::before { width: 11px; height: 11px; background: none; border: 2px solid currentColor; border-right-color: transparent; opacity: 1; animation: spin .8s linear infinite; }
-  #status[data-state=ready] { color: var(--good); background: #15221a; border-color: #28472f; }
-  #status[data-state=error] { color: var(--bad); background: #2a1719; border-color: #5a2a2e; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { #status[data-state=busy]::before { animation: none; } }
-  #status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px 14px; margin: 12px 0; }
-  .card > .title, details.card > summary { font-size: 13.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--label); margin-bottom: 10px; cursor: default; }
-  .title .aside, details.card > summary .aside { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--dim); margin-left: 8px; }
-  details.card > summary { cursor: pointer; margin-bottom: 0; }
-  details.card[open] > summary { margin-bottom: 10px; }
-  summary:hover { color: var(--text); }
-
-  /* form controls */
-  .fields { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; }
-  .field { display: flex; flex-direction: column; gap: 3px; min-width: 120px; }
-  .field > span { color: var(--label); font-size: 13.5px; font-weight: 600; }
-  select, input, textarea, button { font: inherit; color: var(--text); background: #1f2328; border: 1px solid var(--line2); border-radius: 5px; padding: 4px 8px; }
-  select:disabled, input:disabled { opacity: .5; }
-  input[type=number] { width: 84px; }
-  input[type=checkbox] { accent-color: var(--primary-line); }
-  textarea { width: 100%; min-height: 84px; height: 84px; resize: vertical; line-height: 1.5; }
-  button { cursor: pointer; padding: 6px 16px; font-weight: 600; }
-  button:hover:not(:disabled) { border-color: var(--accent); }
-  button:disabled { opacity: .45; cursor: default; }
-  button.primary { background: var(--primary); border-color: var(--primary-line); color: #fff; }
-  button.primary:hover:not(:disabled) { background: #25598b; }
-  button.quiet { background: transparent; color: var(--label); font-weight: 500; }
-  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .actions { display: flex; align-items: center; gap: 10px 14px; margin-top: 10px; flex-wrap: wrap; }
-  .actions label { display: inline-flex; align-items: center; gap: 6px; }
-  .hint { color: var(--dim); font-size: 13.5px; }
-  #loadedLabel { color: var(--good); font-size: 14px; font-weight: 600; margin-top: 8px; }
-  #loadedLabel:empty, #optionWarning:empty { display: none; }
-  #loadedLabel::before { content: "\2713\00a0"; }
-  #optionWarning { color: var(--warn); font-size: 14px; font-weight: 600; margin-top: 8px; }
-  details.inline { margin-top: 12px; }
-  details.inline > summary { cursor: pointer; color: var(--label); font-size: 14px; font-weight: 600; }
-  details.inline > summary .aside { color: var(--dim); font-weight: 400; margin-left: 6px; }
-  #fixedOptions { white-space: pre-line; margin-top: 6px; color: var(--label); font: 13px/1.6 Consolas, monospace; word-break: break-word; }
-
-  /* tips: hover the (i) or any dotted label */
-  [data-tip] { position: relative; }
-  .tip { display: inline-block; width: 14px; height: 14px; line-height: 13px; text-align: center; border: 1px solid #4a525b; border-radius: 50%; color: var(--dim); font-size: 11px; font-weight: 700; margin-left: 5px; cursor: help; vertical-align: 1px; font-style: normal; }
-  [data-tip]:hover::after { content: attr(data-tip); position: absolute; left: 0; top: calc(100% + 6px); z-index: 20; width: max-content; max-width: min(420px, 80vw); white-space: pre-line; text-align: left; background: #0b0d0f; color: var(--text); border: 1px solid #4a525b; border-radius: 6px; padding: 7px 10px; font: 14px/1.5 "Segoe UI", system-ui, sans-serif; text-transform: none; letter-spacing: 0; box-shadow: 0 6px 18px rgba(0,0,0,.5); pointer-events: none; }
-  .tip:hover::after { left: -8px; }
-  .dotted { border-bottom: 1px dotted #5a626b; cursor: help; }
-
-  /* option grid: fixed columns so every select lines up */
-  .group-label { font-size: 12.5px; font-weight: 700; color: #7f8791; text-transform: uppercase; letter-spacing: .06em; margin: 14px 0 6px; border-left: 3px solid var(--line2); padding-left: 8px; }
-  .optgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px 16px; align-items: end; }
-  .optgrid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .optgrid .field { min-width: 0; }
-  .optgrid select, .optgrid input { width: 100%; }
-  .optgrid .actions { grid-column: span 2; margin-top: 0; padding-bottom: 1px; }
-  @media (max-width: 900px) { .optgrid, .optgrid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  @media (max-width: 560px) { .optgrid, .optgrid.three { grid-template-columns: minmax(0, 1fr); } .optgrid .actions { grid-column: auto; } }
-
-  /* headline metrics */
-  .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 12px 0; }
-  .metric { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--c); border-radius: var(--radius); padding: 8px 14px 6px; }
-  .metric .label { font-size: 12.5px; font-weight: 700; color: var(--label); text-transform: uppercase; letter-spacing: .05em; }
-  .metric .value { font: 700 32px/1.2 "Segoe UI", system-ui, sans-serif; color: var(--c); }
-  .metric .value small { font-size: 15px; font-weight: 600; margin-left: 5px; opacity: .85; }
-  .metric .sub { font-size: 12.5px; color: var(--dim); min-height: 1.45em; }
-  @media (max-width: 900px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-  #summaryLine { color: var(--dim); font-size: 13.5px; margin-top: 8px; }
-  #summaryLine:empty { display: none; }
-
-  /* tables: vivid numbers, tips instead of text */
-  #summaryTable td:nth-child(2) { font-weight: 700; font-size: 16px; }
-  #sum-tokens, #sum-cache { font-size: 14px; color: var(--text); }
-  #sum-load, #sum-prefill { color: #4fd1ff; }
-  #sum-build, #sum-startup { color: #c792ea; }
-  #sum-decode { color: #ffb454; }
-  #sum-inference { color: #5af78e; }
-  #timingTable td.num { font-weight: 700; font-size: 16px; width: 80px; }
-  #timingTable td.share { width: 42%; text-align: left; }
-  .bar { display: inline-block; vertical-align: middle; width: calc(100% - 46px); height: 10px; background: #232830; border-radius: 5px; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: currentColor; border-radius: 5px; }
-  .pct { display: inline-block; width: 40px; text-align: right; font-size: 13px; color: var(--label); }
-  .t-host td.num, .t-host td.share { color: #ffb454; }
-  .t-enqueue td.num, .t-enqueue td.share { color: #4fd1ff; }
-  .t-device td.num, .t-device td.share { color: #5af78e; }
-  .t-sample td.num, .t-sample td.share { color: #c792ea; }
-  .t-total td.num, .t-total td.share { color: #ffffff; }
-  .t-total td { border-top: 2px solid var(--line2); font-weight: 700; }
-  td[data-tip] .dotted, td.has-tip { border-bottom: 0; }
-  td.has-tip { cursor: help; text-decoration: underline dotted #5a626b; text-underline-offset: 4px; }
-  td.num[data-tip]:hover::after, #summaryTable td:nth-child(2)[data-tip]:hover::after { left: auto; right: 0; }
-  tr.empty td { color: var(--dim); font-weight: 400; text-align: left; border-bottom: 0; }
-
-  /* decode profile */
-  #profileTable td.num { font-weight: 700; font-size: 16px; width: 110px; }
-  .p-segment td.num { color: #4fd1ff; } .p-sum td.num { color: #ffb454; } .p-full td.num { color: #5af78e; } .p-diff td.num { color: #ff7a7a; } .p-idle td.num, .p-host td.num { color: #c792ea; }
-  .p-sum td, .p-full td { border-top: 1px solid var(--line2); font-weight: 700; }
-
-  /* results */
-  .answer-box:empty::before { content: attr(data-placeholder); color: var(--dim); font-size: 14.5px; }
-  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 12px; }
-  .cols > .card { margin: 0; }
-  table { border-collapse: collapse; width: 100%; }
-  td, th { border-bottom: 1px solid #23282d; padding: 4px 8px; text-align: right; }
-  th { color: var(--label); font-weight: 700; font-size: 13.5px; }
-  td:first-child, th:first-child { text-align: left; }
-  td:first-child { font-weight: 600; }
-  #log { white-space: pre-wrap; color: #aab1b8; font: 13px/1.5 Consolas, monospace; max-height: 260px; overflow: auto; background: #111418; padding: 8px 10px; border: 1px solid #23282d; border-radius: 6px; }
-  #log:empty::before { content: "Nothing logged yet."; color: var(--dim); }
-  .tablewrap { overflow-x: auto; }
-
-  /* pipeline diagram */
-  .row { display: flex; align-items: stretch; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
-  .box { border: 1px solid #4a525b; border-radius: 5px; padding: 5px 10px; background: #14171a; min-width: 150px; font-weight: 700; }
-  .box small { display: block; color: #9aa1a8; font-size: 13px; font-weight: 400; line-height: 1.4; }
-  .box .time { color: var(--good); font-size: 13px; font-weight: 600; }
-  .arrow { align-self: center; color: #6a727b; font-size: 16px; }
-  .host { border-color: #7a5a40; }
-  .device { border-color: #3f6a99; }
-  .helper { border-color: #3f7a49; background: #141c16; }
-  .phase { border: 1px dashed var(--line2); border-radius: 6px; padding: 6px 10px 8px; margin: 8px 0; }
-  .phase > .title { color: var(--text); margin-bottom: 4px; font-weight: 700; font-size: 15px; }
-  .active { outline: 2px solid #f2c744; background: #2a2616; }
-  .legend { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--label); font-size: 14px; font-weight: 600; margin-bottom: 6px; }
-  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-  @media (max-width: 760px) { .arrow { display: none; } .box { flex: 1 1 calc(50% - 6px); min-width: 0; } }
-  @media (max-width: 460px) { .box { flex-basis: 100%; } }
-
-
-  /* image rows of the Summary: one group per picture */
-  #sumImages td { font-size: 14px; }
-  #sumImages tr.img-head td { text-align: left; color: var(--label); font-weight: 700; border-bottom: 0; padding-top: 8px; }
-  #sumImages tr.img-row td:first-child { padding-left: 22px; font-weight: 400; color: var(--label); }
-  #sumImages tr.img-row td:nth-child(2) { font-weight: 600; font-size: 14px; color: var(--text); }
-  #sumImages tr.img-row.host td:nth-child(2) { color: #ffb454; } #sumImages tr.img-row.device td:nth-child(2) { color: #5af78e; }
-  .quick { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
-  .quick button { padding: 3px 12px; font-weight: 500; }
-
-  /* answer box: Markdown | Raw toggle (answer-view.js) and the rendered Markdown (markdown.js) */
-  .answer-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 6px; }
-  .answer-bar button { padding: 2px 12px; font-size: 13px; font-weight: 600; background: #1b1f24; color: var(--dim); }
-  .answer-bar button:hover:not(:disabled) { color: var(--text); }
-  .answer-bar .seg { display: inline-flex; }
-  .answer-bar .seg button { border-radius: 0; margin-left: -1px; }
-  .answer-bar .seg button:first-child { border-radius: 5px 0 0 5px; margin-left: 0; }
-  .answer-bar .seg button:last-child { border-radius: 0 5px 5px 0; }
-  .answer-bar .seg button.on { background: var(--primary); border-color: var(--primary-line); color: #fff; position: relative; }
-  .answer-box.md { white-space: normal; overflow-wrap: anywhere; line-height: 1.55; }
-  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
-  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1em 0 .4em; line-height: 1.3; font-weight: 700; color: #eef1f4; }
-  .md h1 { font-size: 1.4em; padding-bottom: .2em; border-bottom: 1px solid var(--line); } .md h2 { font-size: 1.25em; padding-bottom: .15em; border-bottom: 1px solid var(--line); } .md h3 { font-size: 1.12em; } .md h4, .md h5, .md h6 { font-size: 1em; } .md h6 { color: var(--dim); }
-  .md p { margin: .5em 0; }
-  .md strong { color: #fff; } .md del { color: var(--dim); }
-  .md a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
-  .md ul, .md ol { margin: .4em 0; padding-left: 1.6em; } .md li { margin: .15em 0; } .md li > ul, .md li > ol { margin: .15em 0; } .md ul ul { list-style: circle; } .md input[type=checkbox] { margin: 0 .3em 0 -1.2em; vertical-align: -1px; }
-  .md code { font: .88em Consolas, "Cascadia Mono", monospace; background: #242a31; border-radius: 4px; padding: .1em .35em; }
-  .md pre.md-code { margin: .6em 0; padding: 10px 12px; background: #0d0f11; border: 1px solid var(--line); border-radius: 6px; overflow-x: auto; white-space: pre; }
-  .md pre.md-code code { background: none; padding: 0; font-size: 13.5px; line-height: 1.5; border-radius: 0; }
-  .md pre.md-code.md-open { border-left: 3px solid var(--accent); }
-  .md pre.md-code[data-lang]::before { content: attr(data-lang); display: block; color: var(--dim); font: 600 11.5px "Segoe UI", system-ui, sans-serif; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
-  .md blockquote { margin: .6em 0; padding: .1em 0 .1em 12px; border-left: 4px solid #3f6a99; color: #b9c0c7; background: rgba(91, 143, 196, .07); border-radius: 0 4px 4px 0; }
-  .md hr { border: 0; border-top: 1px solid var(--line2); margin: 1em 0; }
-  .md .md-table { overflow-x: auto; margin: .6em 0; }
-  .md table { width: auto; border-collapse: collapse; font-size: .95em; }
-  .md th, .md td { border: 1px solid var(--line2); padding: 4px 10px; text-align: left; font-weight: 400; }
-  .md th { background: #1f2328; font-weight: 700; color: #eef1f4; } .md td:first-child { font-weight: 400; }
-
-  /* app layout: the session column on the left, the conversation (message list + composer) with the numbers of the last turn under it on the right; stacked on narrow screens */
-  .app { display: grid; grid-template-columns: minmax(290px, 330px) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 10px; }
-  .sidecol { position: sticky; top: 10px; max-height: calc(100vh - 20px); overflow-y: auto; padding-right: 2px; }
-  .sidecol > .card:first-child { margin-top: 0; }
-  .sidecol .optgrid, .sidecol .optgrid.three { grid-template-columns: minmax(0, 1fr); }
-  .sidecol .optgrid .actions { grid-column: auto; }
-  .sidecol .field.wide { margin-bottom: 8px; }
-  .sidecol .field.wide select { width: 100%; }
-  .maincol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-  .chatcol { display: flex; flex-direction: column; height: clamp(480px, 66vh, 800px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: hidden; }
-  .results { margin: 0; }
-  .results .cols { margin: 10px 0 0; gap: 18px; }
-  .results .cols > .card { border: 0; background: transparent; padding: 0; }
-  .results .cols .title { margin-bottom: 4px; }
-  .results .metrics { margin: 4px 0 8px; }
-  #sessionLine { margin-top: 2px; color: var(--dim); font-size: 13px; }
-  #sessionLine:empty { display: none; }
-  @media (max-width: 900px) {
-    .app { grid-template-columns: minmax(0, 1fr); }
-    .sidecol { position: static; max-height: none; overflow: visible; }
-    .chatcol { height: auto; }
-    .conversation { max-height: 60vh; min-height: 200px; }
+  /* ---------------------------------------------------------------- design tokens: a dark base, one indigo accent, a few semantic colours; light variant below */
+  :root {
+    color-scheme: dark;
+    --bg: #0a0c10; --side: #0f1218; --surface: #141821; --surface2: #1a1f2b; --surface3: #232a3a; --line: #252b38; --line2: #343c50;
+    --text: #e8ebf2; --text2: #b9c0cf; --dim: #7f8799;
+    --accent: #7c6cff; --accent2: #a094ff; --accent-bg: rgba(124, 108, 255, .16); --on-accent: #fff;
+    --violet: #8b7bff; --teal: #2dd4bf; --blue: #60a5fa; --amber: #fbbf24; --green: #34d399; --red: #f87171; --pink: #f472b6; --cyan: #38bdf8;
+    --host: #c58b5f; --device: #5b8fc4; --helper: #5fa86a;
+    --shadow: 0 10px 34px rgba(0, 0, 0, .35); --code: #0b0e14;
+    --r-s: 8px; --r-m: 12px; --r-l: 18px;
+    --font: Inter, "Segoe UI", system-ui, -apple-system, sans-serif; --mono: "Cascadia Mono", Consolas, "SF Mono", monospace;
   }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg: #f3f4f9; --side: #ffffff; --surface: #ffffff; --surface2: #f1f3f9; --surface3: #e5e8f1; --line: #e0e4ee; --line2: #c9cfde;
+      --text: #1b2030; --text2: #424a5f; --dim: #6c748b;
+      --accent: #5b4cf0; --accent2: #4a3cd8; --accent-bg: rgba(91, 76, 240, .10);
+      --violet: #6a5bf0; --teal: #0d9488; --blue: #2563eb; --amber: #d97706; --green: #059669; --red: #dc2626; --pink: #db2777; --cyan: #0284c7;
+      --host: #a8693a; --device: #2f6aa8; --helper: #2f8a43;
+      --shadow: 0 10px 30px rgba(30, 40, 80, .12); --code: #f4f5fa;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; font: 15px/1.5 var(--font); background: var(--bg); color: var(--text); -webkit-font-smoothing: antialiased; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:disabled { cursor: default; opacity: .5; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ic { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; vertical-align: -.2em; }
+  [hidden] { display: none !important; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-  /* conversation */
-  .conversation { flex: 1 1 auto; overflow-y: auto; padding: 16px 16px 8px; display: flex; flex-direction: column; gap: 14px; scroll-behavior: smooth; }
-  .chat-empty { margin: auto; max-width: 420px; text-align: center; color: var(--dim); font-size: 14.5px; }
-  .msg { display: flex; }
+  /* ---------------------------------------------------------------- shell: sidebar + main */
+  .shell { display: grid; grid-template-columns: 308px minmax(0, 1fr); min-height: 100vh; }
+  .sidebar { position: sticky; top: 0; height: 100vh; overflow-y: auto; padding: 18px 14px 28px; background: var(--side); border-right: 1px solid var(--line); }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 0 4px 6px; }
+  .logo { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; color: var(--on-accent); background: linear-gradient(135deg, var(--accent), var(--pink)); box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 45%, transparent); }
+  .brand b { font-size: 17px; letter-spacing: -.01em; }
+  .main { min-width: 0; }
+  .topbar { display: flex; align-items: center; gap: 12px; height: 60px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+  .topbar h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .topbar h1 small { color: var(--dim); font-weight: 500; font-size: 13px; margin-left: 8px; }
+  .topbar .grow { flex: 1; }
+  #sidebarToggle { display: none; }
+
+  /* buttons */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--line2); background: var(--surface2); font-weight: 600; font-size: 14px; transition: border-color .15s, background .15s, transform .05s; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); background: var(--surface3); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn.primary { border: 0; color: var(--on-accent); background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, var(--pink))); box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  .btn.ghost { background: transparent; color: var(--text2); }
+  .btn.wide { width: 100%; height: 42px; font-size: 15px; border-radius: 12px; }
+  .iconbtn { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; border: 1px solid transparent; background: transparent; color: var(--text2); transition: background .15s, color .15s; }
+  .iconbtn:hover:not(:disabled) { background: var(--surface3); color: var(--text); }
+
+  /* status pill */
+  #status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 46vw; padding: 4px 12px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--dim); background: var(--surface2); border: 1px solid var(--line2); }
+  #status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  #status[data-state=busy] { color: var(--blue); background: color-mix(in srgb, var(--blue) 13%, var(--surface)); border-color: color-mix(in srgb, var(--blue) 40%, transparent); }
+  #status[data-state=busy]::before { width: 11px; height: 11px; background: none; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; }
+  #status[data-state=ready] { color: var(--green); background: color-mix(in srgb, var(--green) 13%, var(--surface)); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+  #status[data-state=error] { color: var(--red); background: color-mix(in srgb, var(--red) 13%, var(--surface)); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { #status[data-state=busy]::before { animation: none; } * { scroll-behavior: auto !important; } }
+
+  /* ---------------------------------------------------------------- sidebar panels: one card, one colour, one icon per section */
+  .panel { position: relative; margin-top: 12px; padding: 14px 14px 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: inset 3px 0 0 var(--pc, var(--accent)); }
+  .panel > h2, .panel > summary { display: flex; align-items: center; gap: 9px; margin: 0 0 12px; font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--text2); list-style: none; }
+  .panel > summary { margin: 0; cursor: pointer; }
+  details.panel[open] > summary { margin-bottom: 12px; }
+  .panel > summary::-webkit-details-marker { display: none; }
+  .panel > summary::after { content: ""; margin-left: auto; width: 8px; height: 8px; border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim); transform: rotate(45deg); transition: transform .15s; }
+  details.panel[open] > summary::after { transform: rotate(-135deg); }
+  .pi { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; color: var(--pc, var(--accent)); background: color-mix(in srgb, var(--pc, var(--accent)) 17%, transparent); }
+  .p-model { --pc: var(--violet); } .p-device { --pc: var(--teal); } .p-session { --pc: var(--blue); } .p-adv { --pc: var(--amber); }
+  .fl { display: flex; align-items: center; gap: 6px; margin: 12px 0 6px; font-size: 12.5px; font-weight: 600; color: var(--dim); }
+  .fl:first-of-type { margin-top: 0; }
+  .advbody .fl:first-child { margin-top: 0; }
+  .sub { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--dim); margin-left: 2px; }
+  #advancedSummary { font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 130px; }
+  #loadedLabel { display: flex; align-items: center; gap: 7px; margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--green); }
+  #loadedLabel::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent); }
+  #loadedLabel:empty, #optionWarning:empty { display: none; }
+  #optionWarning { margin-top: 10px; padding: 8px 10px; border-radius: 10px; font-size: 12.5px; color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); }
+  .rowbtns { display: flex; gap: 8px; margin-top: 14px; }
+  .rowbtns .btn.ghost { flex: none; }
+  .input { width: 100%; height: 36px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--line2); background: var(--surface2); }
+  .input:focus { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px var(--accent-bg); }
+  #fixedOptions { white-space: pre-line; margin-top: 4px; color: var(--dim); font: 12px/1.6 var(--mono); word-break: break-word; }
+
+  /* chip groups (chips.js: they stand in for the hidden <select>s) */
+  .cg { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cg-item { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 4px 12px; border-radius: 10px; border: 1px solid var(--line2); background: var(--surface2); color: var(--text2); font-weight: 600; font-size: 14px; transition: border-color .15s, background .15s, color .15s; }
+  .cg-item:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+  .cg-item.on { border-color: var(--accent); background: var(--accent-bg); color: var(--text); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .cg-text { display: inline-flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
+  .cg-sub { font-size: 11px; font-weight: 500; color: var(--dim); }
+  .cg-tag { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--dim); background: var(--surface3); }
+  .cg-tag.star { color: var(--amber); background: none; padding: 0; font-size: 13px; }
+  .cg.disabled .cg-item { opacity: .45; }
+  .cg-segmented { flex-wrap: nowrap; gap: 0; border: 1px solid var(--line2); border-radius: 11px; padding: 3px; background: var(--surface2); }
+  .cg-segmented .cg-item { flex: 1; justify-content: center; border: 0; border-radius: 8px; background: transparent; min-height: 30px; padding: 2px 10px; }
+  .cg-segmented .cg-item.on { background: var(--accent); color: var(--on-accent); box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 40%, transparent); }
+  .cg-segmented .cg-item.on .cg-sub { color: inherit; opacity: .8; }
+  .cg-rows { flex-direction: column; flex-wrap: nowrap; gap: 6px; }
+  .cg-rows .cg-item { width: 100%; justify-content: flex-start; flex-wrap: wrap; padding: 9px 12px; border-radius: 12px; text-align: left; }
+  .cg-rows .cg-main { font-size: 14.5px; }
+  .cg-dot { flex: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--line2); }
+  .cg-item.on .cg-dot { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 38%, transparent 42%); }
+  .cg-heading { margin: 8px 2px 0; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+
+  /* tips: hover the (i) or a dotted label */
+  [data-tip] { position: relative; }
+  .tip { display: inline-grid; place-items: center; width: 15px; height: 15px; border: 1px solid var(--line2); border-radius: 50%; color: var(--dim); font-size: 10px; font-weight: 700; font-style: normal; cursor: help; text-transform: none; letter-spacing: 0; }
+  [data-tip]:hover::after { content: attr(data-tip); position: absolute; left: 0; top: calc(100% + 8px); z-index: 60; width: max-content; max-width: min(380px, 80vw); white-space: pre-line; text-align: left; background: var(--surface3); color: var(--text); border: 1px solid var(--line2); border-radius: 10px; padding: 8px 11px; font: 13px/1.5 var(--font); font-weight: 500; text-transform: none; letter-spacing: 0; box-shadow: var(--shadow); pointer-events: none; }
+  .sidebar [data-tip]:hover::after { left: 0; }
+  .dock [data-tip]:hover::after, .msg [data-tip]:hover::after { top: auto; bottom: calc(100% + 8px); }
+  .dotted { border-bottom: 1px dotted var(--dim); cursor: help; }
+
+  /* ---------------------------------------------------------------- chat */
+  .chatpanel { position: relative; display: flex; flex-direction: column; height: calc(100vh - 60px); min-height: 560px; }
+  .conversation { flex: 1 1 auto; display: flex; flex-direction: column; gap: 26px; overflow-y: auto; padding: 30px 20px 18px; scroll-behavior: smooth; }
+  .conversation > * { width: min(100%, 880px); margin-inline: auto; flex: none; }
+  .chat-empty { margin-block: auto !important; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .empty-logo { display: grid; place-items: center; width: 60px; height: 60px; margin-bottom: 8px; border-radius: 20px; color: var(--on-accent); background: linear-gradient(135deg, var(--accent), var(--pink)); box-shadow: 0 10px 34px color-mix(in srgb, var(--accent) 40%, transparent); font-size: 26px; }
+  .chat-empty h2 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -.02em; }
+  .empty-model { margin: 0; color: var(--dim); font-size: 14px; }
+  .suggest { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 22px; max-width: 760px; }
+  .suggest-label { width: 100%; text-align: center; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+  .suggest .sg { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 14px; border: 1px solid var(--line2); background: var(--surface); color: var(--text2); font-size: 14.5px; font-weight: 500; text-align: left; transition: border-color .15s, background .15s, transform .1s; }
+  .suggest .sg:hover { border-color: var(--accent); background: var(--accent-bg); color: var(--text); transform: translateY(-1px); }
+  .suggest .sg .ic { color: var(--accent2); }
+  #sampleChips { margin-top: 14px; }
+  #sampleChips .cg { justify-content: center; }
+  #sampleChips .cg-item { background: var(--surface); }
+
+  .msg { display: flex; font-size: 16px; line-height: 1.65; }
   .msg.user { justify-content: flex-end; }
-  .msg .bubble { max-width: min(92%, 860px); border-radius: 12px; padding: 9px 14px; }
-  .msg.user .bubble { background: #1b3a57; border: 1px solid #28507a; border-bottom-right-radius: 4px; }
+  .msg.user .bubble { max-width: min(82%, 680px); padding: 10px 18px; border-radius: 20px 20px 6px 20px; color: var(--on-accent); background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 72%, var(--pink))); box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 28%, transparent); }
   .msg.user .text { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .msg.assistant .bubble { background: #1b1f25; border: 1px solid var(--line); border-bottom-left-radius: 4px; min-width: min(100%, 220px); }
-  .msg.assistant .answer-box { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15.5px; background: transparent; border: 0; padding: 0; min-height: 1.5em; }
+  .attached { display: flex; align-items: center; gap: 10px; margin: 2px 0 8px; font-size: 13px; opacity: .92; }
+  .attached .thumb, .chip .thumb { border-radius: 8px; border: 1px solid rgba(255, 255, 255, .35); background: #fff; flex: none; }
+  .msg.assistant { gap: 14px; }
+  .avatar { flex: none; display: grid; place-items: center; width: 34px; height: 34px; margin-top: 2px; border-radius: 12px; color: var(--on-accent); background: linear-gradient(135deg, var(--accent), var(--pink)); }
+  .msg.assistant .body { flex: 1; min-width: 0; }
+  .msg.assistant .answer-box { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.65em; font-size: 16px; line-height: 1.7; }
   .msg.assistant .answer-box.md { white-space: normal; }
   .msg.assistant .answer-box:empty::before { content: attr(data-placeholder); color: var(--dim); }
-  .msg .meta { margin-top: 6px; color: var(--dim); font-size: 12.5px; }
-  .msg .meta:empty { display: none; }
-  .msg .meta[data-state=stopped] { color: var(--warn); }
-  .msg .meta[data-state=full] { color: var(--warn); }
-  .msg.assistant[data-state=error] .bubble { border-color: #5a2a2e; }
-  .msg.dropped { opacity: .42; }
-  .notice { align-self: center; color: var(--dim); font-size: 13px; border-top: 1px dashed var(--line2); border-bottom: 1px dashed var(--line2); padding: 3px 14px; text-align: center; }
-  .notice.warn { color: var(--warn); border-color: #6a5030; }
-  .attached { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: #c3c9cf; }
-  .attached .thumb, .chip .thumb { border-radius: 5px; border: 1px solid var(--line2); background: #fff; flex: none; }
-  .answer-bar.compact { margin-bottom: 4px; }
-  .answer-bar.compact button { padding: 0 9px; font-size: 12px; }
-  .msg.assistant .answer-bar { opacity: .55; transition: opacity .15s; }
-  .msg.assistant:hover .answer-bar, .msg.assistant:focus-within .answer-bar { opacity: 1; }
+  .msg .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 10px; font-size: 12.5px; }
+  .msg .toolbar .meta { display: contents; }
+  .mchip { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--c, var(--dim)); background: color-mix(in srgb, var(--c, var(--dim)) 14%, transparent); }
+  .mchip.warn { --c: var(--amber); } .mchip.ttft { --c: var(--cyan); } .mchip.tpot { --c: var(--amber); } .mchip.tok { --c: var(--blue); }
+  .msg .toolbar .spacer { flex: 1; }
+  .msg.dropped { opacity: .38; }
+  .msg.assistant[data-state=error] .answer-box { color: var(--red); }
+  .notice { align-self: center; padding: 4px 14px; border-radius: 999px; font-size: 12.5px; color: var(--dim); background: var(--surface2); border: 1px dashed var(--line2); text-align: center; }
+  .notice.warn { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 10%, transparent); }
 
-  /* composer */
-  .composer { flex: none; border-top: 1px solid var(--line); background: #14171b; padding: 10px 14px 10px; }
-  .composer.over { outline: 2px dashed var(--accent); outline-offset: -4px; }
-  .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 6px; }
-  .composer-tools .field.inline { flex-direction: row; align-items: center; gap: 6px; min-width: 0; }
-  .composer-tools .field.inline select { max-width: 260px; }
-  .composer-tools .quick { margin: 0; gap: 6px; }
-  .composer textarea { min-height: 54px; height: 62px; max-height: 40vh; }
-  .composer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 8px; }
-  .composer-row .attach { display: inline-flex; align-items: center; gap: 6px; }
-  .composer-row .attach[hidden], .composer-tools [hidden] { display: none; }
-  .composer-row label.small { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--label); }
-  .composer-row .spacer { flex: 1 1 0; }
-  .composer-foot { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 4px; min-height: 1.4em; }
-  #runButton.stop { background: #6a2a2e; border-color: #94404a; }
-  #runButton.stop:hover:not(:disabled) { background: #7d343a; }
+  /* answer bar (answer-view.js): Markdown | Raw, Copy */
+  .answer-bar { display: inline-flex; align-items: center; gap: 6px; }
+  .answer-bar button { height: 26px; padding: 0 10px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--dim); font-size: 12px; font-weight: 600; }
+  .answer-bar button:hover { color: var(--text); background: var(--surface3); }
+  .answer-bar .seg { display: inline-flex; padding: 2px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--line); }
+  .answer-bar .seg button { border-radius: 8px; height: 22px; }
+  .answer-bar .seg button.on { background: var(--surface3); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .25); }
+
+  /* rendered Markdown (markdown.js) */
+  .md > :first-child { margin-top: 0; } .md > :last-child { margin-bottom: 0; }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.3em 0 .5em; line-height: 1.3; font-weight: 700; letter-spacing: -.01em; }
+  .md h1 { font-size: 1.55em; padding-bottom: .25em; border-bottom: 1px solid var(--line); } .md h2 { font-size: 1.32em; padding-bottom: .2em; border-bottom: 1px solid var(--line); } .md h3 { font-size: 1.15em; } .md h4, .md h5, .md h6 { font-size: 1em; } .md h6 { color: var(--dim); }
+  .md p { margin: .75em 0; }
+  .md strong { font-weight: 700; } .md del { color: var(--dim); }
+  .md a { color: var(--accent2); text-decoration: underline; text-underline-offset: 3px; }
+  .md ul, .md ol { margin: .7em 0; padding-left: 1.7em; } .md li { margin: .3em 0; } .md li > ul, .md li > ol { margin: .2em 0; } .md ul ul { list-style: circle; } .md li::marker { color: var(--accent2); } .md input[type=checkbox] { margin: 0 .4em 0 -1.3em; accent-color: var(--accent); }
+  .md code { font: .88em var(--mono); padding: .15em .42em; border-radius: 6px; background: var(--surface3); color: var(--accent2); }
+  .md pre.md-code { position: relative; margin: 1em 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--code); overflow-x: auto; white-space: pre; line-height: 1.55; }
+  .md pre.md-code code { padding: 0; background: none; color: var(--text); font-size: 13.5px; border-radius: 0; }
+  .md pre.md-code.md-open { border-left: 3px solid var(--accent); }
+  .md pre.md-code[data-lang]::before { content: attr(data-lang); display: block; margin-bottom: 6px; color: var(--dim); font: 600 11px var(--font); text-transform: uppercase; letter-spacing: .08em; }
+  .code-copy { position: absolute; top: 8px; right: 8px; height: 24px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line2); background: var(--surface2); color: var(--dim); font: 600 11.5px var(--font); opacity: 0; transition: opacity .15s; }
+  .md pre.md-code:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+  .md blockquote { margin: 1em 0; padding: .35em 1em; border-left: 4px solid var(--accent); border-radius: 0 10px 10px 0; background: var(--accent-bg); color: var(--text2); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 1.4em 0; }
+  .md .md-table { overflow-x: auto; margin: 1em 0; border: 1px solid var(--line); border-radius: 12px; }
+  .md table { width: 100%; border-collapse: collapse; font-size: .94em; }
+  .md th, .md td { padding: 8px 14px; text-align: left; font-weight: 400; border: 0; border-top: 1px solid var(--line); }
+  .md thead th { border-top: 0; background: var(--surface3); font-weight: 700; }
+  .md tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface2) 70%, transparent); }
+  .md td:first-child, .md th:first-child { border-left: 0; }
+
+  /* ---------------------------------------------------------------- dock: composer, the numbers of the last turn */
+  .dock { position: relative; padding: 6px 20px 14px; }
+  .dock > *:not(.perf-panel) { width: min(100%, 880px); margin-inline: auto; }
+  .composer { padding: 12px 14px 10px; border: 1px solid var(--line2); border-radius: 24px; background: var(--surface); box-shadow: var(--shadow); transition: border-color .15s, box-shadow .15s; }
+  .composer:focus-within { border-color: var(--accent); box-shadow: var(--shadow), 0 0 0 3px var(--accent-bg); }
+  .composer.over { border-color: var(--accent); background: var(--accent-bg); }
+  .composer textarea { display: block; width: 100%; min-height: 28px; max-height: 220px; padding: 4px 6px; border: 0; outline: 0; resize: none; background: transparent; font-size: 16px; line-height: 1.55; }
+  .composer textarea::placeholder { color: var(--dim); }
+  .composer-bar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .composer-bar .spacer { flex: 1; }
+  .composer-bar .attach { display: inline-flex; align-items: center; gap: 6px; }
+  .composer-bar .cg-segmented { padding: 2px; border-radius: 10px; }
+  .composer-bar .cg-segmented .cg-item { min-height: 26px; padding: 0 9px; font-size: 12.5px; }
+  .opt { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface2); color: var(--text2); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+  .opt:hover { border-color: var(--line2); }
+  .opt input[type=number] { width: 44px; border: 0; background: transparent; text-align: right; font-weight: 700; outline: 0; -moz-appearance: textfield; appearance: textfield; }
+  .opt input[type=number]::-webkit-outer-spin-button, .opt input[type=number]::-webkit-inner-spin-button { appearance: none; margin: 0; }
+  .opt input[type=checkbox] { appearance: none; position: relative; width: 28px; height: 16px; margin: 0; border-radius: 999px; background: var(--surface3); border: 1px solid var(--line2); transition: background .15s; }
+  .opt input[type=checkbox]::after { content: ""; position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; border-radius: 50%; background: var(--dim); transition: transform .15s, background .15s; }
+  .opt input[type=checkbox]:checked { background: var(--accent); border-color: var(--accent); }
+  .opt input[type=checkbox]:checked::after { transform: translateX(12px); background: #fff; }
+  #runButton { display: inline-grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; color: var(--on-accent); background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 70%, var(--pink))); box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 40%, transparent); transition: transform .1s, filter .15s; }
+  #runButton:hover:not(:disabled) { filter: brightness(1.1); transform: scale(1.04); }
+  #runButton .i-stop { display: none; }
+  #runButton.stop { background: var(--red); box-shadow: 0 4px 14px color-mix(in srgb, var(--red) 40%, transparent); }
+  #runButton.stop .i-send { display: none; } #runButton.stop .i-stop { display: block; }
+  #runHint { margin: 0 auto 8px; padding: 6px 12px; border-radius: 12px; font-size: 13px; color: var(--amber); background: color-mix(in srgb, var(--amber) 12%, transparent); }
+  .quick { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+  .quick button { height: 28px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--line2); background: var(--surface2); color: var(--text2); font-size: 12.5px; font-weight: 600; }
+  .quick button:hover { border-color: var(--accent); color: var(--text); }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
-  .chip { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line2); border-radius: 8px; padding: 3px 4px 3px 4px; background: #1b1f25; cursor: pointer; max-width: 260px; }
+  .chip { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 4px; border: 1px solid var(--line2); border-radius: 12px; background: var(--surface2); cursor: pointer; max-width: 270px; }
   .chip.on { border-color: var(--accent); }
+  .chip .thumb { border-color: var(--line2); }
   .chip-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; font-size: 13px; }
   .chip-text b, .chip-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chip-text small { color: var(--dim); font-size: 12px; }
-  button.chip-x { padding: 0 7px; font-size: 16px; line-height: 1.2; background: transparent; border: 0; color: var(--dim); }
-  button.chip-x:hover { color: var(--bad); }
-  .imagepreview { display: grid; grid-template-columns: minmax(0, 380px) 1fr; gap: 14px; align-items: start; margin-bottom: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--inset); }
-  .imagepreview[hidden] { display: none; }
-  .imagepreview canvas { max-width: 100%; max-height: 300px; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
-  .imagecaption { color: #c3c9cf; font-size: 13.5px; line-height: 1.55; }
-  .imagepreview .blocks { display: inline-flex; gap: 6px; margin-top: 6px; font-size: 13px; color: var(--label); }
+  .chip-text small { color: var(--dim); font-size: 11.5px; }
+  button.chip-x { padding: 0 8px; border: 0; background: transparent; color: var(--dim); font-size: 17px; line-height: 1; }
+  button.chip-x:hover { color: var(--red); }
+  .imagepreview { display: grid; grid-template-columns: minmax(0, 340px) 1fr; gap: 14px; align-items: start; margin-bottom: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface2); }
+  .imagepreview canvas { max-width: 100%; max-height: 260px; border-radius: 10px; background: #fff; border: 1px solid var(--line2); object-fit: contain; }
+  .imagecaption { color: var(--text2); font-size: 13px; line-height: 1.55; }
+  .imagepreview .blocks { display: inline-flex; gap: 6px; margin-top: 6px; font-size: 12.5px; color: var(--dim); }
   @media (max-width: 700px) { .imagepreview { grid-template-columns: minmax(0, 1fr); } }
-  #promptTokenCount.over { color: var(--warn); }
-  #pipelineSummary { margin: 0 0 8px; }
+
+  /* the numbers of the last turn: stat chips */
+  .statsbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 12px; }
+  .stat { display: inline-flex; align-items: baseline; gap: 6px; height: 30px; padding: 0 12px; align-items: center; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--c) 32%, transparent); background: color-mix(in srgb, var(--c) 12%, transparent); font-size: 13px; white-space: nowrap; }
+  .stat .k { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: color-mix(in srgb, var(--c) 80%, var(--text2)); }
+  .stat .v { font-weight: 700; color: var(--c); }
+  .stat .v small { margin-left: 3px; font-size: .82em; font-weight: 600; opacity: .85; }
+  .stat .s { display: none; }
+  .stat.full { --c: var(--red); }
+  #chip-images { --c: var(--pink); }
+  .statsbar .grow { flex: 1; }
+  .ctx { display: inline-flex; align-items: center; height: 30px; padding: 0 12px; border-radius: 999px; font-size: 12.5px; font-weight: 600; color: var(--dim); background: var(--surface2); border: 1px solid var(--line); }
+  .ctx:empty { display: none; }
+  .ctx.over { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 45%, transparent); background: color-mix(in srgb, var(--amber) 10%, transparent); }
+  #perfToggle .ic { transition: transform .15s; }
+  #perfToggle[aria-expanded=true] .ic { transform: rotate(180deg); }
+  .perf-panel { position: absolute; left: 50%; bottom: 100%; z-index: 40; transform: translateX(-50%); width: min(calc(100% - 40px), 880px); max-height: min(62vh, 620px); overflow: auto; margin-bottom: -2px; padding: 16px 18px 18px; border: 1px solid var(--line2); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow); }
+  .perf-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .perf-head .grow { flex: 1; }
+  .perf-head b { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--text2); }
+  #summaryLine, #sessionLine { color: var(--dim); font-size: 12.5px; }
+  #summaryLine:empty, #sessionLine:empty { display: none; }
+  .perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 22px; margin-top: 8px; }
+  .perf-grid h3 { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--text2); }
+
+  /* tables */
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 700; font-size: 12.5px; }
+  td:first-child, th:first-child { text-align: left; }
+  td:first-child { font-weight: 600; }
+  #summaryTable td:nth-child(2) { font-weight: 700; font-size: 15px; }
+  #sum-load, #sum-prefill { color: var(--cyan); } #sum-build, #sum-startup { color: var(--violet); } #sum-decode { color: var(--amber); } #sum-inference { color: var(--green); }
+  #timingTable td.num { font-weight: 700; font-size: 15px; width: 80px; }
+  #timingTable td.share { width: 42%; text-align: left; }
+  .bar { display: inline-block; vertical-align: middle; width: calc(100% - 46px); height: 9px; background: var(--surface3); border-radius: 5px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: currentColor; border-radius: 5px; }
+  .pct { display: inline-block; width: 40px; text-align: right; font-size: 12.5px; color: var(--text2); }
+  .t-host td.num, .t-host td.share { color: var(--amber); } .t-enqueue td.num, .t-enqueue td.share { color: var(--cyan); } .t-device td.num, .t-device td.share { color: var(--green); } .t-sample td.num, .t-sample td.share { color: var(--violet); } .t-total td.num, .t-total td.share { color: var(--text); }
+  .t-total td { border-top: 2px solid var(--line2); font-weight: 700; }
+  td.has-tip { cursor: help; text-decoration: underline dotted var(--dim); text-underline-offset: 4px; }
+  td.num[data-tip]:hover::after, #summaryTable td:nth-child(2)[data-tip]:hover::after { left: auto; right: 0; }
+  tr.empty td { color: var(--dim); font-weight: 400; text-align: left; border-bottom: 0; }
+  #sumImages td { font-size: 13.5px; }
+  #sumImages tr.img-head td { text-align: left; color: var(--pink); font-weight: 700; border-bottom: 0; padding-top: 10px; }
+  #sumImages tr.img-row td:first-child { padding-left: 20px; font-weight: 400; color: var(--text2); }
+  #sumImages tr.img-row td:nth-child(2) { font-weight: 600; font-size: 13.5px; color: var(--text); }
+  #sumImages tr.img-row.host td:nth-child(2) { color: var(--amber); } #sumImages tr.img-row.device td:nth-child(2) { color: var(--green); }
+  #profileTable td.num { font-weight: 700; font-size: 15px; width: 110px; }
+  .p-segment td.num { color: var(--cyan); } .p-sum td.num { color: var(--amber); } .p-full td.num { color: var(--green); } .p-diff td.num { color: var(--red); } .p-idle td.num, .p-host td.num { color: var(--violet); }
+  .p-sum td, .p-full td { border-top: 1px solid var(--line2); font-weight: 700; }
+  .tablewrap { overflow-x: auto; }
+
+  /* ---------------------------------------------------------------- under the hood */
+  .hood { width: min(100% - 40px, 1080px); margin: 8px auto 60px; }
+  .hood > summary { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); cursor: pointer; font-weight: 650; list-style: none; }
+  .hood > summary::-webkit-details-marker { display: none; }
+  .hood > summary small { color: var(--dim); font-weight: 500; }
+  .hood > summary::after { content: ""; margin-left: auto; width: 8px; height: 8px; border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim); transform: rotate(45deg); transition: transform .15s; }
+  .hood[open] > summary::after { transform: rotate(-135deg); }
+  .hood-section { margin-top: 14px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+  .hood-section > h3, .hood-section > summary { margin: 0 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; color: var(--text2); }
+  .hood-section > summary { cursor: pointer; margin: 0; }
+  details.hood-section[open] > summary { margin-bottom: 10px; }
+  .hood-section .aside { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--dim); margin-left: 8px; }
+  .hint { color: var(--dim); font-size: 13px; }
+  #pipelineSummary { margin: 0 0 10px; }
   #pipelineSummary:empty { display: none; }
+  #log { max-height: 280px; overflow: auto; white-space: pre-wrap; padding: 10px 12px; border-radius: 10px; background: var(--code); color: var(--text2); font: 12.5px/1.55 var(--mono); }
+  #log:empty::before { content: "Nothing logged yet."; color: var(--dim); }
+
+  /* pipeline diagram (static for model=js, pipeline.js for a package) */
+  .row { display: flex; align-items: stretch; gap: 6px; margin: 6px 0; flex-wrap: wrap; }
+  .box { min-width: 150px; padding: 6px 11px; border: 1px solid var(--line2); border-radius: 10px; background: var(--surface2); font-weight: 700; }
+  .box small { display: block; color: var(--dim); font-size: 12.5px; font-weight: 400; line-height: 1.4; }
+  .box .time { color: var(--green); font-size: 12.5px; font-weight: 600; }
+  .arrow { align-self: center; color: var(--dim); }
+  .host { border-color: color-mix(in srgb, var(--host) 55%, transparent); }
+  .device { border-color: color-mix(in srgb, var(--device) 60%, transparent); }
+  .helper { border-color: color-mix(in srgb, var(--helper) 60%, transparent); background: color-mix(in srgb, var(--helper) 9%, var(--surface2)); }
+  .phase { margin: 10px 0; padding: 8px 12px 10px; border: 1px dashed var(--line2); border-radius: 12px; }
+  .phase > .title { margin-bottom: 4px; font-weight: 700; font-size: 14.5px; }
+  .active { outline: 2px solid var(--amber); background: color-mix(in srgb, var(--amber) 14%, var(--surface2)); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-bottom: 8px; color: var(--text2); font-size: 13.5px; font-weight: 600; }
+  .dot { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 3px; vertical-align: -1px; }
+  @media (max-width: 760px) { .arrow { display: none; } .box { flex: 1 1 calc(50% - 6px); min-width: 0; } }
+
+  /* ---------------------------------------------------------------- narrow screens: the sidebar becomes a drawer */
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    .sidebar { position: fixed; z-index: 70; left: 0; top: 0; bottom: 0; width: min(88vw, 340px); height: auto; transform: translateX(-102%); transition: transform .2s ease; box-shadow: var(--shadow); }
+    body.sidebar-open .sidebar { transform: none; }
+    body.sidebar-open::after { content: ""; position: fixed; inset: 0; z-index: 65; background: rgba(0, 0, 0, .5); }
+    #sidebarToggle { display: inline-grid; }
+    .topbar { padding: 0 12px; }
+    .chatpanel { height: calc(100vh - 60px); height: calc(100svh - 60px); }
+    .conversation { padding: 20px 12px 12px; }
+    .dock { padding: 4px 12px 12px; }
+    .msg.assistant { gap: 10px; } .avatar { width: 28px; height: 28px; border-radius: 10px; }
+    .chat-empty h2 { font-size: 22px; }
+    .composer-bar { flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.27 6.96L12 12.01l8.73-5.05M12 22.08V12"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></symbol>
+  <symbol id="i-clip" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 12h18M3 6h18M3 18h18"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></symbol>
+</svg>
 
-<header>
-  <h1><span id="pageTitle">Qwen3-4B on WebNN</span><small id="pageSubtitle">NPUW-style subgraph pipeline</small></h1>
-  <div id="status" data-state="idle"><span>loading…</span></div>
-</header>
+<div class="shell">
+<!-- ============ left column: one card per section ============ -->
+<aside class="sidebar" id="sidebar">
+  <div class="brand"><span class="logo"><svg class="ic"><use href="#i-zap"/></svg></span><b>WebNN Chat</b></div>
 
-<main class="app">
-<aside class="sidecol">
-<section class="card modelcard">
-  <div class="title">Model</div>
-    <label class="field wide"><span>Model<i class="tip" data-tip="Qwen3-4B with the hand-written graphs offers every option below.&#10;The other entries are packages built by m2w: they offer the options they were compiled with.&#10;Changing the model reloads the page.">i</i></span><select id="modelSelect"></select></label>
-    <label class="field wide"><span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></span><select id="deviceSelect"></select></label>
-</section>
-<!-- ============ session: what to build ============ -->
-<section class="card">
-  <div class="title">Session</div>
-  <div class="optgrid">
-    <label class="field"><span>Max length<i class="tip" data-tip="KV cache capacity = the whole conversation so far + the new tokens.&#10;Chosen at Load (changing it rebuilds the graphs; the weights stay loaded). A longer max length makes every decode step slower, because the static graphs attend the whole cache, and costs more memory.">i</i></span><select id="maxLengthSelect"></select></label>
-    <label class="field"><span>Prefill chunk<i class="tip" data-tip="Prompt tokens processed per prefill dispatch (one static graph).&#10;Every dispatch pays the int4 dequantization again, so bigger chunks are cheaper per token but waste work on short prompts.">i</i></span><select id="chunkSizeSelect"></select></label>
-    <div class="actions">
-      <button id="loadButton" class="primary">Load model</button>
-      <button id="clearCacheButton" class="quiet" title="delete the cached weight files (OPFS)">Clear weight cache</button>
+  <section class="panel p-model">
+    <h2><span class="pi"><svg class="ic"><use href="#i-box"/></svg></span>Model<i class="tip" data-tip="Qwen3-4B with the hand-written graphs offers every option.&#10;The other entries are packages built by m2w: they offer the options they were compiled with.&#10;Changing the model reloads the page.">i</i></h2>
+    <select id="modelSelect" hidden aria-label="Model"></select>
+  </section>
+
+  <section class="panel p-device">
+    <h2><span class="pi"><svg class="ic"><use href="#i-cpu"/></svg></span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></h2>
+    <select id="deviceSelect" hidden aria-label="Device"></select>
+  </section>
+
+  <section class="panel p-session">
+    <h2><span class="pi"><svg class="ic"><use href="#i-sliders"/></svg></span>Session</h2>
+    <div class="fl">Max length<i class="tip" data-tip="KV cache capacity = the whole conversation so far + the new tokens.&#10;Chosen at Load (changing it rebuilds the graphs; the weights stay loaded). A longer max length makes every decode step slower, because the static graphs attend the whole cache, and costs more memory.">i</i><span class="sub">tokens · KV cache</span></div>
+    <select id="maxLengthSelect" hidden aria-label="Max length"></select>
+    <div class="fl">Prefill chunk<i class="tip" data-tip="Prompt tokens processed per prefill dispatch (one static graph).&#10;Every dispatch pays the int4 dequantization again, so bigger chunks are cheaper per token but waste work on short prompts.">i</i><span class="sub">tokens</span></div>
+    <select id="chunkSizeSelect" hidden aria-label="Prefill chunk"></select>
+    <div class="rowbtns">
+      <button id="loadButton" class="btn primary" style="flex:1"><svg class="ic"><use href="#i-play"/></svg><span class="lbl">Load model</span></button>
+      <button id="clearCacheButton" class="btn ghost" title="delete the cached weight files (OPFS)"><svg class="ic"><use href="#i-trash"/></svg>Cache</button>
     </div>
-  </div>
-  <div class="hint" id="maxLengthHint">Max length is chosen at Load. A longer one makes every decode step slower (the static graphs attend the whole cache) and needs more memory.</div>
-  <div id="loadedLabel"></div>
-  <div id="optionWarning"></div>
-  <details class="inline" id="advanced">
-    <summary>Advanced<span class="aside" id="advancedSummary"></span></summary>
-    <div class="group-label">Prefill and compute</div>
-    <div class="optgrid three">
-      <label class="field"><span>Chunk sizes (multi)<i class="tip" data-tip="Optional, e.g. 64,256. One prefill graph set per size; every prompt uses the chunk sequence with the lowest estimated cost. Overrides the single chunk size.">i</i></span><input id="chunkSizesInput" placeholder="e.g. 64,256"></label>
-      <label class="field"><span>Prefill blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one prefill graph (35 blocks in total). 'same as decode' follows the decode setting.">i</i></span><select id="prefillBlocksPerGraphSelect"><option value="0">same as decode</option></select></label>
-      <label class="field"><span>Compute type<i class="tip" data-tip="Type of the computation inside every graph (the boundaries stay f16).&#10;float32 (default): robust everywhere; the NPU compiler narrows it to f16 anyway.&#10;float16: no f32 anywhere; slightly faster to build and run on the NPU, but RMSNorm x² can overflow on backends that do not fuse it (e.g. GPU).">i</i></span><select id="computeTypeSelect"></select></label>
+    <div id="loadedLabel"></div>
+    <div id="optionWarning"></div>
+  </section>
+
+  <details class="panel p-adv" id="advanced">
+    <summary><span class="pi"><svg class="ic"><use href="#i-layers"/></svg></span>Advanced<span id="advancedSummary"></span></summary>
+    <div class="advbody">
+      <div class="fl">Chunk sizes<i class="tip" data-tip="Optional, e.g. 64,256. One prefill graph set per size; every prompt uses the chunk sequence with the lowest estimated cost. Overrides the single chunk size.">i</i></div>
+      <input id="chunkSizesInput" class="input" placeholder="e.g. 64,256" aria-label="Chunk sizes">
+      <div class="fl">Prefill blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one prefill graph. 'same as decode' follows the decode setting.">i</i></div>
+      <select id="prefillBlocksPerGraphSelect" hidden aria-label="Prefill blocks per graph"><option value="0">same as decode</option></select>
+      <div class="fl">Decode blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one decode graph: fewer dispatches, bigger graphs, longer compile.">i</i></div>
+      <select id="blocksPerGraphSelect" hidden aria-label="Decode blocks per graph"></select>
+      <div class="fl">Compute type<i class="tip" data-tip="Type of the computation inside every graph (the boundaries stay f16).&#10;float32 (default): robust everywhere; the NPU compiler narrows it to f16 anyway.&#10;float16: no f32 anywhere; slightly faster to build and run on the NPU, but RMSNorm x² can overflow on backends that do not fuse it (e.g. GPU).">i</i></div>
+      <select id="computeTypeSelect" hidden aria-label="Compute type"></select>
+      <div class="fl">KV update<i class="tip" data-tip="staged (default): decode writes a small staging buffer; the main cache is updated by a flush graph every N tokens.&#10;one-hot: the whole cache is rewritten every step.&#10;scatterND / tensorScatter: in-graph scatter of the new rows.">i</i></div>
+      <select id="kvStyleSelect" hidden aria-label="KV update"></select>
+      <div class="fl">Staging rows<i class="tip" data-tip="Rows in the staging buffer = tokens between flushes. Staged only.">i</i></div>
+      <select id="stagingRowsSelect" hidden aria-label="Staging rows"></select>
+      <div class="fl">Prompt presets</div>
+      <select id="promptPreset" hidden aria-label="Prompt preset"></select>
+      <div class="fl" id="fixedLabel">Fixed at page load</div>
+      <div id="fixedOptions"></div>
     </div>
-    <div class="group-label">Decode</div>
-    <div class="optgrid three">
-      <label class="field"><span>KV update<i class="tip" data-tip="staged (default): decode writes a small staging buffer; the main cache is updated by a flush graph every N tokens.&#10;one-hot: the whole cache is rewritten every step.&#10;scatterND: in-graph scatter of the new rows.">i</i></span><select id="kvStyleSelect"></select></label>
-      <label class="field"><span>Staging rows<i class="tip" data-tip="Rows in the staging buffer = tokens between flushes. Staged only.">i</i></span><select id="stagingRowsSelect"></select></label>
-      <label class="field"><span>Decode blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one decode graph (35 blocks in total): fewer dispatches, bigger graphs, longer compile.">i</i></span><select id="blocksPerGraphSelect"></select></label>
-    </div>
-    <div class="group-label" id="fixedLabel">Fixed at page load</div>
-    <div id="fixedOptions"></div>
   </details>
-</section>
-
-
 </aside>
-<div class="maincol">
-<!-- ============ conversation + composer ============ -->
-<section class="chatcol">
-  <div id="conversation" class="conversation" aria-live="polite"></div>
-  <div id="composer" class="composer">
-    <div class="composer-tools">
-      <label class="field inline"><span>Preset</span><select id="promptPreset"></select></label>
-      <select id="sampleSelect" class="vision-only" hidden title="The pictures of the image test suite (bench/raw/vision-suite): choosing one attaches it and fills in its question."></select>
-      <span class="quick vision-only" hidden>
-        <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read all text (OCR)</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
-      </span>
-    </div>
-    <div id="composerImages" class="chips" hidden></div>
-    <div id="imagePreview" class="imagepreview" hidden></div>
-    <textarea id="prompt" rows="2" aria-label="Message" placeholder="Message…   Enter sends, Shift+Enter starts a new line"></textarea>
-    <div class="composer-row">
-      <span class="vision-only attach" hidden>
-        <button id="attachButton" type="button" class="quiet" title="Attach a picture (or drop / paste one)">Attach image</button>
-        <select id="detailSelect" title="How many image tokens a picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.&#10;Auto: up to 24x24 patches = 144 image tokens.&#10;Low (fast): up to 16x16 = 64 tokens.&#10;High (small text, fine details): up to 32x32 = 256 tokens; slower, and no gain for a picture smaller than that."><option value="auto">Detail: auto</option><option value="low">Detail: low</option><option value="high">Detail: high</option></select>
-        <input type="file" id="imageInput" accept="image/*" multiple hidden>
-        <input type="checkbox" id="showBlocks" checked hidden>
-      </span>
-      <label class="small" title="the answer is cut after this many tokens; the tokens are reserved in the cache when the history is trimmed">Max new <input id="maxNewTokensInput" type="number" value="64" min="1"></label>
-      <label class="small" title="temperature 0: the same answer every time (the package recommends sampling parameters otherwise)"><input type="checkbox" id="visionGreedy"> Deterministic</label>
-      <span class="spacer"></span>
-      <button id="newChatButton" type="button" class="quiet" title="Forget the conversation and clear the results">New chat</button>
-      <button id="runButton" class="primary">Generate</button>
-    </div>
-    <div class="composer-foot">
-      <span id="promptTokenCount" class="hint"></span>
-      <span id="runHint" class="hint"></span>
-    </div>
-  </div>
-</section>
 
-<section class="card results">
-  <div class="title">Last answer</div>
-<div class="metrics">
-  <div class="metric" style="--c:#4fd1ff"><div class="label">TTFT</div><div class="value" id="metric-ttft">–</div><div class="sub" id="metric-ttft-sub"></div></div>
-  <div class="metric" style="--c:#ffb454"><div class="label">TPOT</div><div class="value" id="metric-tpot">–</div><div class="sub" id="metric-tpot-sub"></div></div>
-  <div class="metric" style="--c:#5af78e"><div class="label">Speed</div><div class="value" id="metric-tps">–</div><div class="sub" id="metric-tps-sub"></div></div>
-  <div class="metric" style="--c:#c792ea"><div class="label">Startup</div><div class="value" id="metric-startup">–</div><div class="sub" id="metric-startup-sub"></div></div>
-</div>
+<!-- ============ main: top bar, conversation, composer, the numbers ============ -->
+<div class="main">
+  <header class="topbar">
+    <button id="sidebarToggle" class="iconbtn" aria-label="Settings"><svg class="ic"><use href="#i-menu"/></svg></button>
+    <h1><span id="pageTitle">Qwen3-4B</span><small id="pageSubtitle">NPUW-style subgraph pipeline</small></h1>
+    <span class="grow"></span>
+    <div id="status" data-state="idle"><span>loading…</span></div>
+    <button id="newChatButton" class="btn" type="button" title="Forget the conversation and clear the results"><svg class="ic"><use href="#i-plus"/></svg>New chat</button>
+  </header>
 
-  <div id="summaryLine"></div>
-  <div id="sessionLine" title="the session of the Session card above"></div>
-  <div class="sumtables">
-<div class="cols">
-  <section class="card">
-    <div class="title">Summary</div>
-    <table id="summaryTable">
-      <tbody>
-      <tr><th>phase</th><th>time</th></tr>
-      <tr><td data-tip="fetch the embedding table + all layers of weights and upload them to device MLTensors (network / disk bound)"><span class="dotted">Load weights</span></td><td id="sum-load">–</td></tr>
-      <tr><td data-tip="builder.build of every subgraph (decode + prefill head / block / tail, flush, lm_head)"><span class="dotted">Build (compile) graphs</span></td><td id="sum-build">–</td></tr>
-      <tr><td data-tip="tokenizer + load weights + build, until the page is ready"><span class="dotted">Startup total</span></td><td id="sum-startup">–</td></tr>
-      <tr><td data-tip="prompt → first token: host prep + all prefill dispatches + logits readback (with a picture: including the vision encode)"><span class="dotted">Prefill (TTFT)</span></td><td id="sum-prefill">–</td></tr>
-      </tbody>
-      <tbody id="sumImages"></tbody>
-      <tbody>
-      <tr><td data-tip="average per generated token (and tokens/s)"><span class="dotted">Decode</span></td><td id="sum-decode">–</td></tr>
-      <tr><td data-tip="prefill + all decode steps of the last generation"><span class="dotted">Inference total</span></td><td id="sum-inference">–</td></tr>
-      <tr><td data-tip="prompt tokens (of them image tokens) + generated tokens of the last generation"><span class="dotted">Tokens (prompt + new)</span></td><td id="sum-tokens">–</td></tr>
-      <tr><td data-tip="rows of the KV cache the last generation used, of what this session holds (max length - 1)"><span class="dotted">Cache rows</span></td><td id="sum-cache">–</td></tr>
-      </tbody>
-    </table>
+  <section class="chatpanel">
+    <div id="conversation" class="conversation" aria-live="polite">
+      <div class="chat-empty">
+        <div class="empty-logo"><svg class="ic"><use href="#i-zap"/></svg></div>
+        <h2>How can I help?</h2>
+        <p id="emptyModel" class="empty-model"></p>
+        <div id="suggestions" class="suggest"></div>
+        <div id="sampleChips" class="suggest vision-only" hidden><span class="suggest-label">Sample pictures</span><select id="sampleSelect" hidden aria-label="Sample picture"></select></div>
+      </div>
+    </div>
+
+    <div class="dock">
+      <div class="perf-panel" id="perfPanel" hidden>
+        <div class="perf-head"><b>Last answer</b><span id="summaryLine"></span><span class="grow"></span><div class="stat" style="--c:var(--violet)" title="the time of the last Load"><span class="k">Startup</span><b class="v" id="metric-startup">–</b><span class="s" id="metric-startup-sub"></span></div></div>
+        <div id="sessionLine"></div>
+        <div class="perf-grid">
+          <div>
+            <h3>Summary</h3>
+            <table id="summaryTable">
+              <tbody>
+              <tr><th>phase</th><th>time</th></tr>
+              <tr><td data-tip="fetch the embedding table + all layers of weights and upload them to device MLTensors (network / disk bound)"><span class="dotted">Load weights</span></td><td id="sum-load">–</td></tr>
+              <tr><td data-tip="builder.build of every subgraph (decode + prefill head / block / tail, flush, lm_head)"><span class="dotted">Build (compile) graphs</span></td><td id="sum-build">–</td></tr>
+              <tr><td data-tip="tokenizer + load weights + build, until the page is ready"><span class="dotted">Startup total</span></td><td id="sum-startup">–</td></tr>
+              <tr><td data-tip="prompt → first token: host prep + all prefill dispatches + logits readback (with a picture: including the vision encode)"><span class="dotted">Prefill (TTFT)</span></td><td id="sum-prefill">–</td></tr>
+              </tbody>
+              <tbody id="sumImages"></tbody>
+              <tbody>
+              <tr><td data-tip="average per generated token (and tokens/s)"><span class="dotted">Decode</span></td><td id="sum-decode">–</td></tr>
+              <tr><td data-tip="prefill + all decode steps of the last generation"><span class="dotted">Inference total</span></td><td id="sum-inference">–</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h3>Where a decode step spends its time<i class="tip" data-tip="last generation, average per step" style="margin-left:6px">i</i></h3>
+            <table id="timingTable"><tr><th>step</th><th>avg ms</th><th style="text-align:left">share of a step</th></tr><tr class="empty"><td colspan="3">Generate an answer to see the split.</td></tr></table>
+          </div>
+        </div>
+      </div>
+
+      <div id="runHint" hidden></div>
+      <div id="composer" class="composer">
+        <div class="quick" id="quickQuestions" hidden>
+          <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read the text</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
+        </div>
+        <div id="composerImages" class="chips" hidden></div>
+        <div id="imagePreview" class="imagepreview" hidden></div>
+        <textarea id="prompt" rows="1" aria-label="Message" placeholder="Message"></textarea>
+        <div class="composer-bar">
+          <span class="attach vision-only" hidden>
+            <button id="attachButton" type="button" class="iconbtn" title="Attach a picture (or drop / paste one)" aria-label="Attach a picture"><svg class="ic"><use href="#i-clip"/></svg></button>
+            <select id="detailSelect" hidden aria-label="Picture detail" title="How many image tokens a picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.&#10;Auto: up to 24x24 patches = 144 image tokens.&#10;Low (fast): up to 16x16 = 64 tokens.&#10;High (small text, fine details): up to 32x32 = 256 tokens; slower, and no gain for a picture smaller than that."><option value="auto">auto</option><option value="low">low</option><option value="high">high</option></select>
+            <input type="file" id="imageInput" accept="image/*" multiple hidden>
+            <input type="checkbox" id="showBlocks" checked hidden>
+          </span>
+          <label class="opt" title="the answer is cut after this many tokens; the tokens are reserved in the cache when the history is trimmed">Max new <input id="maxNewTokensInput" type="number" value="64" min="1"></label>
+          <label class="opt" title="temperature 0: the same answer every time (the package recommends sampling parameters otherwise)"><input type="checkbox" id="visionGreedy"> Deterministic</label>
+          <span class="spacer"></span>
+          <i class="tip" id="composerInfo" data-tip="">i</i>
+          <button id="runButton" type="button" title="Generate (Enter)" aria-label="Generate"><svg class="ic i-send"><use href="#i-send"/></svg><svg class="ic i-stop"><use href="#i-stop"/></svg><span class="sr">Generate</span></button>
+        </div>
+      </div>
+
+      <div class="statsbar">
+        <div class="stat" style="--c:var(--cyan)"><span class="k">TTFT</span><b class="v" id="metric-ttft">–</b><span class="s" id="metric-ttft-sub"></span></div>
+        <div class="stat" style="--c:var(--amber)"><span class="k">TPOT</span><b class="v" id="metric-tpot">–</b><span class="s" id="metric-tpot-sub"></span></div>
+        <div class="stat" style="--c:var(--green)"><span class="k">Speed</span><b class="v" id="metric-tps">–</b><span class="s" id="metric-tps-sub"></span></div>
+        <div class="stat" style="--c:var(--blue)"><span class="k">Tokens</span><b class="v" id="sum-tokens" data-tip="prompt tokens (of them image tokens) + generated tokens of the last answer">–</b></div>
+        <div class="stat" id="chip-cache" style="--c:var(--teal)"><span class="k">Cache</span><b class="v" id="sum-cache">–</b></div>
+        <div class="stat" id="chip-images" hidden><span class="k">Images</span><b class="v" id="chip-images-v"></b></div>
+        <span class="grow"></span>
+        <span id="promptTokenCount" class="ctx"></span>
+        <button id="perfToggle" class="btn ghost" type="button" aria-expanded="false" style="height:30px;padding:0 12px;font-size:13px">Details<svg class="ic"><use href="#i-down"/></svg></button>
+      </div>
+    </div>
   </section>
-  <section class="card">
-    <div class="title">Where a decode step spends its time <i class="tip" data-tip="last generation, average per step">i</i></div>
-    <table id="timingTable"><tr><th>step</th><th>avg ms</th><th style="text-align:left">share of a step</th></tr><tr class="empty"><td colspan="3">Generate an answer to see the split.</td></tr></table>
-  </section>
-</div>
 
-  </div>
-</section>
-</div>
-</main>
-
-<!-- ============ pipeline, build times, profile, log ============ -->
-<details class="card" id="pipelineCard" open>
-  <summary>Pipeline<span class="aside">the highlighted step is the one running now</span></summary>
-  <div id="pipelineSummary" class="hint"></div>
+  <!-- ============ under the hood ============ -->
+  <details class="hood" id="hood">
+    <summary><span class="pi" style="--pc:var(--pink)"><svg class="ic"><use href="#i-activity"/></svg></span>Under the hood<small>pipeline · graph build times · log</small></summary>
+    <section class="hood-section" id="pipelineCard">
+      <h3>Pipeline<span class="aside">the highlighted step is the one running now</span></h3>
+      <div id="pipelineSummary" class="hint"></div>
   <div class="legend">
     <span><span class="dot" style="background:var(--host)"></span>host (JavaScript)</span>
     <span data-tip="WebNN graph on NPU/GPU; weights are bound once as MLTensors.&#10;Hidden state, attention output and KV cache never leave the device; only the logits come back."><span class="dot" style="background:var(--device)"></span><span class="dotted">device graph</span></span>
@@ -442,22 +554,22 @@
     <div class="box host" id="stage-sampling">5. Greedy sampling<small>argmax → next token → step 2</small></div>
   </div>
   </div>
-</details>
-
-<details class="card">
-  <summary>Per-graph build time</summary>
-  <div class="tablewrap"><table id="buildTable"><tr><th>graph</th><th>build ms</th></tr></table></div>
-</details>
-
-<section class="card" id="profileCard" style="display:none">
-  <div class="title">Decode segment profile <i class="tip" data-tip="profile=1: after a generation the next decode step is re-run segment by segment (each followed by a sync) and as one chain; 20 runs, ms per step.&#10;Hover a row name for what it measures.">i</i></div>
-  <div class="tablewrap"><table id="profileTable"><tr><th>segment</th><th>JS enqueue</th><th>device wait</th><th>total ms</th></tr></table></div>
-</section>
-
-<details class="card">
-  <summary>Log</summary>
-  <div id="log"></div>
-</details>
-<script type="module" src="chat.js?v=20261127d"></script>
+    </section>
+    <details class="hood-section">
+      <summary>Per-graph build time</summary>
+      <div class="tablewrap"><table id="buildTable"><tr><th>graph</th><th>build ms</th></tr></table></div>
+    </details>
+    <section class="hood-section" id="profileCard" style="display:none">
+      <h3>Decode segment profile<i class="tip" style="margin-left:6px" data-tip="profile=1: after a generation the next decode step is re-run segment by segment (each followed by a sync) and as one chain; 20 runs, ms per step.&#10;Hover a row name for what it measures.">i</i></h3>
+      <div class="tablewrap"><table id="profileTable"><tr><th>segment</th><th>JS enqueue</th><th>device wait</th><th>total ms</th></tr></table></div>
+    </section>
+    <details class="hood-section">
+      <summary>Log</summary>
+      <div id="log"></div>
+    </details>
+  </details>
+</div>
+</div>
+<script type="module" src="chat.js?v=20261127e"></script>
 </body>
 </html>
