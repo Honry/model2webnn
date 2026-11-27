@@ -8,16 +8,13 @@
   :root { color-scheme: dark; --bg: #0f1114; --card: #171a1f; --inset: #12151a; --line: #2a3037; --line2: #3a4048; --text: #d9dde2; --label: #b4bbc3; --dim: #8b929a; --accent: #6cb6ff; --good: #7fcf8a; --warn: #ffb454; --bad: #ff7a7a;
           --host: #b8855f; --device: #5b8fc4; --helper: #5fa86a; --primary: #1f4f7a; --primary-line: #2d6aa0; --radius: 8px; }
   * { box-sizing: border-box; }
-  body { font: 15px/1.55 "Segoe UI", system-ui, sans-serif; margin: 0 auto; padding: 18px 20px 48px; background: var(--bg); color: var(--text); max-width: 1180px; }
+  body { font: 15px/1.55 "Segoe UI", system-ui, sans-serif; margin: 0 auto; padding: 18px 20px 48px; background: var(--bg); color: var(--text); max-width: 1480px; }
 
-  /* header: title, then one toolbar row (model, device, status) */
-  header { margin-bottom: 10px; }
-  h1 { font-size: 23px; font-weight: 700; margin: 0 0 10px; line-height: 1.25; }
+  /* header: the title and the status pill */
+  header { display: flex; align-items: center; justify-content: space-between; gap: 8px 20px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 22px; font-weight: 700; margin: 0; line-height: 1.25; }
   h1 small { color: var(--dim); font-weight: 500; font-size: 15px; margin-left: 10px; }
-  .toolbar { display: flex; align-items: center; gap: 10px 22px; flex-wrap: wrap; }
-  .toolbar .field { flex-direction: row; align-items: center; gap: 8px; min-width: 0; }
-  .toolbar select { max-width: 100%; }
-  #status { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; color: var(--dim); background: #161a1f; border: 1px solid var(--line2); border-radius: 14px; padding: 3px 14px; font-size: 14px; font-weight: 600; }
+  #status { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; color: var(--dim); background: #161a1f; border: 1px solid var(--line2); border-radius: 14px; padding: 3px 14px; font-size: 14px; font-weight: 600; }
   #status::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: currentColor; opacity: .7; }
   #status[data-state=busy] { color: var(--accent); background: #16222e; border-color: #25405a; }
   #status[data-state=busy]::before { width: 11px; height: 11px; background: none; border: 2px solid currentColor; border-right-color: transparent; opacity: 1; animation: spin .8s linear infinite; }
@@ -119,12 +116,9 @@
   .p-sum td, .p-full td { border-top: 1px solid var(--line2); font-weight: 700; }
 
   /* results */
-  .answer-card { padding-bottom: 12px; }
-  #answer { white-space: pre-wrap; background: #13161a; border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; min-height: 96px; max-height: 75vh; overflow: auto; font-size: 16px; }
   .answer-box:empty::before { content: attr(data-placeholder); color: var(--dim); font-size: 14.5px; }
   .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 12px; }
   .cols > .card { margin: 0; }
-  .cols { margin: 12px 0; }
   table { border-collapse: collapse; width: 100%; }
   td, th { border-bottom: 1px solid #23282d; padding: 4px 8px; text-align: right; }
   th { color: var(--label); font-weight: 700; font-size: 13.5px; }
@@ -151,21 +145,7 @@
   @media (max-width: 760px) { .arrow { display: none; } .box { flex: 1 1 calc(50% - 6px); min-width: 0; } }
   @media (max-width: 460px) { .box { flex-basis: 100%; } }
 
-  /* tabs (packages with an image tower): Chat | Vision share one loaded model */
-  #tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 1px solid var(--line); }
-  #tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; background: transparent; padding: 7px 22px 6px; color: var(--dim); font-size: 15px; margin-bottom: -1px; }
-  #tabs button:hover { color: var(--text); background: #1a1e23; }
-  #tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
 
-  /* Vision tab */
-  #dropZone { flex: 1 1 280px; border: 2px dashed var(--line2); border-radius: var(--radius); padding: 16px 20px; color: var(--dim); cursor: pointer; min-width: 220px; text-align: center; }
-  #dropZone.over, #dropZone:hover, #dropZone:focus { border-color: var(--accent); color: var(--text); outline: 0; }
-  .imageitem { display: grid; grid-template-columns: minmax(260px, 420px) 1fr; gap: 16px; margin-top: 12px; align-items: start; }
-  @media (max-width: 700px) { .imageitem { grid-template-columns: minmax(0, 1fr); } }
-  .imageitem canvas { max-width: 100%; max-height: 420px; min-width: 128px; image-rendering: auto; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
-  .imagecaption, .imageempty { color: #c3c9cf; font-size: 14.5px; line-height: 1.6; }
-  #sessionLine { margin-top: 4px; color: var(--dim); font-size: 13.5px; }
-  #sessionLine:empty { display: none; }
   /* image rows of the Summary: one group per picture */
   #sumImages td { font-size: 14px; }
   #sumImages tr.img-head td { text-align: left; color: var(--label); font-weight: 700; border-bottom: 0; padding-top: 8px; }
@@ -203,33 +183,119 @@
   .md table { width: auto; border-collapse: collapse; font-size: .95em; }
   .md th, .md td { border: 1px solid var(--line2); padding: 4px 10px; text-align: left; font-weight: 400; }
   .md th { background: #1f2328; font-weight: 700; color: #eef1f4; } .md td:first-child { font-weight: 400; }
+
+  /* app layout: the session column on the left, the conversation (message list + composer) with the numbers of the last turn under it on the right; stacked on narrow screens */
+  .app { display: grid; grid-template-columns: minmax(290px, 330px) minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 10px; }
+  .sidecol { position: sticky; top: 10px; max-height: calc(100vh - 20px); overflow-y: auto; padding-right: 2px; }
+  .sidecol > .card:first-child { margin-top: 0; }
+  .sidecol .optgrid, .sidecol .optgrid.three { grid-template-columns: minmax(0, 1fr); }
+  .sidecol .optgrid .actions { grid-column: auto; }
+  .sidecol .field.wide { margin-bottom: 8px; }
+  .sidecol .field.wide select { width: 100%; }
+  .maincol { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .chatcol { display: flex; flex-direction: column; height: clamp(480px, 66vh, 800px); border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: hidden; }
+  .results { margin: 0; }
+  .results .cols { margin: 10px 0 0; gap: 18px; }
+  .results .cols > .card { border: 0; background: transparent; padding: 0; }
+  .results .cols .title { margin-bottom: 4px; }
+  .results .metrics { margin: 4px 0 8px; }
+  #sessionLine { margin-top: 2px; color: var(--dim); font-size: 13px; }
+  #sessionLine:empty { display: none; }
+  @media (max-width: 900px) {
+    .app { grid-template-columns: minmax(0, 1fr); }
+    .sidecol { position: static; max-height: none; overflow: visible; }
+    .chatcol { height: auto; }
+    .conversation { max-height: 60vh; min-height: 200px; }
+  }
+
+  /* conversation */
+  .conversation { flex: 1 1 auto; overflow-y: auto; padding: 16px 16px 8px; display: flex; flex-direction: column; gap: 14px; scroll-behavior: smooth; }
+  .chat-empty { margin: auto; max-width: 420px; text-align: center; color: var(--dim); font-size: 14.5px; }
+  .msg { display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .msg .bubble { max-width: min(92%, 860px); border-radius: 12px; padding: 9px 14px; }
+  .msg.user .bubble { background: #1b3a57; border: 1px solid #28507a; border-bottom-right-radius: 4px; }
+  .msg.user .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.assistant .bubble { background: #1b1f25; border: 1px solid var(--line); border-bottom-left-radius: 4px; min-width: min(100%, 220px); }
+  .msg.assistant .answer-box { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15.5px; background: transparent; border: 0; padding: 0; min-height: 1.5em; }
+  .msg.assistant .answer-box.md { white-space: normal; }
+  .msg.assistant .answer-box:empty::before { content: attr(data-placeholder); color: var(--dim); }
+  .msg .meta { margin-top: 6px; color: var(--dim); font-size: 12.5px; }
+  .msg .meta:empty { display: none; }
+  .msg .meta[data-state=stopped] { color: var(--warn); }
+  .msg .meta[data-state=full] { color: var(--warn); }
+  .msg.assistant[data-state=error] .bubble { border-color: #5a2a2e; }
+  .msg.dropped { opacity: .42; }
+  .notice { align-self: center; color: var(--dim); font-size: 13px; border-top: 1px dashed var(--line2); border-bottom: 1px dashed var(--line2); padding: 3px 14px; text-align: center; }
+  .notice.warn { color: var(--warn); border-color: #6a5030; }
+  .attached { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: #c3c9cf; }
+  .attached .thumb, .chip .thumb { border-radius: 5px; border: 1px solid var(--line2); background: #fff; flex: none; }
+  .answer-bar.compact { margin-bottom: 4px; }
+  .answer-bar.compact button { padding: 0 9px; font-size: 12px; }
+  .msg.assistant .answer-bar { opacity: .55; transition: opacity .15s; }
+  .msg.assistant:hover .answer-bar, .msg.assistant:focus-within .answer-bar { opacity: 1; }
+
+  /* composer */
+  .composer { flex: none; border-top: 1px solid var(--line); background: #14171b; padding: 10px 14px 10px; }
+  .composer.over { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  .composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 6px; }
+  .composer-tools .field.inline { flex-direction: row; align-items: center; gap: 6px; min-width: 0; }
+  .composer-tools .field.inline select { max-width: 260px; }
+  .composer-tools .quick { margin: 0; gap: 6px; }
+  .composer textarea { min-height: 54px; height: 62px; max-height: 40vh; }
+  .composer-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 8px; }
+  .composer-row .attach { display: inline-flex; align-items: center; gap: 6px; }
+  .composer-row .attach[hidden], .composer-tools [hidden] { display: none; }
+  .composer-row label.small { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; color: var(--label); }
+  .composer-row .spacer { flex: 1 1 0; }
+  .composer-foot { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 4px; min-height: 1.4em; }
+  #runButton.stop { background: #6a2a2e; border-color: #94404a; }
+  #runButton.stop:hover:not(:disabled) { background: #7d343a; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .chip { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line2); border-radius: 8px; padding: 3px 4px 3px 4px; background: #1b1f25; cursor: pointer; max-width: 260px; }
+  .chip.on { border-color: var(--accent); }
+  .chip-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; font-size: 13px; }
+  .chip-text b, .chip-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip-text small { color: var(--dim); font-size: 12px; }
+  button.chip-x { padding: 0 7px; font-size: 16px; line-height: 1.2; background: transparent; border: 0; color: var(--dim); }
+  button.chip-x:hover { color: var(--bad); }
+  .imagepreview { display: grid; grid-template-columns: minmax(0, 380px) 1fr; gap: 14px; align-items: start; margin-bottom: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--inset); }
+  .imagepreview[hidden] { display: none; }
+  .imagepreview canvas { max-width: 100%; max-height: 300px; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
+  .imagecaption { color: #c3c9cf; font-size: 13.5px; line-height: 1.55; }
+  .imagepreview .blocks { display: inline-flex; gap: 6px; margin-top: 6px; font-size: 13px; color: var(--label); }
+  @media (max-width: 700px) { .imagepreview { grid-template-columns: minmax(0, 1fr); } }
+  #promptTokenCount.over { color: var(--warn); }
+  #pipelineSummary { margin: 0 0 8px; }
+  #pipelineSummary:empty { display: none; }
 </style>
 </head>
 <body>
 
 <header>
   <h1><span id="pageTitle">Qwen3-4B on WebNN</span><small id="pageSubtitle">NPUW-style subgraph pipeline</small></h1>
-  <div class="toolbar">
-    <label class="field"><span>Model<i class="tip" data-tip="Qwen3-4B with the hand-written graphs offers every option below.\nThe other entries are packages built by m2w: they offer the options they were compiled with.\nChanging the model reloads the page.">i</i></span><select id="modelSelect"></select></label>
-    <label class="field"><span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></span><select id="deviceSelect"></select></label>
-    <div id="status" data-state="idle"><span>loading…</span></div>
-  </div>
+  <div id="status" data-state="idle"><span>loading…</span></div>
 </header>
 
-<!-- Chat | Vision: only for a package with an image tower; both tabs use the model loaded below (switching does not reload) -->
-<nav id="tabs" style="display:none"><button type="button" data-tab="chat" class="on">Chat</button><button type="button" data-tab="vision">Vision</button></nav>
-
-<!-- ============ session: what to build (shared by the Chat and the Vision tab) ============ -->
+<main class="app">
+<aside class="sidecol">
+<section class="card modelcard">
+  <div class="title">Model</div>
+    <label class="field wide"><span>Model<i class="tip" data-tip="Qwen3-4B with the hand-written graphs offers every option below.&#10;The other entries are packages built by m2w: they offer the options they were compiled with.&#10;Changing the model reloads the page.">i</i></span><select id="modelSelect"></select></label>
+    <label class="field wide"><span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></span><select id="deviceSelect"></select></label>
+</section>
+<!-- ============ session: what to build ============ -->
 <section class="card">
   <div class="title">Session</div>
   <div class="optgrid">
-    <label class="field"><span>Max length<i class="tip" data-tip="KV cache capacity = prompt + generated tokens.\nPart of the session: changing it rebuilds the graphs (weights stay loaded).">i</i></span><select id="maxLengthSelect"></select></label>
-    <label class="field"><span>Prefill chunk<i class="tip" data-tip="Prompt tokens processed per prefill dispatch (one static graph).\nEvery dispatch pays the int4 dequantization again, so bigger chunks are cheaper per token but waste work on short prompts.">i</i></span><select id="chunkSizeSelect"></select></label>
+    <label class="field"><span>Max length<i class="tip" data-tip="KV cache capacity = the whole conversation so far + the new tokens.&#10;Chosen at Load (changing it rebuilds the graphs; the weights stay loaded). A longer max length makes every decode step slower, because the static graphs attend the whole cache, and costs more memory.">i</i></span><select id="maxLengthSelect"></select></label>
+    <label class="field"><span>Prefill chunk<i class="tip" data-tip="Prompt tokens processed per prefill dispatch (one static graph).&#10;Every dispatch pays the int4 dequantization again, so bigger chunks are cheaper per token but waste work on short prompts.">i</i></span><select id="chunkSizeSelect"></select></label>
     <div class="actions">
       <button id="loadButton" class="primary">Load model</button>
       <button id="clearCacheButton" class="quiet" title="delete the cached weight files (OPFS)">Clear weight cache</button>
     </div>
   </div>
+  <div class="hint" id="maxLengthHint">Max length is chosen at Load. A longer one makes every decode step slower (the static graphs attend the whole cache) and needs more memory.</div>
   <div id="loadedLabel"></div>
   <div id="optionWarning"></div>
   <details class="inline" id="advanced">
@@ -238,11 +304,11 @@
     <div class="optgrid three">
       <label class="field"><span>Chunk sizes (multi)<i class="tip" data-tip="Optional, e.g. 64,256. One prefill graph set per size; every prompt uses the chunk sequence with the lowest estimated cost. Overrides the single chunk size.">i</i></span><input id="chunkSizesInput" placeholder="e.g. 64,256"></label>
       <label class="field"><span>Prefill blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one prefill graph (35 blocks in total). 'same as decode' follows the decode setting.">i</i></span><select id="prefillBlocksPerGraphSelect"><option value="0">same as decode</option></select></label>
-      <label class="field"><span>Compute type<i class="tip" data-tip="Type of the computation inside every graph (the boundaries stay f16).\nfloat32 (default): robust everywhere; the NPU compiler narrows it to f16 anyway.\nfloat16: no f32 anywhere; slightly faster to build and run on the NPU, but RMSNorm x² can overflow on backends that do not fuse it (e.g. GPU).">i</i></span><select id="computeTypeSelect"></select></label>
+      <label class="field"><span>Compute type<i class="tip" data-tip="Type of the computation inside every graph (the boundaries stay f16).&#10;float32 (default): robust everywhere; the NPU compiler narrows it to f16 anyway.&#10;float16: no f32 anywhere; slightly faster to build and run on the NPU, but RMSNorm x² can overflow on backends that do not fuse it (e.g. GPU).">i</i></span><select id="computeTypeSelect"></select></label>
     </div>
     <div class="group-label">Decode</div>
     <div class="optgrid three">
-      <label class="field"><span>KV update<i class="tip" data-tip="staged (default): decode writes a small staging buffer; the main cache is updated by a flush graph every N tokens.\none-hot: the whole cache is rewritten every step.\nscatterND: in-graph scatter of the new rows.">i</i></span><select id="kvStyleSelect"></select></label>
+      <label class="field"><span>KV update<i class="tip" data-tip="staged (default): decode writes a small staging buffer; the main cache is updated by a flush graph every N tokens.&#10;one-hot: the whole cache is rewritten every step.&#10;scatterND: in-graph scatter of the new rows.">i</i></span><select id="kvStyleSelect"></select></label>
       <label class="field"><span>Staging rows<i class="tip" data-tip="Rows in the staging buffer = tokens between flushes. Staged only.">i</i></span><select id="stagingRowsSelect"></select></label>
       <label class="field"><span>Decode blocks / graph<i class="tip" data-tip="Consecutive BLOCKs compiled into one decode graph (35 blocks in total): fewer dispatches, bigger graphs, longer compile.">i</i></span><select id="blocksPerGraphSelect"></select></label>
     </div>
@@ -251,62 +317,45 @@
   </details>
 </section>
 
-<div id="panel-chat">
-<!-- ============ prompt ============ -->
-<section class="card">
-  <div class="title">Prompt</div>
-  <div class="fields" style="margin-bottom:8px">
-    <label class="field"><span>Preset</span><select id="promptPreset" style="min-width:260px;max-width:100%"></select></label>
-    <span id="promptTokenCount" class="hint" style="padding-bottom:6px"></span>
-  </div>
-  <textarea id="prompt" aria-label="Prompt"></textarea>
-  <div class="actions">
-    <label>Max new tokens <input id="maxNewTokensInput" type="number" value="64" min="1"></label>
-    <button id="runButton" class="primary" disabled title="Ctrl+Enter in the prompt also generates">Generate</button>
-    <span id="runHint" class="hint">Load the model first (Session above).</span>
-  </div>
-</section>
-</div><!-- /panel-chat -->
 
-<!-- ============ Vision tab: a picture + a question (packages with an image tower) ============ -->
-<div id="panel-vision" style="display:none">
-<section class="card">
-  <div class="title">Picture</div>
-  <div class="fields">
-    <div id="dropZone" tabindex="0" role="button">Drop a picture here, paste one (Ctrl+V) or click to choose a file<input type="file" id="imageInput" accept="image/*" hidden></div>
-    <label class="field"><span>Sample<i class="tip" data-tip="The pictures of the image test suite (bench/raw/vision-suite): choosing one also fills in its question.">i</i></span><select id="sampleSelect" style="min-width:170px"></select></label>
-    <label class="field"><span>Detail<i class="tip" data-tip="How many image tokens the picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.\nAuto: up to 24x24 patches = 144 image tokens.\nLow (fast): up to 16x16 = 64 tokens.\nHigh: up to 32x32 = 256 tokens (small text, fine details; slower, and no gain for a picture smaller than that).\nPictures are never blown up far beyond their own size.">i</i></span>
-      <select id="detailSelect"><option value="auto">Auto</option><option value="low">Low (fast)</option><option value="high">High (text, small details)</option></select></label>
-    <label class="actions" style="margin:0;padding-bottom:6px"><input type="checkbox" id="showBlocks" checked> show the image-token blocks</label>
+</aside>
+<div class="maincol">
+<!-- ============ conversation + composer ============ -->
+<section class="chatcol">
+  <div id="conversation" class="conversation" aria-live="polite"></div>
+  <div id="composer" class="composer">
+    <div class="composer-tools">
+      <label class="field inline"><span>Preset</span><select id="promptPreset"></select></label>
+      <select id="sampleSelect" class="vision-only" hidden title="The pictures of the image test suite (bench/raw/vision-suite): choosing one attaches it and fills in its question."></select>
+      <span class="quick vision-only" hidden>
+        <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read all text (OCR)</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
+      </span>
+    </div>
+    <div id="composerImages" class="chips" hidden></div>
+    <div id="imagePreview" class="imagepreview" hidden></div>
+    <textarea id="prompt" rows="2" aria-label="Message" placeholder="Message…   Enter sends, Shift+Enter starts a new line"></textarea>
+    <div class="composer-row">
+      <span class="vision-only attach" hidden>
+        <button id="attachButton" type="button" class="quiet" title="Attach a picture (or drop / paste one)">Attach image</button>
+        <select id="detailSelect" title="How many image tokens a picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.&#10;Auto: up to 24x24 patches = 144 image tokens.&#10;Low (fast): up to 16x16 = 64 tokens.&#10;High (small text, fine details): up to 32x32 = 256 tokens; slower, and no gain for a picture smaller than that."><option value="auto">Detail: auto</option><option value="low">Detail: low</option><option value="high">Detail: high</option></select>
+        <input type="file" id="imageInput" accept="image/*" multiple hidden>
+        <input type="checkbox" id="showBlocks" checked hidden>
+      </span>
+      <label class="small" title="the answer is cut after this many tokens; the tokens are reserved in the cache when the history is trimmed">Max new <input id="maxNewTokensInput" type="number" value="64" min="1"></label>
+      <label class="small" title="temperature 0: the same answer every time (the package recommends sampling parameters otherwise)"><input type="checkbox" id="visionGreedy"> Deterministic</label>
+      <span class="spacer"></span>
+      <button id="newChatButton" type="button" class="quiet" title="Forget the conversation and clear the results">New chat</button>
+      <button id="runButton" class="primary">Generate</button>
+    </div>
+    <div class="composer-foot">
+      <span id="promptTokenCount" class="hint"></span>
+      <span id="runHint" class="hint"></span>
+    </div>
   </div>
-  <!-- one block per picture (a list, so that several pictures can be added later; the runtime takes one per prompt today) -->
-  <div id="imageItems"></div>
-</section>
-<section class="card">
-  <div class="title">Question</div>
-  <div class="quick">
-    <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read all text (OCR)</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
-  </div>
-  <textarea id="visionQuestion" aria-label="Question"></textarea>
-  <div class="actions">
-    <label>Max new tokens <input id="visionMaxNew" type="number" value="128" min="1"></label>
-    <label title="temperature 0: the same answer every time (the package recommends sampling parameters otherwise)"><input type="checkbox" id="visionGreedy"> Deterministic (greedy)</label>
-    <button id="visionRun" class="primary" disabled title="Ctrl+Enter in the question also generates">Generate</button>
-    <span id="visionHint" class="hint">Add a picture first.</span>
-  </div>
-</section>
-</div><!-- /panel-vision -->
-
-<!-- ============ results: the same for the Chat and the Vision tab (a picture only adds rows to the Summary) ============ -->
-<div id="results">
-<!-- ============ answer + headline numbers ============ -->
-<section class="card answer-card">
-  <div class="title">Answer</div>
-  <div id="answer" data-placeholder="The answer appears here."></div>
-  <div id="summaryLine"></div>
-  <div id="sessionLine" title="the session of the Session card above: the Chat and the Vision tab use the same one"></div>
 </section>
 
+<section class="card results">
+  <div class="title">Last answer</div>
 <div class="metrics">
   <div class="metric" style="--c:#4fd1ff"><div class="label">TTFT</div><div class="value" id="metric-ttft">–</div><div class="sub" id="metric-ttft-sub"></div></div>
   <div class="metric" style="--c:#ffb454"><div class="label">TPOT</div><div class="value" id="metric-tpot">–</div><div class="sub" id="metric-tpot-sub"></div></div>
@@ -314,7 +363,9 @@
   <div class="metric" style="--c:#c792ea"><div class="label">Startup</div><div class="value" id="metric-startup">–</div><div class="sub" id="metric-startup-sub"></div></div>
 </div>
 
-<!-- ============ results ============ -->
+  <div id="summaryLine"></div>
+  <div id="sessionLine" title="the session of the Session card above"></div>
+  <div class="sumtables">
 <div class="cols">
   <section class="card">
     <div class="title">Summary</div>
@@ -341,15 +392,22 @@
   </section>
 </div>
 
-<!-- ============ pipeline ============ -->
-<details class="card" open>
+  </div>
+</section>
+</div>
+</main>
+
+<!-- ============ pipeline, build times, profile, log ============ -->
+<details class="card" id="pipelineCard" open>
   <summary>Pipeline<span class="aside">the highlighted step is the one running now</span></summary>
+  <div id="pipelineSummary" class="hint"></div>
   <div class="legend">
     <span><span class="dot" style="background:var(--host)"></span>host (JavaScript)</span>
-    <span data-tip="WebNN graph on NPU/GPU; weights are bound once as MLTensors.\nHidden state, attention output and KV cache never leave the device; only the logits come back."><span class="dot" style="background:var(--device)"></span><span class="dotted">device graph</span></span>
+    <span data-tip="WebNN graph on NPU/GPU; weights are bound once as MLTensors.&#10;Hidden state, attention output and KV cache never leave the device; only the logits come back."><span class="dot" style="background:var(--device)"></span><span class="dotted">device graph</span></span>
     <span><span class="dot" style="background:var(--helper)"></span>helper graph</span>
   </div>
 
+  <div id="pipelineBody">
   <div class="row" id="hostRow">
     <div class="box host" id="stage-tokenizer">1. Tokenizer<small>chat template → token ids</small></div><div class="arrow">→</div>
     <div class="box host" id="stage-embedding">2. Embedding lookup<small>int8 row × scale → f16 hidden [1,S,<span class="hiddenSize">2560</span>]</small></div><div class="arrow">→</div>
@@ -357,7 +415,7 @@
   </div>
 
   <div class="phase" id="phase-prefill">
-    <div class="title">PREFILL — chunks of S=<span id="chunkSizeLabel">?</span> tokens <i class="tip" data-tip="Each chunk attends to the KV cache (rows written by earlier chunks) plus its own rows, then writes its rows into the cache.\nThe last chunk is left-padded; only it runs TAIL + LM HEAD and yields the first token.">i</i></div>
+    <div class="title">PREFILL — chunks of S=<span id="chunkSizeLabel">?</span> tokens <i class="tip" data-tip="Each chunk attends to the KV cache (rows written by earlier chunks) plus its own rows, then writes its rows into the cache.&#10;The last chunk is left-padded; only it runs TAIL + LM HEAD and yields the first token.">i</i></div>
     <div class="row">
       <div class="box device" id="prefill-head">HEAD<small>layer 0 attention half</small><span class="time" id="time-prefill-head"></span></div><div class="arrow">→</div>
       <div class="box device" id="prefill-block">BLOCK × <span class="layerCountMinusOne">35</span><small>FFN of layer i + attention of layer i+1<br>(one graph, weights rebound per call)</small><span class="time" id="time-prefill-block"></span></div><div class="arrow">→</div>
@@ -383,6 +441,7 @@
     <div class="box host" id="stage-readback">4. Read back logits<small><span class="vocabSize">151936</span> values per step</small></div><div class="arrow">→</div>
     <div class="box host" id="stage-sampling">5. Greedy sampling<small>argmax → next token → step 2</small></div>
   </div>
+  </div>
 </details>
 
 <details class="card">
@@ -391,15 +450,14 @@
 </details>
 
 <section class="card" id="profileCard" style="display:none">
-  <div class="title">Decode segment profile <i class="tip" data-tip="profile=1: after a generation the next decode step is re-run segment by segment (each followed by a sync) and as one chain; 20 runs, ms per step.\nHover a row name for what it measures.">i</i></div>
+  <div class="title">Decode segment profile <i class="tip" data-tip="profile=1: after a generation the next decode step is re-run segment by segment (each followed by a sync) and as one chain; 20 runs, ms per step.&#10;Hover a row name for what it measures.">i</i></div>
   <div class="tablewrap"><table id="profileTable"><tr><th>segment</th><th>JS enqueue</th><th>device wait</th><th>total ms</th></tr></table></div>
 </section>
-</div><!-- /results -->
 
 <details class="card">
   <summary>Log</summary>
   <div id="log"></div>
 </details>
-<script type="module" src="chat.js?v=20261127b"></script>
+<script type="module" src="chat.js?v=20261127d"></script>
 </body>
 </html>

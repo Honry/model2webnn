@@ -1,5 +1,5 @@
 // Smoke test of a bench page WITHOUT a device: headless Chrome / Edge loads the page from a local static server, `navigator.ml` is a validating mock (src/runtime/mock-ml.ts: every dispatch is checked
-// by name, shape and dtype; reads return zeros) and the transformers.js CDN import is replaced by a tiny stub tokenizer, so the page logic (DOM, tabs, URL parameters, runtime calls) runs end to end
+// by name, shape and dtype; reads return zeros) and the transformers.js CDN import is replaced by a tiny stub tokenizer, so the page logic (DOM, conversation, URL parameters, runtime calls) runs end to end
 // on the tiny Qwen3.5 package (tests/golden/tiny-qwen35-package, linked as bench/packages/tiny-qwen35-pkg). It checks that the page does not crash; numbers and answers are meaningless.
 //
 //   node scripts/page-smoke.mjs "bench/raw/vision-suite.html?model=tiny-qwen35-pkg&maxNewTokens=3" --wait "Done" [--eval "js expression"]... [--screenshot out.png [--height 1600]] [--browser path] [--timeout 120]

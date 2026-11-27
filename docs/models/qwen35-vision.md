@@ -140,9 +140,11 @@ for await (const token of llm.generate(ids, { images: [image] })) { ... }       
 * `protocol.ts` mirrors `protocol.py` (`chooseGrid`, `expandImageTokens`, `mropePositions`, `mropeAxes`, `ropeTablesMrope`, `patchify`); `tests/golden/protocol_vectors.json` keeps the two identical.
 * Preprocessing in the browser (`prepareImage`): canvas `drawImage` to exactly `grid * 16` pixels with smoothing, RGBA -> `(v / 255 - mean) / std`, `patchify`. The Python reference resizes with PIL bicubic: the two differ a
   little at the pixel level (the vision graphs are verified on the SAME pixels).
-* Pages: `bench/raw/chat.html` (package mode, a package with an image tower) has two tabs sharing ONE loaded model: **Chat** (text only) and **Vision** (picture from a file / drop / paste / the suite's samples, the
-  picture drawn at the pixels of the preset the runtime chose with its image-token blocks and a caption saying why, the Detail select, a question box with quick questions, the answer, the time split preprocess / graph build /
-  vision encode / prefill / TTFT / TPOT); URL: `tab=vision`, `detail=auto|low|high`, `visionGrids=` (advanced restriction), `vision=0` (no tower), with autoRun `image=<url>&question=<text>`.
+* Pages: `bench/raw/chat.html` is a conversation page (session column on the left; message list with a composer, then the numbers of the last turn, in the main area). With a package that has an image tower the composer has
+  **Attach image** (file / drop / paste / the suite's samples; a thumbnail chip per picture, a click shows the picture drawn at the pixels of the preset the runtime chose with its image-token blocks and a caption saying why)
+  and a Detail select; a message can carry several pictures, each stays with its turn and is encoded again when the history is re-read. The Summary of the last turn gets a group of rows per picture (grid, image tokens, preprocess,
+  graph build on the first use of a grid) and the vision encode time. URL: `detail=auto|low|high`, `visionGrids=` (advanced restriction), `vision=0` (no tower), `image=<url>` (attached to the first message), `question=<text>`, with
+  `autoRun=1` the message is sent (`tab=vision` is still accepted: with autoRun it then needs `image=`).
   `bench/raw/vision-suite.html` (cases in `bench/raw/vision-suite/`, made by `python/tools/make_vision_suite.py`): every case through the real path, PASS / FAIL against its expected substrings, grid / tokens / timing per case
   and a summary per grid (`model=`, `detail=`, `grids=`, `case=`, `repeat=`, `maxNewTokens=`; greedy decoding; a case may list `xfail_at` detail levels where a FAIL is expected, e.g. `ocr-micro` at `low`: reported as XFAIL and not counted). `bench/raw/qwen35vision.html` (+ `python/tools/qwen35_vision_check.py
   --export`): the device against the interpreter, hidden state after HEAD and after every block, image tokens (relative error, max abs, non-finite values, cosine per token).

@@ -1,9 +1,9 @@
 // The "package" engine of chat.html: runs a model package written by `m2w compile` (python/ in model2webnn) with the model2webnn runtime (../../lib/runtime, built by `npm run build:lib`),
-// behind the same interface the page already uses for the hand-written Qwen3 graphs:  { getSession, currentSession, generate, sharedBuildMs, countPromptTokens }.
+// behind the same interface the page already uses for the hand-written Qwen3 graphs:  { getSession, currentSession, generate, sharedBuildMs, countPromptTokens, countTurns, multiTurn }
+// (generate takes the whole conversation: options.turns, the pictures of all its turns in options.images, a signal to stop).
 // What a package offers is fixed when it is compiled (max lengths, prefill chunks, graph variants = KV protocol x compute type x staging rows, blocks per graph): the page offers exactly that,
 // and a change of any session option rebuilds the graphs of the loaded model (LLM.reconfigure) while the weights stay on the device.
 import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs } from "../../lib/runtime/index.js";
-import { answerView } from "./answer-view.js?v=1";
 
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 const packagesUrl = new URL("../packages/", import.meta.url);
@@ -99,7 +99,6 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
     const tokenizer = await tokenizerFromTransformersJs(lib, pkg);
     log("tokenizer_loaded", "Tokenizer loaded (transformers.js, from the package)");
     const format = pkg.chatFormat, stop = new Set(pkg.model.eos_token_ids);
-    const promptIds = (text) => tokenizer.encode(format ? buildPrompt(format, [{ user: text }]) : text);
     let llm = null, current = null;
     const model = pkg.model, cacheLayers = (model.kv_producer?.length ? model.kv_producer.filter((p) => p < 0).length : model.num_layers) - model.layer_types.filter((t) => t === "linear_attention").length;
     document.querySelectorAll(".layerCount").forEach((e) => (e.textContent = model.num_layers));
@@ -163,39 +162,51 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         return current;
     }
 
-    /** options: { image: { source (ImageBitmap / canvas / img), name, detail }, onText(text) (default: the answer box of the Chat tab) } -> a summary of the generation */
     // sampling: the package recommends parameters (plan.recommended.sampling: the model card's); ?temperature=0 = greedy (reproducible), ?temperature=0.7&topK=20&topP=0.8&presencePenalty=1.5 override
     const samplingFromUrl = () => {
         const query = new URLSearchParams(location.search), out = {};
         for (const [name, key] of [["temperature", "temperature"], ["topK", "topK"], ["topP", "topP"], ["presencePenalty", "presencePenalty"]]) if (query.get(name) !== null) out[key] = +query.get(name);
         return out;
     };
+    const imagePrompt = pkg.model.vision?.image_prompt ?? "";
+    /** the prompt of a conversation: the turns so far, the last one without an answer (turns: [{ user, assistant?, images: count }]) */
+    const promptOf = (turns, system) => (format ? buildPrompt(format, turns, system, new Date(), imagePrompt) : turns[turns.length - 1].user);
+
+    /** options: { turns: [{ user, assistant?, images }] (the whole conversation, the last turn is answered; default: just userText), images: [{ source (ImageBitmap / canvas / img), name, detail }] (in the order of the turns' pictures),
+     *  system, sampling, onText(text) (the answer so far), signal (AbortSignal: stop) } -> a summary of the generation (stopped: the signal ended it) */
     async function generate(session, userText, maxNewTokens, options = {}) {
-        let ids, images = [], imageInfo = null;
-        const chatAnswer = answerView(byId("answer")), showText = options.onText ?? ((text) => chatAnswer.set(text));   // the Chat tab shows Markdown; the log below gets the raw text
-        if (options.image) {   // a picture with the prompt: the grid preset is chosen from its size and the detail level, resized on a canvas, patchified; the pad token is expanded by the runtime
+        const sources = options.images ?? [], turns = options.turns ?? [{ user: userText, images: sources.length }], showText = options.onText ?? (() => {});
+        const images = [], imageInfos = [];
+        for (const { source, name = "", detail = "auto" } of sources) {   // a picture: the grid preset is chosen from its size and the detail level, resized on a canvas, patchified; the pad token is expanded by the runtime
             if (!llm.vision) throw new Error("the image tower is not loaded (this package has none, or the page was opened with vision=0)");
-            const { source, name = "", detail = "auto" } = options.image, started = performance.now();
-            images = [llm.prepareImage(source, undefined, detail)];
-            const preprocessMs = performance.now() - started, buildMs = await llm.vision.ensure(images[0].grid);   // the first use of a preset builds its three graphs (about two seconds): not part of the vision encode
+            const started = performance.now(), prepared = llm.prepareImage(source, undefined, detail);
+            const preprocessMs = performance.now() - started, buildMs = await llm.vision.ensure(prepared.grid);   // the first use of a preset builds its three graphs (about two seconds): not part of the vision encode
             const patch = pkg.model.vision.patch_size;
-            imageInfo = { name, detail, grid: images[0].grid, pixels: `${images[0].grid[1] * patch}x${images[0].grid[0] * patch}`, width: images[0].width, height: images[0].height, preprocessMs, buildMs };
-            log("image_prepared", `Image ${images[0].width}x${images[0].height} (detail ${detail}) -> grid ${images[0].grid.join("x")} (${imageInfo.pixels} px, ${images[0].tokens} image tokens), preprocessed in ${Math.round(preprocessMs)} ms${buildMs ? `, graphs of the grid built in ${seconds(buildMs)}` : ""}`,
-                { width: images[0].width, height: images[0].height, detail, grid: images[0].grid, image_tokens: images[0].tokens, preprocess_ms: Math.round(preprocessMs), build_ms: Math.round(buildMs) });
-            ids = tokenizer.encode(buildPrompt(format, [{ user: userText, images: 1 }], undefined, new Date(), pkg.model.vision.image_prompt));
-        } else ids = promptIds(userText);
+            images.push(prepared);
+            imageInfos.push({ name, detail, grid: prepared.grid, pixels: `${prepared.grid[1] * patch}x${prepared.grid[0] * patch}`, width: prepared.width, height: prepared.height, tokens: prepared.tokens, preprocessMs, buildMs });
+            log("image_prepared", `Image ${prepared.width}x${prepared.height} (detail ${detail}) -> grid ${prepared.grid.join("x")} (${imageInfos.at(-1).pixels} px, ${prepared.tokens} image tokens), preprocessed in ${Math.round(preprocessMs)} ms${buildMs ? `, graphs of the grid built in ${seconds(buildMs)}` : ""}`,
+                { width: prepared.width, height: prepared.height, detail, grid: prepared.grid, image_tokens: prepared.tokens, preprocess_ms: Math.round(preprocessMs), build_ms: Math.round(buildMs) });
+        }
+        const ids = tokenizer.encode(promptOf(turns, options.system));
         const total = ids.length + images.reduce((n, image) => n + image.tokens - 1, 0);   // the pad token of every image becomes `tokens` tokens
         if (total >= session.maxLength - 1) throw new Error(`prompt has ${total} tokens but max length is ${session.maxLength}`);
-        showText(""); byId("summaryLine").textContent = `prompt: ${total} tokens …`;
+        showText("");
         const plan = llm.planFor(total), chunks = plan.length;
-        log("generation_started", `Generation started: max length ${session.maxLength}, ${total} prompt tokens in ${chunks} chunk(s) (${plan.join("+")}), up to ${maxNewTokens} new tokens`, { max_length: session.maxLength, prompt_tokens: total, prefill_chunks: chunks, prefill_plan: plan, variant: session.variant.id, image_tokens: total - ids.length + images.length });
+        log("generation_started", `Generation started: max length ${session.maxLength}, ${total} prompt tokens in ${chunks} chunk(s) (${plan.join("+")}), up to ${maxNewTokens} new tokens`, { max_length: session.maxLength, prompt_tokens: total, prefill_chunks: chunks, prefill_plan: plan, variant: session.variant.id, image_tokens: total - ids.length + images.length, turns: turns.length, images: images.length });
         setStatus("prefill");
         const start = performance.now(), generated = [];
-        for await (const token of llm.generate(ids, { maxNewTokens, images, ...samplingFromUrl(), ...(options.sampling ?? {}) })) {
+        for await (const token of llm.generate(ids, { maxNewTokens, images, signal: options.signal, ...samplingFromUrl(), ...(options.sampling ?? {}) })) {
             if (stop.has(token)) break;
             generated.push(token);
             showText(tokenizer.decode(generated));
             setStatus(`decode step ${generated.length}/${maxNewTokens}`);
+        }
+        const stopped = !!options.signal?.aborted, answer = tokenizer.decode(generated);
+        const summary = { text: answer, promptTokens: total, imageTokens: llm.stats.imageTokens ?? 0, generated: generated.length, stopped, capacity: session.maxLength - 1, images: imageInfos };
+        if (stopped && !generated.length) {   // stopped during the prefill: no tokens, nothing to report but the prompt
+            log("generation_stopped", `Generation stopped during the prefill after ${seconds(performance.now() - start)}`, { max_length: session.maxLength, prompt_tokens: total });
+            setStatus("ready");
+            return { ...summary, imageTokens: 0, prefillMs: 0, visionMs: 0, buildMs: 0, preprocessMs: 0, tpotMs: 0, tps: 0, inferenceMs: performance.now() - start, grid: null, pixels: "", detail: "" };
         }
         const inferenceMs = performance.now() - start, s = llm.stats, steps = s.steps;
         const avg = (key) => (steps.length ? steps.reduce((sum, step) => sum + step[key], 0) / steps.length : 0);
@@ -208,29 +219,28 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         setMetric("metric-ttft", (prefillMs / 1000).toFixed(2), "s", `${total} prompt tokens · ${chunks} chunk${chunks > 1 ? "s" : ""}`);
         setMetric("metric-tpot", rounded(tpot), "ms/token", `${steps.length} decode steps · ${dispatches} dispatches per step`);
         setMetric("metric-tps", rounded(tps), "tokens/s", `${kv} · blocks/graph ${session.blocksPerGraph} · ${s.flushes} flushes`);
-        byId("summaryLine").textContent = `max length ${session.maxLength} · prompt ${total} tokens · ${generated.length} generated · total inference ${seconds(inferenceMs)}`;
+        byId("summaryLine").textContent = `max length ${session.maxLength} · prompt ${total} tokens · ${generated.length} generated · total inference ${seconds(inferenceMs)}${stopped ? " · stopped" : ""}`;
         fillTimingTable([
             ["Host: inputs", rounded(avg("hostMs")), "JavaScript work before the dispatches: writing the step inputs (embedding row, RoPE tables, masks, selectors)", "host"],
             ["Enqueue", rounded(avg("enqueueMs")), `${dispatches} dispatches queued per step (a flush of the staging buffer counts here when due)`, "enqueue"],
             ["Device wait", rounded(avg("waitMs")), "read logits: time until the device finished the whole chain", "device"],
-            ["Host: argmax", rounded(avg("samplingMs")), `greedy sampling over ${pkg.model.vocab} logits`, "sample"],
+            ["Host: sampling", rounded(avg("samplingMs")), `${pkg.plan.recommended?.sampling ? "temperature / top-k / top-p sampling" : "argmax"} over ${pkg.model.vocab} logits`, "sample"],
             ["Total = TPOT", rounded(tpot), "time per generated token", "total"],
         ]);
-        const answer = tokenizer.decode(generated);
         const first = s.stepMs.slice(0, 4).map(rounded).join(", ");
-        log("generation_finished", `Generated ${generated.length} tokens: TTFT ${seconds(prefillMs)}, TPOT ${rounded(tpot)} ms/token (${rounded(tps)} tokens/s); first decode steps ms: ${first}`,
-            { ...(images.length ? { image_tokens: llm.stats.imageTokens, vision_ms: Math.round(llm.stats.visionMs ?? 0), vision_build_ms: Math.round(llm.stats.visionBuildMs ?? 0), grid: imageInfo.grid, detail: imageInfo.detail, preprocess_ms: Math.round(imageInfo.preprocessMs) } : {}), max_length: session.maxLength, prefill_chunk_size: session.chunkSize, prefill_plan: plan, variant: session.variant.id, prompt_tokens: total, prefill_chunks: chunks, ttft_ms: Math.round(prefillMs), tpot_ms: rounded(tpot),
-              tokens_per_second: rounded(tps), decode_steps: steps.length, inference_ms: Math.round(inferenceMs), generated_token_ids: generated, text: answer, kv_flushes: s.flushes, package: url });
-        if (!options.onText) chatAnswer.flush();
+        log("generation_finished", `Generated ${generated.length} tokens: TTFT ${seconds(prefillMs)}, TPOT ${rounded(tpot)} ms/token (${rounded(tps)} tokens/s); first decode steps ms: ${first}${stopped ? " (stopped)" : ""}`,
+            { ...(images.length ? { image_tokens: llm.stats.imageTokens, vision_ms: Math.round(llm.stats.visionMs ?? 0), vision_build_ms: Math.round(llm.stats.visionBuildMs ?? 0), grid: imageInfos[0].grid, detail: imageInfos[0].detail, preprocess_ms: Math.round(imageInfos[0].preprocessMs) } : {}), max_length: session.maxLength, prefill_chunk_size: session.chunkSize, prefill_plan: plan, variant: session.variant.id, prompt_tokens: total, prefill_chunks: chunks, ttft_ms: Math.round(prefillMs), tpot_ms: rounded(tpot),
+              tokens_per_second: rounded(tps), decode_steps: steps.length, inference_ms: Math.round(inferenceMs), generated_token_ids: generated, text: answer, kv_flushes: s.flushes, package: url, ...(stopped ? { stopped: true } : {}) });
         setStatus("ready");
-        return { text: answer, promptTokens: total, imageTokens: llm.stats.imageTokens ?? 0, generated: generated.length, prefillMs, visionMs: llm.stats.visionMs ?? 0, buildMs: imageInfo?.buildMs ?? 0, preprocessMs: imageInfo?.preprocessMs ?? 0,
-            tpotMs: tpot, tps, inferenceMs, grid: imageInfo?.grid ?? null, pixels: imageInfo?.pixels ?? "", detail: imageInfo?.detail ?? "",
-            // one entry per picture of the prompt (the runtime takes one today); the vision encode time is of the whole prompt's pictures
-            images: imageInfo ? [{ name: imageInfo.name, detail: imageInfo.detail, grid: imageInfo.grid, pixels: imageInfo.pixels, tokens: images[0].tokens, preprocessMs: imageInfo.preprocessMs, buildMs: imageInfo.buildMs, visionMs: llm.stats.visionMs ?? 0 }] : [] };
+        return { ...summary, prefillMs, visionMs: llm.stats.visionMs ?? 0, buildMs: imageInfos.reduce((n, i) => n + i.buildMs, 0), preprocessMs: imageInfos.reduce((n, i) => n + i.preprocessMs, 0),
+            tpotMs: tpot, tps, inferenceMs, grid: imageInfos[0]?.grid ?? null, pixels: imageInfos[0]?.pixels ?? "", detail: imageInfos[0]?.detail ?? "" };
     }
 
     return {
         getSession, currentSession: () => current, generate, sharedBuildMs: 0, pkg,
-        countPromptTokens: (text) => promptIds(text).length,
+        countPromptTokens: (text) => tokenizer.encode(promptOf([{ user: text }])).length,
+        /** tokens of a conversation as the model reads it (a picture counts as its one pad token: the page adds the image tokens); the page keeps the history only when the package has a chat format */
+        countTurns: (turns, system) => tokenizer.encode(promptOf(turns, system)).length,
+        multiTurn: !!format,
     };
 }

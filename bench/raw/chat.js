@@ -22,6 +22,7 @@
 //
 // URL parameters (long name | legacy alias; the session options kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, prefillChunkSizes, computeType can also be picked on the page):
 //   device=npu|gpu     maxLength = 1152 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = 64     layers|L = 36
+//   system=<text>   a system prompt for the whole conversation (packages with a chat format)   question=<text>   the message in the box   image=<url>   a picture attached to it (packages with an image tower)   detail=auto|low|high
 //   prompt=...  |  promptFile=long-prompt.txt&promptChars=N (the first N characters of a text file + an instruction)     autoRun|auto = 1 (load immediately, generate once, finish; otherwise the page waits for the "Load model" button)
 //   kvStyle=staged (default: decode updates a small staging buffer, flushed into the main cache every stagingRows=64 steps) | onehot (whole-cache update) | scatterND (in-graph KV update as scatterND, value cache in natural layout)   kvInPlace=1 (KV update writes into the tensor it reads, no second cache)   tag=<label for the result file>     parallelDownloads=6 (weight files downloaded at the same time into the OPFS cache)
 //   matmulStyle|mm = gemm|matmul    zeroPoint|zp = const|none    dequantStyle|deq = dequantizeLinear|castMultiply|scaleAfterMatmul
@@ -29,9 +30,9 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=7";
-import { answerView } from "./answer-view.js?v=1";
-import { setupVisionTab } from "./vision-tab.js?v=5";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=8";
+import { createConversation, createAttachments, renderImageRows } from "./chat-ui.js?v=1";
+import { renderPipeline, updatePipelineSession } from "./pipeline.js?v=1";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -825,7 +826,9 @@ async function loadSharedModel() {
         log("decode_profile", `Decode profile (${runs} runs): ` + rows.map(([name, , , total]) => `${name} ${total} ms`).join("; "),
             { runs, segments: rows.map(([name, enqueue, wait, total]) => ({ name, enqueue_ms: enqueue, wait_ms: wait, total_ms: total })) });
     }
-    async function generate(session, userText, maxNewTokens) {
+    // options: { onText(text) (the answer so far), signal (AbortSignal: stop) }; this graph set answers every message on its own (no conversation history)
+    async function generate(session, userText, maxNewTokens, options = {}) {
+        const showText = options.onText ?? (() => {});
         const prompt = `<|im_start|>user\n${userText}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`;   // Qwen3, thinking disabled
         highlight("stage-tokenizer");
         const tokenIds = Array.from(tokenizer.encode(prompt));
@@ -834,7 +837,7 @@ async function loadSharedModel() {
         const planRows = plan.reduce((sum, size) => sum + size, 0);
         session.promptPad = tensorScatterKv ? planRows - tokenIds.length : 0;   // tensorScatter: padding rows in FRONT of the prompt (see writePrefillChunkInputsTensorScatter)
         if (tensorScatterKv && planRows > session.pastLength) throw new Error(`the prefill chunks (${planRows} rows) do not fit into the ${session.pastLength}-row cache`);
-        answerView(byId("answer")).set(""); byId("summaryLine").textContent = `prompt: ${tokenIds.length} tokens …`;
+        showText(""); byId("summaryLine").textContent = `prompt: ${tokenIds.length} tokens …`;
         log("generation_started", `Generation started: max length ${session.maxLength}, ${tokenIds.length} prompt tokens in ${chunkCount} chunk(s) (${chunkDescription}), up to ${maxNewTokens} new tokens`,
             { max_length: session.maxLength, prompt_tokens: tokenIds.length, prefill_chunks: chunkCount, prefill_plan: plan });
         const generationStart = performance.now();
@@ -844,6 +847,7 @@ async function loadSharedModel() {
         const chunkEnqueueMs = [];
         let chunkStart = 0;
         for (let chunk = 0; chunk < chunkCount; chunk++) {
+            if (options.signal?.aborted) { highlight(); setStatus("ready"); return { text: "", stopped: true, promptTokens: tokenIds.length, imageTokens: 0, generated: 0, prefillMs: 0, visionMs: 0, buildMs: 0, preprocessMs: 0, tpotMs: 0, tps: 0, inferenceMs: 0, grid: null, pixels: "", detail: "", images: [], capacity: session.pastLength }; }
             setStatus(`prefill chunk ${chunk + 1}/${chunkCount}`);
             const lastChunk = chunk === chunkCount - 1, startPosition = chunkStart;
             session.activatePrefill(plan[chunk]); chunkStart += plan[chunk];
@@ -858,9 +862,9 @@ async function loadSharedModel() {
         const generated = [], stepTimings = [];
         let token = prefill.token, position = tokenIds.length;
         if (stagedKv) { session.staging.base = tokenIds.length; session.staging.filled = 0; session.flushCount = 0; }   // the prompt is in the main cache, the staging buffer is empty
-        for (let step = 0; step < maxNewTokens && !END_OF_TEXT_TOKENS.has(token) && session.promptPad + position < session.pastLength; step++) {
+        for (let step = 0; step < maxNewTokens && !END_OF_TEXT_TOKENS.has(token) && session.promptPad + position < session.pastLength && !options.signal?.aborted; step++) {
             generated.push(token);
-            answerView(byId("answer")).set(tokenizer.decode(generated, { skip_special_tokens: true }));   // rendered as Markdown, at most every 100 ms
+            showText(tokenizer.decode(generated, { skip_special_tokens: true }));   // rendered as Markdown, at most every 100 ms
             setStatus(`decode step ${step + 1}/${maxNewTokens}`);
             const stepStart = performance.now();
             if (stagedKv && session.staging.filled === stagingRows) flushStaging(session);   // counted in this step's time
@@ -873,7 +877,7 @@ async function loadSharedModel() {
         }
         if (!END_OF_TEXT_TOKENS.has(token)) generated.push(token);
         const answer = tokenizer.decode(generated, { skip_special_tokens: true });
-        answerView(byId("answer")).set(answer); answerView(byId("answer")).flush();   // the log below gets the RAW text
+        showText(answer);   // the log below gets the RAW text
         highlight();
 
         const inferenceMs = performance.now() - generationStart;
@@ -898,9 +902,9 @@ async function loadSharedModel() {
             { max_length: session.maxLength, prefill_chunk_size: session.chunkSize, prefill_plan: plan, prompt_tokens: tokenIds.length, prefill_chunks: chunkCount, ttft_ms: Math.round(prefillMs),
               tpot_ms: rounded(timePerOutputTokenMs), tokens_per_second: rounded(tokensPerSecond), decode_steps: stepTimings.length, inference_ms: Math.round(inferenceMs),
               generated_token_ids: generated, text: answer, ...(stagedKv ? { kv_flushes: session.flushCount, staging_rows: stagingRows } : {}) });
-        if (profileEnabled && session.promptPad + position < session.pastLength) await profileDecode(session, token, position);
+        if (profileEnabled && !options.signal?.aborted && session.promptPad + position < session.pastLength) await profileDecode(session, token, position);
         setStatus("ready");
-        return { text: answer, promptTokens: tokenIds.length, imageTokens: 0, generated: generated.length, prefillMs, visionMs: 0, buildMs: 0, preprocessMs: 0, tpotMs: timePerOutputTokenMs, tps: tokensPerSecond, inferenceMs, grid: null, pixels: "", detail: "", images: [] };
+        return { text: answer, stopped: !!options.signal?.aborted, promptTokens: tokenIds.length, imageTokens: 0, generated: generated.length, prefillMs, visionMs: 0, buildMs: 0, preprocessMs: 0, tpotMs: timePerOutputTokenMs, tps: tokensPerSecond, inferenceMs, grid: null, pixels: "", detail: "", images: [], capacity: session.pastLength };
     }
 
     byId("sum-load").textContent = seconds(weightLoadMs);
@@ -914,7 +918,7 @@ ${userText}<|im_end|>
 </think>
 
 `).length;
-    return { getSession, currentSession: () => currentSession, generate, get sharedBuildMs() { return sharedBuildMs; }, countPromptTokens };
+    return { getSession, currentSession: () => currentSession, generate, get sharedBuildMs() { return sharedBuildMs; }, countPromptTokens, multiTurn: false, countTurns: (turns) => countPromptTokens(turns[turns.length - 1].user) };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -968,9 +972,9 @@ async function run() {
     computeTypeSelect.value = computeType;
     kvStyleSelect.value = kvStyle; stagingRowsSelect.value = urlSessionOptions.stagingRows; blocksSelect.value = urlSessionOptions.blocksPerGraph;
     prefillBlocksSelect.value = urlSessionOptions.prefillBlocksPerGraph || 0; chunkSizesInput.value = urlSessionOptions.chunkSizes.join(",");
-    let packageControls = null, visionTab = null, busy = false, packageInfo = "";
-    // the image tower (a package that has one): loaded with the model, a picture gets the grid preset the runtime chooses from its size and the Detail level (Vision tab); graphs of a preset are built on first use.
-    // URL: visionGrids=24x24,16x24 (advanced: only these presets may be chosen)   vision=0 | visionGrids=none (load no image tower)   detail=auto|low|high   tab=vision   image=<url> question=<text> (with autoRun)
+    let packageControls = null, attachments = null, busy = false, packageInfo = "", packagePeek = null, packageChatFormat = false, attachmentsChanged = () => {};
+    // the image tower (a package that has one): loaded with the model, a picture attached to a message gets the grid preset the runtime chooses from its size and the Detail level; graphs of a preset are built on first use.
+    // URL: visionGrids=24x24,16x24 (advanced: only these presets may be chosen)   vision=0 | visionGrids=none (load no image tower)   detail=auto|low|high   image=<url> (attached to the first message)   question=<text> (the message; with autoRun it is sent)   tab=vision (kept: autoRun then needs image=)
     const visionSetting = () => {   // true: every preset of the package | [[h, w], ...] the override | null: no image tower
         const text = (query.get("visionGrids") ?? "").trim().toLowerCase();
         if (query.get("vision") === "0" || text === "none") return null;
@@ -978,6 +982,8 @@ async function run() {
     };
     if (packageMode) {   // the options of a package are what it was compiled with: fill the selects from its plan and lock the rest
         const peek = await peekPackage(packageEntry.url);
+        packagePeek = peek; packageChatFormat = !!peek.chatFormat;
+        renderPipeline(byId("pipelineBody"), byId("pipelineSummary"), peek);   // the diagram of THIS package (layer kinds, KV sharing, host work, image tower ...), written from its model.json / plan.json
         packageControls = setupPackageControls(peek, { maxLengthSelect, chunkSizeSelect, blocksSelect, prefillBlocksSelect, kvStyleSelect, stagingRowsSelect, computeTypeSelect, chunkSizesInput },
             { kvStyle: query.get("kvStyle"), computeType: query.get("computeType") ?? query.get("dt"), stagingRows: query.get("stagingRows"), blocksPerGraph: query.get("blocksPerGraph") ?? query.get("bpg"), prefillBlocksPerGraph: query.get("prefillBlocksPerGraph") ?? query.get("pbpg"),
               chunkGiven: !!(query.get("prefillChunkSize") ?? query.get("chunk")), chunkSizes: urlSessionOptions.chunkSizes });
@@ -989,26 +995,24 @@ async function run() {
             log("option_not_available", byId("optionWarning").textContent, { requested_max_length: +query.get("maxLength"), available_max_lengths: [...maxLengthSelect.options].map((option) => +option.value) });
         }
         want(chunkSizeSelect, query.get("prefillChunkSize") ?? query.get("chunk"));
-        if (peek.plan.vision && visionSetting() !== null) {   // Qwen3.5 with an image tower: the Chat | Vision tabs (one loaded model for both)
-            byId("tabs").style.display = "";
+        if (peek.plan.vision && visionSetting() !== null) {   // Qwen3.5 with an image tower: Attach image in the composer
+            for (const element of document.querySelectorAll(".vision-only")) element.hidden = false;
             const override = visionSetting(), detail = ["low", "auto", "high"].includes(query.get("detail")) ? query.get("detail") : "auto";
-            visionTab = setupVisionTab({ byId, log, spec: peek.model.vision, presets: override === true ? peek.plan.vision.presets.map((p) => p.grid) : override, detail, isBusy: () => busy,
-                generate: (question, maxNewTokens, options) => visionGenerate(question, maxNewTokens, options), onDetail: () => syncUrl(), session: () => sessionSummary(), greedy: query.get("temperature") === "0" });
-            if (query.get("maxNewTokens") ?? query.get("maxNew")) byId("visionMaxNew").value = query.get("maxNewTokens") ?? query.get("maxNew");
-            if (query.get("question")) visionTab.setQuestion(query.get("question"));
+            attachments = createAttachments({ byId, log, spec: peek.model.vision, presets: override === true ? peek.plan.vision.presets.map((p) => p.grid) : override, detail,
+                onChange: () => attachmentsChanged(), onDetail: () => syncUrl(), setText: (text) => { byId("prompt").value = text; byId("promptPreset").value = "custom"; attachmentsChanged(); } });
         }
         byId("pageTitle").textContent = packageEntry.label; byId("pageSubtitle").textContent = "on WebNN";
         document.title = `${packageEntry.label} · WebNN chat`;
         packageInfo = `compiled by m2w (${peek.index.compiler}), target ${peek.index.target}`;
     }
-    const sessionSummary = () => {   // what the next generation uses: the loaded session, else the option selects (shared by both tabs)
+    const sessionSummary = () => {   // what the next generation uses: the loaded session, else the option selects
         const loaded = model?.currentSession?.();
         if (loaded) return `session: ${loaded.label}`;
         const chunks = chunkSizesInput.value.trim() || chunkSizeSelect.value;
         return `session (not loaded yet): max length ${maxLengthSelect.value}, prefill chunk ${chunks}, blocks/graph ${blocksSelect.value}, ${computeTypeSelect.value}`;
     };
     // the closed "Advanced" section says what is set in it (the values that differ from a plain default stay visible)
-    const showSession = (text) => { byId("sessionLine").textContent = text; };   // the session line under the answer: the same for both tabs
+    const showSession = (text) => { byId("sessionLine").textContent = text; };   // the session line above the numbers of the last turn
     const updateAdvancedSummary = () => {
         const parts = [];
         if (chunkSizesInput.value.trim()) parts.push(`chunks ${chunkSizesInput.value.trim()}`);
@@ -1021,15 +1025,18 @@ async function run() {
     const updateOptionControls = () => {
         updateAdvancedSummary();
         showSession(sessionSummary());
+        if (packageMode && !model) updatePipelineSession(byId("pipelineBody"), packagePeek, { blocksPerGraph: +blocksSelect.value || 1, prefillBlocksPerGraph: +prefillBlocksSelect.value || +blocksSelect.value || 1, kvStyle: kvStyleSelect.value, stagingRows: +stagingRowsSelect.value, chunks: chunkSizesInput.value.trim().replace(/\s*,\s*/g, " / ") || chunkSizeSelect.value, pastLength: +maxLengthSelect.value - 1 });   // before the first load: what the options on the page would build
         if (packageMode) { packageControls.lock(); return; }
         stagingRowsSelect.disabled = kvStyleSelect.value !== "staged";
     };
     byId("fixedLabel").textContent = packageMode ? "Package" : "Fixed at page load";
     byId("fixedOptions").textContent = packageMode ? `Package: ${packageEntry.url}  ${packageInfo}
 The options come from the package plan; the hand-written Qwen3-4B graphs offer the full option set.` : `Fixed at page load (URL): profile=${profileEnabled ? 1 : 0}  weightFormat=${weightFormat}  mergeProjections=${mergeProjections ? 1 : 0}  matmulStyle=${graphOptions.matmulStyle}  zeroPoint=${graphOptions.zeroPoint}  dequantStyle=${graphOptions.dequantStyle}  layers=${layerCount}`;
-    byId("maxNewTokensInput").value = defaultMaxNewTokens;
+    const givenMaxNewTokens = query.get("maxNewTokens") ?? query.get("maxNew");
+    byId("maxNewTokensInput").value = givenMaxNewTokens ?? (query.get("image") && attachments ? 128 : defaultMaxNewTokens);   // a picture question wants a longer answer than the short text default
+    byId("visionGreedy").checked = query.get("temperature") === "0";
     setStatus(IDLE_STATUS);
-    answerView(byId("answer"));   // the Markdown | Raw bar is there from the start
+    if (!packageMode) byId("pipelineSummary").textContent = `Qwen3-4B (hand-written graphs): ${layerCount} layers, all full attention · hidden ${hiddenSize} · ${numAttentionHeads} heads (${numKeyValueHeads} KV, head dim ${headDim}) · FFN ${CFG.FF} · vocab ${vocabularySize} · int4 weights, group 128`;
 
     // prompt presets of different length (the paragraph is repeated to reach roughly the stated number of prompt tokens)
     const paragraph = "The history of computing stretches from mechanical calculators to modern neural processors. Early machines filled whole rooms and executed a few " +
@@ -1041,26 +1048,72 @@ The options come from the package plan; the hand-written Qwen3-4B graphs offer t
         ["Short (~25 tokens): capital of France", "What is the capital of France?"],
         ["Medium (~250 tokens)", repeated(3)], ["Long (~500 tokens)", repeated(6)], ["Long (~900 tokens)", repeated(11)],
     ];
-    const presetSelect = byId("promptPreset");
+    const QUESTIONS = {   // the quick questions of a picture
+        describe: "Describe this image in detail.",
+        ocr: "Read all the text in this image. Reply with the text only.",
+        count: "How many distinct objects are in this image? Count them and list them.",
+        colors: "What are the main colors in this image, and where do they appear?",
+    };
+    const promptBox = byId("prompt"), presetSelect = byId("promptPreset"), runButton = byId("runButton"), greedyBox = byId("visionGreedy");
     presets.forEach(([name], index) => presetSelect.add(new Option(name, index)));
     presetSelect.add(new Option("Custom (edited text / ?prompt=… in the URL)", "custom"));
-    presetSelect.onchange = () => { if (presetSelect.value !== "custom") byId("prompt").value = presets[+presetSelect.value][1]; updateTokenCount(); };
+    presetSelect.onchange = () => { if (presetSelect.value !== "custom") promptBox.value = presets[+presetSelect.value][1]; scheduleContext(); promptBox.focus(); };
     if (query.get("promptFile")) {   // a long prompt: the first promptChars characters of a text file (long-prompt.txt: ~3.5 characters per token) + an instruction
         const text = await (await fetch(query.get("promptFile"))).text();
-        byId("prompt").value = `${text.slice(0, +query.get("promptChars") || text.length)}
+        promptBox.value = `${text.slice(0, +query.get("promptChars") || text.length)}
 
 Summarize the text above in two sentences.`; presetSelect.value = "custom";
-    } else if (query.get("prompt")) { byId("prompt").value = query.get("prompt"); presetSelect.value = "custom"; }
-    else { presetSelect.value = 0; byId("prompt").value = presets[0][1]; }
-    const updateTokenCount = () => { byId("promptTokenCount").textContent = model ? `${model.countPromptTokens(byId("prompt").value)} prompt tokens (with the chat template)` : "Token count appears after the model is loaded"; };
-    byId("prompt").oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || preset[1] !== byId("prompt").value) presetSelect.value = "custom"; updateTokenCount(); };
+    } else if (query.get("prompt")) { promptBox.value = query.get("prompt"); presetSelect.value = "custom"; }
+    else { presetSelect.value = 0; promptBox.value = presets[0][1]; }
+    if (query.get("question")) { promptBox.value = query.get("question"); presetSelect.value = "custom"; }   // question=<text> (the picture question of the old Vision tab) is the message
+    else if (query.get("image") && attachments && !query.get("prompt") && !query.get("promptFile")) { promptBox.value = QUESTIONS.describe; presetSelect.value = "custom"; }
+    for (const button of document.querySelectorAll("[data-question]")) button.onclick = () => { promptBox.value = QUESTIONS[button.dataset.question]; presetSelect.value = "custom"; scheduleContext(); promptBox.focus(); };
 
+    // ---- the conversation: the turns stay on the page; every send re-reads the whole history (no KV reuse across turns)
     let model = null;
-    updateTokenCount();
+    const conversation = createConversation(byId("conversation"));
+    const turns = [];   // { text, images: [{ bitmap, name, detail, grid, tokens, ... }], assistant (the answer, also a stopped one), dropped, elements: [message elements] }
+    const system = query.get("system") || undefined;   // system=<text>: a system prompt for the whole conversation (packages with a chat format)
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const setHint = (text, warn = false) => { const hint = byId("runHint"); hint.textContent = text; hint.style.color = warn ? "var(--warn)" : ""; };
+    const baseHint = () => (packageMode && packageChatFormat ? "Every message re-reads the whole conversation: the time to first token grows with the history."
+        : packageMode ? "This package has no chat format: every message is answered on its own." : "The hand-written Qwen3-4B graphs answer every message on its own (no history); load a package for a conversation.") + (model ? "" : " The first Generate loads the model.");
+    byId("conversation").querySelector(".chat-empty").textContent = `Ask something${attachments ? " or attach a picture" : ""}. ${packageMode && packageChatFormat ? "The conversation stays on this page and every message re-reads the whole history, so the time to first token grows with it." : "Every message is answered on its own."}`;
+    setHint(baseHint());
+    const liveTurns = () => (model?.multiTurn ? turns.filter((turn) => !turn.dropped) : []);   // what the next prompt contains (the dropped turns stay on the screen only)
+    const runtimeTurn = (turn, answered) => ({ user: turn.text, images: turn.images.length, ...(answered ? { assistant: turn.assistant ?? "" } : {}) });
+    const imageExtra = (list) => list.reduce((n, turn) => n + turn.images.reduce((m, image) => m + image.tokens - 1, 0), 0);   // the pad token of a picture becomes `tokens` tokens
+    const countConversation = (history, message) => model.countTurns([...history.map((turn) => runtimeTurn(turn, true)), runtimeTurn(message, false)], system) + imageExtra([...history, message]);
+    const capacityOf = (session) => session.pastLength ?? session.maxLength - 1;   // KV rows: the prompt and the answer must fit
+
+    // the line under the composer: how full the context is (needs the tokenizer, so after the first load)
+    let contextTimer = null;
+    const scheduleContext = () => { clearTimeout(contextTimer); contextTimer = setTimeout(() => updateContext(), 150); };
+    const updateContext = () => {
+        const out = byId("promptTokenCount"), session = model?.currentSession?.();
+        out.classList.remove("over");
+        if (!model || !session) { out.textContent = "Token counts appear after the model is loaded."; return; }
+        const reserve = +byId("maxNewTokensInput").value || 0, capacity = capacityOf(session), message = { text: promptBox.value, images: attachments?.items ?? [] };
+        const used = countConversation(liveTurns(), message), own = countConversation([], message);
+        out.textContent = `Prompt ${used} tokens (history ${used - own} + message ${own}) · ${reserve} reserved for the answer · ${capacity} cache rows`;
+        out.classList.toggle("over", used + reserve > capacity);
+    };
+    attachmentsChanged = scheduleContext;
+    promptBox.oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || preset[1] !== promptBox.value) presetSelect.value = "custom"; scheduleContext(); };
+    byId("maxNewTokensInput").addEventListener("input", scheduleContext);
+    updateContext();
+
     const sessionOptionsOnPage = () => ({ kvStyle: kvStyleSelect.value, stagingRows: +stagingRowsSelect.value, blocksPerGraph: +blocksSelect.value, prefillBlocksPerGraph: +prefillBlocksSelect.value, chunkSizes: parseChunkSizes(chunkSizesInput.value), computeType: computeTypeSelect.value });
     const selected = () => ({ maxLength: +maxLengthSelect.value, chunkSize: +chunkSizeSelect.value, maxNewTokens: +byId("maxNewTokensInput").value, options: sessionOptionsOnPage() });
     const optionControls = [maxLengthSelect, chunkSizeSelect, computeTypeSelect, kvStyleSelect, stagingRowsSelect, blocksSelect, prefillBlocksSelect, chunkSizesInput];
-    const setBusy = (value) => { busy = value; for (const id of ["loadButton", "runButton"]) byId(id).disabled = value; optionControls.forEach((control) => (control.disabled = value)); visionTab?.setBusy(value); if (!value) updateOptionControls(); };
+    let generating = false, stopping = false, controller = null;
+    const renderRunButton = () => {   // one button: Generate, then Stop while a generation runs
+        runButton.classList.toggle("stop", generating);
+        runButton.textContent = stopping ? "Stopping…" : generating ? "Stop" : "Generate";
+        runButton.disabled = stopping || (busy && !generating);
+        byId("newChatButton").disabled = busy;
+    };
+    const setBusy = (value) => { busy = value; byId("loadButton").disabled = value; optionControls.forEach((control) => (control.disabled = value)); if (!value) { generating = false; stopping = false; updateOptionControls(); } renderRunButton(); };
     // keep the URL in step with the page so that a link to it reproduces the setting (long names only)
     const syncUrl = () => {
         const url = new URL(location.href), { maxLength, chunkSize, options } = selected();
@@ -1069,18 +1122,9 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         set("model", modelId, modelId !== "js"); set("device", deviceSelect.value, true); set("maxLength", maxLength, true); set("prefillChunkSize", chunkSize, true); set("kvStyle", options.kvStyle, true); set("stagingRows", options.stagingRows, options.kvStyle === "staged");
         set("blocksPerGraph", options.blocksPerGraph, options.blocksPerGraph > 1); set("prefillBlocksPerGraph", options.prefillBlocksPerGraph, options.prefillBlocksPerGraph > 0);
         set("prefillChunkSizes", options.chunkSizes.join(","), options.chunkSizes.length > 0); set("computeType", options.computeType, options.computeType !== "float32");
-        set("tab", activeTab, visionTab && activeTab !== "chat"); set("detail", visionTab?.detail, visionTab && visionTab.detail !== "auto");
+        set("detail", attachments?.detail, attachments && attachments.detail !== "auto");
         history.replaceState(null, "", url);
     };
-    let activeTab = "chat";
-    const showTab = (tab, sync = true) => {   // switching tabs only shows / hides: the model and its session stay loaded
-        activeTab = visionTab ? tab : "chat";
-        byId("panel-chat").style.display = activeTab === "chat" ? "" : "none"; byId("panel-vision").style.display = activeTab === "vision" ? "" : "none";
-        for (const button of byId("tabs").children) button.classList.toggle("on", button.dataset.tab === activeTab);
-        if (sync) syncUrl();
-    };
-    for (const button of byId("tabs").children) button.onclick = () => showTab(button.dataset.tab);
-    showTab(query.get("tab") === "vision" ? "vision" : "chat", false);
     optionControls.forEach((control) => control.addEventListener("change", () => { updateOptionControls(); syncUrl(); }));
     updateOptionControls();
     const loadModel = async () => {
@@ -1089,67 +1133,121 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             const { maxLength, chunkSize, options } = selected();
             if (!packageMode) applySessionOptions(options);   // before the first load: lm_head is built with the compute type picked on the page
             const loadStart = performance.now(), firstLoad = !model, previousSession = model?.currentSession?.();   // startup time = this load only, not the time since the page was opened
-            if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded }, { url: packageEntry.url, deviceType, vision: visionTab ? visionSetting() : null })
+            if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded }, { url: packageEntry.url, deviceType, vision: attachments ? visionSetting() : null })
                 : await loadSharedModel();             // first time: tokenizer, weights, lm_head graph
             const session = await model.getSession(maxLength, chunkSize, options);   // builds the max-length / chunk-size / session-option specific graphs + KV cache
-            const stagedNow = packageMode ? session.variant?.kv_style === "staged" : stagedKv;   // the flush box of the pipeline exists for the staged KV cache only
-            byId("flushRow").style.display = stagedNow ? "" : "none"; byId("stagingRowsLabel").textContent = packageMode ? session.variant?.staging_rows ?? "" : stagingRows;
+            if (packageMode) updatePipelineSession(byId("pipelineBody"), packagePeek, { blocksPerGraph: session.blocksPerGraph, prefillBlocksPerGraph: session.prefillBlocksPerGraph, kvStyle: session.variant?.kv_style, stagingRows: session.variant?.staging_rows });
+            else { byId("flushRow").style.display = stagedKv ? "" : "none"; byId("stagingRowsLabel").textContent = stagingRows; }   // the flush box of the pipeline exists for the staged KV cache only
             const startupMs = performance.now() - loadStart, reused = !firstLoad && session === previousSession;
             setCell("sum-build", seconds(model.sharedBuildMs + session.buildMs), `shared ${seconds(model.sharedBuildMs)} + max-length / chunk / option specific ${seconds(session.buildMs)}`);
             setCell("sum-startup", seconds(startupMs), firstLoad ? "tokenizer + load weights + build graphs" : reused ? "same settings: the session was already loaded" : "reload: weights were already loaded, only the session graphs were rebuilt");
             setMetric("metric-startup", (startupMs / 1000).toFixed(1), "s", firstLoad ? `incl. weights; graphs built in ${seconds(model.sharedBuildMs + session.buildMs)}` : reused ? "already loaded" : `reload, weights kept; graphs ${seconds(session.buildMs)}`);
-            showSession(sessionSummary());
             byId("loadedLabel").textContent = packageMode ? `loaded: ${session.label}` : `loaded: max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
-            updateTokenCount();
             byId("loadButton").textContent = "Apply options"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
             setStatus("ready");
         } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); }
-        finally { setBusy(false); byId("runButton").disabled = !model; byId("runHint").hidden = !!model; }
+        finally { setBusy(false); showSession(sessionSummary()); updateContext(); }
     };
-    // what both tabs show after a generation besides the metrics: token counts, KV cache rows used (a full cache cut the answer), and the image rows of the Summary (none for a text prompt)
+
+    // what the page shows about the LAST turn (a text prompt and a prompt with pictures fill the same block; pictures only add rows to the Summary)
     const showRunResult = (result, session) => {
-        if (!result) return;
-        const capacity = session.pastLength ?? session.maxLength - 1, used = result.promptTokens + result.generated, full = used >= capacity;
+        const capacity = capacityOf(session), used = result.promptTokens + result.generated, full = used >= capacity;
         setCell("sum-tokens", `${result.promptTokens}${result.imageTokens ? ` (${result.imageTokens} image)` : ""} + ${result.generated}`);
-        setCell("sum-cache", `${used} of ${capacity} rows${full ? " (FULL: the answer was cut)" : ""}`);
-        if (full) { const view = answerView(byId("answer")); view.set(view.text + `\n\n[stopped: the KV cache of this session holds ${capacity} tokens (${result.promptTokens} prompt + ${result.generated} generated). Choose a longer max length.]`); view.flush(); }
-        visionTab?.showImages(result.images ?? []);
+        setCell("sum-cache", `${Math.min(used, capacity)} of ${capacity} rows${full ? " (FULL: the answer was cut)" : ""}`);
+        renderImageRows(byId("sumImages"), result.images ?? [], packagePeek?.model.vision, result.visionMs);
+        return full;
     };
-    const generateOnce = async () => {
-        const { maxLength, chunkSize, maxNewTokens, options } = selected();
-        const session = await model.getSession(maxLength, chunkSize, options);
-        showRunResult(await model.generate(session, byId("prompt").value, maxNewTokens), session);
+    const resetResults = () => {
+        for (const id of ["metric-ttft", "metric-tpot", "metric-tps"]) setMetric(id, "–", "", "");
+        for (const id of ["sum-prefill", "sum-decode", "sum-inference", "sum-tokens", "sum-cache"]) setCell(id, "–");
+        byId("summaryLine").textContent = ""; byId("sumImages").replaceChildren();
+        const table = byId("timingTable");
+        while (table.rows.length > 1) table.deleteRow(1);
+        const row = table.insertRow(); row.className = "empty"; row.insertCell().textContent = "Generate an answer to see the split."; row.cells[0].colSpan = 3;
     };
-    // the Vision tab: the same model and session as the Chat tab (loaded first when needed)
-    const visionGenerate = async (question, maxNewTokens, generateOptions) => {
-        if (!model) await loadModel();
-        if (!model) throw new Error("the model did not load: see the log");
-        setBusy(true);
+    const turnMeta = (result, full) => [result.stopped && "stopped", result.prefillMs > 0 && `TTFT ${seconds(result.prefillMs)}`, result.tpotMs > 0 && `TPOT ${rounded(result.tpotMs)} ms/token`,
+        `${result.promptTokens}${result.imageTokens ? ` (${result.imageTokens} image)` : ""} + ${result.generated} tokens`, full && "KV cache full: the answer was cut"].filter(Boolean).join(" · ");
+
+    /** which turns the next prompt contains: the live history + the new message must fit the cache with the answer reserved; the OLDEST whole turns go first (the system prompt and the newest message never).
+     *  The newest message alone: it is sent when at least a short answer fits (`room`: the tokens left, the answer may be cut), else it is not sent. */
+    const planHistory = (session, message, reserve) => {
+        const capacity = capacityOf(session), kept = liveTurns(), dropped = [];
+        const fits = () => countConversation(kept, message) + reserve <= capacity;
+        while (!fits() && kept.length) dropped.push(kept.shift());
+        const own = countConversation(kept, message);
+        if (own + reserve <= capacity) return { ok: true, kept, dropped };
+        if (own + Math.min(reserve, 16) <= capacity) return { ok: true, kept, dropped, room: capacity - own };
+        return { ok: false, message: `Not sent: this message needs ${own} prompt tokens, but max length ${session.maxLength} holds ${capacity} cache rows, which leaves no room for an answer. Choose a larger Max length (it is chosen at Load) or a lower picture Detail.` };
+    };
+    const send = async () => {
+        if (busy) return;
+        const text = promptBox.value.trim();
+        if (!text) { setHint("Write a message first.", true); return; }
+        if (!model) { await loadModel(); if (!model) return; }
+        setBusy(true); generating = true; renderRunButton();
+        controller = new AbortController();
+        let turn = null, bubble = null, notice = null, plan = null;
+        const undo = () => {   // the send did not produce an answer: take the message back (history, screen, composer)
+            if (!turn) return;
+            turns.splice(turns.indexOf(turn), 1);
+            for (const element of turn.elements) element.remove();
+            bubble?.view.dispose(); notice?.remove();
+            if (plan) { plan.dropped.forEach((old) => { old.dropped = false; }); conversation.markDropped(plan.dropped.flatMap((old) => old.elements), false); }
+            promptBox.value = text; attachments?.restore(turn.images);
+        };
         try {
-            const { maxLength, chunkSize, options } = selected();
-            const session = await model.getSession(maxLength, chunkSize, options);   // the SAME selects as the Chat tab: max length, chunk sizes, blocks / graph, compute type
+            const { maxLength, chunkSize, maxNewTokens, options } = selected();
+            const session = await model.getSession(maxLength, chunkSize, options);   // (rebuilds the graphs when the options changed since the last turn)
             showSession(`session: ${session.label}`);
-            const result = await model.generate(session, question, maxNewTokens, generateOptions);
-            showRunResult(result, session);
-            return { ...result, maxLength: session.maxLength, sessionLabel: session.label };
-        } finally { setBusy(false); }
+            const message = { text, images: attachments ? attachments.items.slice() : [] };
+            plan = planHistory(session, message, maxNewTokens);
+            if (!plan.ok) { conversation.addNotice(plan.message, { warn: true }); setHint(plan.message, true); plan = null; return; }
+            setHint(baseHint());
+            if (plan.dropped.length) {   // the oldest turns leave the prompt for good (they stay on the screen, dimmed)
+                for (const old of plan.dropped) old.dropped = true;
+                conversation.markDropped(plan.dropped.flatMap((old) => old.elements));
+                notice = conversation.addNotice(`Dropped ${plural(plan.dropped.length, "oldest turn", "oldest turns")} to fit max length ${session.maxLength}`, { after: plan.dropped[plan.dropped.length - 1].elements.at(-1) });
+                log("history_trimmed", `Dropped ${plan.dropped.length} oldest turn(s) to fit max length ${session.maxLength}`, { dropped_turns: plan.dropped.length, kept_turns: plan.kept.length, max_length: session.maxLength });
+            }
+            turn = { text, images: attachments ? attachments.take() : [], assistant: undefined, dropped: false, elements: [] };
+            turn.elements.push(conversation.addUser({ text, images: turn.images }));
+            if (plan.room) turn.elements.push(conversation.addNotice(`Only ${plan.room} tokens are left for the answer at max length ${session.maxLength}: it may be cut. A larger Max length is chosen at Load.`, { after: turn.elements[0] }));
+            promptBox.value = ""; scheduleContext();
+            bubble = conversation.addAssistant(); turn.elements.push(bubble.element);
+            turns.push(turn);
+            const sources = [...plan.kept, turn].flatMap((item) => item.images).map((image) => ({ source: image.bitmap, name: image.name, detail: image.detail }));   // the pictures of the history are encoded again with the prompt
+            const result = await model.generate(session, text, maxNewTokens, { turns: [...plan.kept.map((item) => runtimeTurn(item, true)), runtimeTurn(turn, false)], images: sources, system,
+                sampling: greedyBox.checked ? { temperature: 0 } : undefined, onText: (answer) => bubble.view.set(answer), signal: controller.signal });
+            bubble.view.flush();
+            if (result.stopped && !result.generated) { undo(); setHint("Stopped before the first token: the message is back in the box.", true); return; }
+            turn.assistant = result.text;
+            const full = showRunResult(result, session);
+            bubble.setMeta(turnMeta(result, full), result.stopped ? "stopped" : full ? "full" : "");
+        } catch (error) {
+            log("fatal", "Generation failed: " + error); setStatus("FAILED: " + error);
+            const failed = turn !== null; undo();
+            conversation.addNotice(`Generation failed: ${error}${failed ? " (the message is back in the box)" : ""}`, { warn: true });
+        } finally { setBusy(false); controller = null; updateContext(); conversation.scrollToEnd(); }
+    };
+    runButton.onclick = () => { if (generating) { stopping = true; controller?.abort(); renderRunButton(); setStatus("stopping…"); } else send(); };
+    promptBox.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!generating && !busy) send(); } });
+    byId("newChatButton").onclick = () => {
+        if (busy) return;
+        for (const old of turns.splice(0)) old.images.forEach((image) => image.bitmap.close?.());
+        conversation.clear(); resetResults(); setHint(baseHint()); updateContext();
     };
     byId("loadButton").onclick = loadModel;
-    byId("prompt").addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !byId("runButton").disabled) byId("runButton").click(); });
     byId("clearCacheButton").onclick = async () => { await (packageMode ? clearPackageCache(packageEntry.url) : clearWeightCache()); log("cache_cleared", "Weight cache (OPFS) cleared"); };
-    byId("runButton").onclick = async () => {
-        setBusy(true);
-        try { await generateOnce(); } catch (error) { log("fatal", "Generation failed: " + error); setStatus("FAILED: " + error); }
-        finally { setBusy(false); }
-    };
-    if (autoRun) {
+    renderRunButton();
+    // image=<url>: the picture goes into the composer (a package with an image tower)
+    const imageLoaded = query.get("image") && attachments ? attachments.addUrl(new URL(query.get("image"), location.href), query.get("image").split("/").pop()).catch((error) => log("fatal", "Image failed: " + error)) : null;
+    if (autoRun) {   // autoRun=1: load the model and send the message in the box once (tab=vision&image=<url>&question=<text>[&detail=high]: one picture question; the picture from a URL: ../raw/vision-suite/ocr-small.png)
         await loadModel();
-        if (model && activeTab === "vision") {   // tab=vision&image=<url>&question=<text>[&detail=high]: one picture question (the picture from a URL: ../raw/vision-suite/ocr-small.png)
-            try {
-                if (query.get("image")) await visionTab.loadUrl(new URL(query.get("image"), location.href), query.get("image").split("/").pop());
-                if (visionTab.hasPicture()) await visionTab.run(); else log("done", "tab=vision with autoRun needs image=<url>");
-            } catch (error) { log("fatal", "Generation failed: " + error); }
-        } else if (model) { try { await generateOnce(); } catch (error) { log("fatal", "Generation failed: " + error); } }
+        if (model) {
+            await imageLoaded;
+            if (query.get("tab") === "vision" && !(attachments && attachments.items.length)) log("done", "tab=vision with autoRun needs image=<url>");
+            else await send();
+        }
         log("done", "Done");
     }
 }
