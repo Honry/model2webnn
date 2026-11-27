@@ -10,6 +10,9 @@
 //    of the left-padded last chunk are parked behind the real rows (clamped to P-1), where they are masked;
 //  * tensorScatter KV (prefill and decode): the graph scatters the new rows into the cache at kv_write_index and attends over the updated cache (mask columns = cache rows 0..P-1);
 //    every prefill chunk is full, the padding of the prompt is in FRONT of it (`pad` rows), token i is in cache row pad + i, the decode step of position pos writes row pad + pos.
+//  * sliding window caches (staged KV only; plan.profile.sliding_cache = 'window'): the sliding layers hold a RING of `ring` rows, position p lives in slot p mod ring; the functions that take `ring`
+//    (prefillMasks, prefillSelectors, decodeMasks, flushSelectors, incachePrefillMasks) give those layers masks / selectors with `ring` instead of P cache rows (cacheRows() says which layer type has
+//    how many). Nothing else changes (RoPE, staging buffer, chunk rows). Design: docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md.
 import { cosSin, invFreqFor, type RopeEntry } from './rope.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -34,6 +37,19 @@ export const headDimOf = (spec: LayoutSpec, layerType: string): number => spec.l
 
 /** the layer types that attend over a KV cache (masks, rope tables); Gated DeltaNet layers (linear_attention) have neither */
 export const layerTypesOf = (spec: LayoutSpec): string[] => [...new Set(spec.layer_types)].filter((t) => t !== 'linear_attention').sort();
+
+/** The ring of a package: rows of the cache of its sliding layers when it was built with sliding_cache = 'window' (plan.profile), else 0 (every layer holds all rows). */
+export const ringOf = (plan: { profile?: { sliding_cache?: string; sliding_ring?: number } }): number => (plan.profile?.sliding_cache === 'window' ? plan.profile.sliding_ring ?? 0 : 0);
+
+/** Rows of the K / V cache of a layer of this type when the full cache has P rows: the ring for the sliding layers of a window package (ring < P), else all P. */
+export const cacheRows = (layerType: string, P: number, ring = 0): number => (ring > 0 && ring < P && layerType === 'sliding_attention' ? ring : P);
+
+/** The position every slot of a ring of `rows` rows holds after the positions 0 .. written-1 were written (position p goes to slot p mod rows): the newest one, -1 = empty. With rows = P (the full cache) slot j holds position j. */
+export function slotPositions(rows: number, written: number): Int32Array {
+  const held = new Int32Array(rows).fill(-1);
+  for (let j = 0; j < Math.min(rows, written); j++) held[j] = j + Math.floor((written - 1 - j) / rows) * rows;
+  return held;
+}
 
 /** may a query at q_pos attend to the key at k_pos in a layer of this type? */
 export function visible(spec: LayoutSpec, layerType: string, qPos: number, kPos: number): boolean {
@@ -62,39 +78,42 @@ export function ropeTables(spec: LayoutSpec, positions: number[], rows: number, 
   return out;
 }
 
-/** layer type -> mask float16 [C * (P + C)] of a chunk with `valid` real tokens at positions start .. start+valid-1 */
-export function prefillMasks(spec: LayoutSpec, P: number, C: number, start: number, valid: number): Record<string, Half> {
-  const pad = C - valid, total = P + C, out: Record<string, Half> = {};
+/** layer type -> mask float16 [C * (rows + C)] of a chunk with `valid` real tokens at positions start .. start+valid-1; rows = cacheRows(): the cache columns of a ring layer are its slots */
+export function prefillMasks(spec: LayoutSpec, P: number, C: number, start: number, valid: number, ring = 0): Record<string, Half> {
+  const pad = C - valid, out: Record<string, Half> = {};
   for (const type of layerTypesOf(spec)) {
+    const rows = cacheRows(type, P, ring), total = rows + C, held = rows < P ? slotPositions(rows, start) : null;
     const mask = newHalf(C * total).fill(HIDDEN);
     for (let row = 0; row < C; row++) {
       const base = row * total;
-      if (row < pad) { mask[base + P + row] = 0; continue; }   // pad row: sees only itself
+      if (row < pad) { mask[base + rows + row] = 0; continue; }   // pad row: sees only itself
       const qPos = start + (row - pad), lowest = firstVisible(spec, type, qPos);
-      if (lowest < start) mask.fill(0, base + lowest, base + start);                        // cache rows of earlier chunks (row j holds position j)
+      if (held) { for (let j = 0; j < rows; j++) if (held[j] >= lowest) mask[base + j] = 0; }   // slots of the ring that hold a position of the window (empty slots: -1; held positions are < start <= qPos)
+      else if (lowest < start) mask.fill(0, base + lowest, base + start);                    // cache rows of earlier chunks (row j holds position j)
       const firstColumn = Math.max(pad, lowest - start + pad);                              // real chunk rows up to the row itself (position start + c - pad)
-      if (firstColumn <= row) mask.fill(0, base + P + firstColumn, base + P + row + 1);
+      if (firstColumn <= row) mask.fill(0, base + rows + firstColumn, base + rows + row + 1);
     }
     out[type] = mask;
   }
   return out;
 }
 
-/** rowsToKeep [P], rowSelector [P * C]: chunk row pad+i writes cache row start+i */
-export function prefillSelectors(P: number, C: number, start: number, valid: number): { rowsToKeep: Half; rowSelector: Half } {
+/** rowsToKeep [P], rowSelector [P * C]: chunk row pad+i writes cache row start+i (`wrap`: slot (start+i) mod P of a ring); P = the rows of THIS cache */
+export function prefillSelectors(P: number, C: number, start: number, valid: number, wrap = false): { rowsToKeep: Half; rowSelector: Half } {
   const pad = C - valid, rowsToKeep = newHalf(P).fill(1), rowSelector = newHalf(P * C);
-  for (let i = 0; i < valid; i++) { rowsToKeep[start + i] = 0; rowSelector[(start + i) * C + pad + i] = 1; }
+  for (let i = 0; i < valid; i++) { const slot = wrap ? (start + i) % P : start + i; rowsToKeep[slot] = 0; rowSelector[slot * C + pad + i] = 1; }
   return { rowsToKeep, rowSelector };
 }
 
-/** layer type -> mask float16 [P + R] for the token at position pos = base + filled */
-export function decodeMasks(spec: LayoutSpec, P: number, R: number, pos: number, base: number, filled: number): Record<string, Half> {
+/** layer type -> mask float16 [rows + R] for the token at position pos = base + filled; rows = cacheRows() (the slots of a ring hold slotPositions(ring, base)) */
+export function decodeMasks(spec: LayoutSpec, P: number, R: number, pos: number, base: number, filled: number, ring = 0): Record<string, Half> {
   const out: Record<string, Half> = {};
   for (const type of layerTypesOf(spec)) {
-    const mask = newHalf(P + R).fill(HIDDEN), lowest = firstVisible(spec, type, pos);
-    if (lowest < base) mask.fill(0, lowest, base);                                          // main cache rows
+    const rows = cacheRows(type, P, ring), mask = newHalf(rows + R).fill(HIDDEN), lowest = firstVisible(spec, type, pos);
+    if (rows < P) { const held = slotPositions(rows, base); for (let j = 0; j < rows; j++) if (held[j] >= lowest) mask[j] = 0; }   // slots that hold a position of the window
+    else if (lowest < base) mask.fill(0, lowest, base);                                     // main cache rows
     const firstStaging = Math.max(0, lowest - base);                                        // staging row i holds position base + i
-    if (firstStaging <= filled) mask.fill(0, P + firstStaging, P + filled + 1);
+    if (firstStaging <= filled) mask.fill(0, rows + firstStaging, rows + filled + 1);
     out[type] = mask;
   }
   return out;
@@ -107,10 +126,13 @@ export function decodeSelectors(R: number, filled: number): { rowsToKeep: Half; 
   return { rowsToKeep, rowSelector };
 }
 
-/** rowsToKeep [P], rowSelector [P * R]: staging row i -> main cache row base+i (rows beyond the cache are dropped) */
-export function flushSelectors(P: number, R: number, base: number): { rowsToKeep: Half; rowSelector: Half } {
+/** rowsToKeep [P], rowSelector [P * R]: staging row i -> main cache row base+i (rows beyond the cache are dropped); `wrap`: slot (base+i) mod P of a ring (R <= P: the slots of one flush differ); P = the rows of THIS cache */
+export function flushSelectors(P: number, R: number, base: number, wrap = false): { rowsToKeep: Half; rowSelector: Half } {
   const rowsToKeep = newHalf(P).fill(1), rowSelector = newHalf(P * R);
-  for (let i = 0; i < R && base + i < P; i++) { rowsToKeep[base + i] = 0; rowSelector[(base + i) * R + i] = 1; }
+  for (let i = 0; i < R; i++) {
+    const slot = wrap ? (base + i) % P : base + i;
+    if (slot < P) { rowsToKeep[slot] = 0; rowSelector[slot * R + i] = 1; }
+  }
   return { rowsToKeep, rowSelector };
 }
 
@@ -232,17 +254,18 @@ export function scatterNDDecodeIndices(kvHeads: number, pos: number): Int32Array
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------- attention over another layer's updated cache
-/** layer type -> mask float16 [C * P] for a layer that reads the (already updated) cache of another layer in a prefill chunk (Gemma 4 KV sharing): columns are cache rows; a real row sees the rows up
- *  to its position (window of its layer type), a pad row sees row 0 only (any visible column keeps the softmax finite; its output is never used) */
-export function incachePrefillMasks(spec: LayoutSpec, P: number, C: number, start: number, valid: number): Record<string, Half> {
+/** layer type -> mask float16 [C * rows] for a layer that reads the (already updated) cache of another layer in a prefill chunk (Gemma 4 KV sharing): columns are cache rows; a real row sees the rows up
+ *  to its position (window of its layer type), a pad row sees row 0 only (any visible column keeps the softmax finite; its output is never used). A ring layer: the slots hold slotPositions(ring, start + valid) after the update of the chunk */
+export function incachePrefillMasks(spec: LayoutSpec, P: number, C: number, start: number, valid: number, ring = 0): Record<string, Half> {
   const pad = C - valid, out: Record<string, Half> = {};
   for (const type of layerTypesOf(spec)) {
-    const mask = newHalf(C * P).fill(HIDDEN);
+    const rows = cacheRows(type, P, ring), held = rows < P ? slotPositions(rows, start + valid) : null, mask = newHalf(C * rows).fill(HIDDEN);
     for (let row = 0; row < C; row++) {
-      const base = row * P;
+      const base = row * rows;
       if (row < pad) { mask[base] = 0; continue; }
-      const qPos = start + (row - pad);
-      mask.fill(0, base + firstVisible(spec, type, qPos), base + qPos + 1);
+      const qPos = start + (row - pad), lowest = firstVisible(spec, type, qPos);
+      if (held) { for (let j = 0; j < rows; j++) if (held[j] >= lowest && held[j] <= qPos) mask[base + j] = 0; }   // slots that hold a position of the window up to the query
+      else mask.fill(0, base + lowest, base + qPos + 1);
     }
     out[type] = mask;
   }

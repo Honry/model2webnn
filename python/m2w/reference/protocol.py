@@ -13,6 +13,9 @@ Conventions:
   * tensorScatter KV (prefill and decode): the graph scatters the new rows into the cache at `kv_write_index` (the rows go in contiguously) and attends over the
     updated cache (mask columns = cache rows 0..P-1). Every prefill chunk is full: the padding of the prompt is in FRONT of it (`pad` rows, cache rows 0..pad-1),
     token i sits in cache row pad + i, and the decode step of position pos writes row pad + pos.
+  * sliding window caches (the staged protocol only; plan.profile.sliding_cache = "window"): the sliding layers hold a RING of `ring` rows, position p lives in slot p mod ring, and
+    the functions that take `ring` (prefill_masks, prefill_selectors, decode_masks, flush_selectors, incache_prefill_masks) give those layers masks / selectors with `ring` instead of
+    P cache rows. P is still max_length - 1; cache_rows() tells which layer type has how many rows. Nothing else changes (RoPE, staging buffer, chunk rows).
 """
 from __future__ import annotations
 
@@ -22,6 +25,19 @@ from ..frontends.hf_llm import rope as rope_lib, vision
 from ..frontends.hf_llm.arch import ModelSpec
 
 NEG = np.float16(-65504)
+
+
+def cache_rows(layer_type: str, P: int, ring: int = 0) -> int:
+    """Rows of the cache of a layer type: the ring for sliding layers of a window package (ring < P), else all P."""
+    return ring if ring and ring < P and layer_type == "sliding_attention" else P
+
+
+def slot_positions(rows: int, written: int) -> np.ndarray:
+    """The position that every slot of a ring of `rows` rows holds after the positions 0..written-1 were written (position p goes to slot p mod rows): the newest one, -1 = empty.
+    With rows = P (the full cache; written <= P) slot j holds position j."""
+    slots = np.arange(rows)
+    held = slots + ((written - 1 - slots) // rows) * rows
+    return np.where(slots < written, held, -1)
 
 
 def visible(spec: ModelSpec, layer_type: str, q_pos: int, k_pos: int) -> bool:
@@ -41,49 +57,55 @@ def rope_tables(spec: ModelSpec, positions: list, rows: int, pad: int) -> dict:
     return out
 
 
-def prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int) -> dict:
-    """layer type -> mask float16 [1,1,C,P+C] of the chunk that holds `valid` real tokens (positions start..start+valid-1)."""
+def prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int, ring: int = 0) -> dict:
+    """layer type -> mask float16 [1,1,C,rows+C] of the chunk that holds `valid` real tokens (positions start..start+valid-1); rows = cache_rows(). The cache columns are the cache rows
+    (row j holds position j) or, for a ring layer, its slots, which hold the positions slot_positions(ring, start)."""
     pad = C - valid
     masks = {}
     for ltype in spec.mask_types():
-        mask = np.full((C, P + C), NEG, np.float16)
+        rows = cache_rows(ltype, P, ring)
+        held = slot_positions(rows, start)
+        mask = np.full((C, rows + C), NEG, np.float16)
         for row in range(C):
             if row < pad:
-                mask[row, P + row] = 0           # pad row sees only itself
+                mask[row, rows + row] = 0        # pad row sees only itself
                 continue
             q_pos = start + (row - pad)
-            for j in range(start):                # cache rows of earlier chunks (cache row j holds position j)
-                if visible(spec, ltype, q_pos, j):
+            for j in range(rows):                 # cache rows of earlier chunks
+                if held[j] >= 0 and visible(spec, ltype, q_pos, int(held[j])):
                     mask[row, j] = 0
             for c in range(pad, row + 1):         # real rows of this chunk up to the row itself
                 if visible(spec, ltype, q_pos, start + (c - pad)):
-                    mask[row, P + c] = 0
+                    mask[row, rows + c] = 0
         masks[ltype] = mask[None, None]
     return masks
 
 
-def prefill_selectors(P: int, C: int, start: int, valid: int):
-    """(rows_to_keep [1,1,P,1], row_selector [1,1,P,C]) float16: chunk row pad+i writes cache row start+i."""
+def prefill_selectors(P: int, C: int, start: int, valid: int, wrap: bool = False):
+    """(rows_to_keep [1,1,P,1], row_selector [1,1,P,C]) float16: chunk row pad+i writes cache row start+i (`wrap`: slot (start+i) mod P of a ring). P = the rows of THIS cache."""
     pad = C - valid
     keep = np.ones((1, 1, P, 1), np.float16)
     selector = np.zeros((1, 1, P, C), np.float16)
     for i in range(valid):
-        keep[0, 0, start + i, 0] = 0
-        selector[0, 0, start + i, pad + i] = 1
+        slot = (start + i) % P if wrap else start + i
+        keep[0, 0, slot, 0] = 0
+        selector[0, 0, slot, pad + i] = 1
     return keep, selector
 
 
-def decode_masks(spec: ModelSpec, P: int, R: int, pos: int, base: int, filled: int) -> dict:
-    """layer type -> mask float16 [1,1,1,P+R] for the token at position `pos` = base + filled."""
+def decode_masks(spec: ModelSpec, P: int, R: int, pos: int, base: int, filled: int, ring: int = 0) -> dict:
+    """layer type -> mask float16 [1,1,1,rows+R] for the token at position `pos` = base + filled; rows = cache_rows() (the slots of a ring hold slot_positions(ring, base))."""
     masks = {}
     for ltype in spec.mask_types():
-        mask = np.full((P + R,), NEG, np.float16)
-        for j in range(base):
-            if visible(spec, ltype, pos, j):
+        rows = cache_rows(ltype, P, ring)
+        held = slot_positions(rows, base)
+        mask = np.full((rows + R,), NEG, np.float16)
+        for j in range(rows):
+            if held[j] >= 0 and visible(spec, ltype, pos, int(held[j])):
                 mask[j] = 0
         for i in range(filled + 1):
             if visible(spec, ltype, pos, base + i):
-                mask[P + i] = 0
+                mask[rows + i] = 0
         masks[ltype] = mask.reshape(1, 1, 1, -1)
     return masks
 
@@ -96,14 +118,16 @@ def decode_selectors(R: int, filled: int):
     return keep, selector
 
 
-def flush_selectors(P: int, R: int, base: int):
-    """(rows_to_keep [1,1,P,1], row_selector [1,1,P,R]): staging row i -> main cache row base+i (rows beyond the cache are dropped)."""
+def flush_selectors(P: int, R: int, base: int, wrap: bool = False):
+    """(rows_to_keep [1,1,P,1], row_selector [1,1,P,R]): staging row i -> main cache row base+i (rows beyond the cache are dropped); `wrap`: slot (base+i) mod P of a ring
+    (R <= P: the slots of one flush are different). P = the rows of THIS cache."""
     keep = np.ones((1, 1, P, 1), np.float16)
     selector = np.zeros((1, 1, P, R), np.float16)
     for i in range(R):
-        if base + i < P:
-            keep[0, 0, base + i, 0] = 0
-            selector[0, 0, base + i, i] = 1
+        slot = (base + i) % P if wrap else base + i
+        if slot < P:
+            keep[0, 0, slot, 0] = 0
+            selector[0, 0, slot, i] = 1
     return keep, selector
 
 
@@ -255,20 +279,22 @@ def scatternd_decode_indices(num_kv_heads: int, pos: int) -> np.ndarray:
 # ---------------------------------------------------------------------------------------------------------------------
 # attention that reads another layer's UPDATED cache in a prefill chunk (KV-shared layers, Gemma 4)
 # ---------------------------------------------------------------------------------------------------------------------
-def incache_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int) -> dict:
-    """layer type -> mask float16 [1,1,C,P]: columns are the rows of the (already updated) cache. A real row sees the rows up to its position (window of its layer type); a pad row sees
-    row 0 only (any visible column keeps the softmax finite; its output is never used)."""
+def incache_prefill_masks(spec: ModelSpec, P: int, C: int, start: int, valid: int, ring: int = 0) -> dict:
+    """layer type -> mask float16 [1,1,C,rows]: columns are the rows of the (already updated) cache. A real row sees the rows up to its position (window of its layer type); a pad row sees
+    row 0 only (any visible column keeps the softmax finite; its output is never used). A ring layer: the slots hold slot_positions(ring, start + valid) after the update of the chunk."""
     pad = C - valid
     masks = {}
     for ltype in spec.mask_types():
-        mask = np.full((C, P), NEG, np.float16)
+        rows = cache_rows(ltype, P, ring)
+        held = slot_positions(rows, start + valid)
+        mask = np.full((C, rows), NEG, np.float16)
         for row in range(C):
             if row < pad:
                 mask[row, 0] = 0
                 continue
             q_pos = start + (row - pad)
-            for j in range(q_pos + 1):
-                if visible(spec, ltype, q_pos, j):
+            for j in range(rows):
+                if held[j] >= 0 and visible(spec, ltype, q_pos, int(held[j])):
                     mask[row, j] = 0
         masks[ltype] = mask[None, None]
     return masks

@@ -60,6 +60,7 @@ def build():
                                "indices": protocol.scatternd_decode_indices(2, 20).reshape(-1).tolist()}
     # attention over another layer's updated cache (KV sharing): pad rows see row 0
     out["incache_prefill"] = {"start": 16, "valid": 5, "masks": {t: visible_columns(m) for t, m in protocol.incache_prefill_masks(spec, P, C, 16, 5).items()}}
+    out["ring"] = ring_vectors(spec)
     # prefill planning
     out["plans"] = [{"sizes": sizes, "tokens": n, "fixed": fixed, "plan": protocol.plan_prefill(sizes, n, fixed)}
                     for sizes, n, fixed in (([64], 20, 200), ([64], 130, 200), ([64, 256], 20, 200), ([64, 256], 300, 200), ([64, 256], 200, 200), ([32, 64, 128], 95, 50), ([8, 16], 21, 2))]
@@ -73,6 +74,26 @@ def build():
         out["rope_aion"][name] = {"entry": entry, "head_dim": 128, "positions": [0, 1, 100, 2047], "inv_freq": f(inv, 9), "attention_factor": float(factor),
                                   "cos": f(cos, 5), "sin": f(sin, 5)}
     out["vision"] = vision_vectors()
+    return out
+
+
+def ring_vectors(spec) -> dict:
+    """sliding window caches: the sliding layers hold a ring of PR rows (position p in slot p mod PR); masks / selectors / slot contents for chunks and flushes that wrap around"""
+    PR, ring = 61, 24   # the full cache has 61 rows, a ring of 24 = W - 1 + C rounded to 8
+    out = {"P": PR, "ring": ring, "C": C, "R": R, "slots": [{"rows": r, "written": w, "held": protocol.slot_positions(r, w).tolist()} for r, w in ((4, 0), (4, 3), (4, 9), (24, 24), (24, 61), (61, 17))]}
+    chunks = ((0, 8), (16, 8), (24, 5), (40, 8), (51, 7))   # (start, valid)
+    out["prefill"] = [{"start": a, "valid": v, "masks": {t: visible_columns(m) for t, m in protocol.prefill_masks(spec, PR, C, a, v, ring).items()},
+                       "incache": {t: visible_columns(m) for t, m in protocol.incache_prefill_masks(spec, PR, C, a, v, ring).items()}} for a, v in chunks]
+    out["decode"] = [{"pos": pos, "base": b, "filled": fl, "masks": {t: visible_columns(m) for t, m in protocol.decode_masks(spec, PR, R, pos, b, fl, ring).items()}}
+                     for pos, b, fl in ((3, 0, 3), (23, 20, 3), (50, 48, 2), (59, 56, 3))]
+    out["prefill_selectors"] = []
+    for a, v in ((0, 8), (20, 8), (40, 5)):   # (20, 8) wraps: slots 20 .. 23, 0 .. 3
+        keep, selector = protocol.prefill_selectors(ring, C, a, v, wrap=True)
+        out["prefill_selectors"].append({"start": a, "valid": v, "rows_to_keep": f(keep), "row_selector_ones": np.argwhere(selector.reshape(ring, C) == 1).tolist()})
+    out["flush"] = []
+    for base in (20, 46, 60):   # 46: staging rows go to slots 22, 23, 0, 1
+        keep, selector = protocol.flush_selectors(ring, R, base, wrap=True)
+        out["flush"].append({"base": base, "rows_to_keep": f(keep), "row_selector_ones": np.argwhere(selector.reshape(ring, R) == 1).tolist()})
     return out
 
 

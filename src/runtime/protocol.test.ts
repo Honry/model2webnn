@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { cosSin, invFreqFor } from './rope.js';
 import {
-  decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, planPrefill, prefillMasks, prefillSelectors, ropeTables, scatterDecodeMasks, scatterPrefillMasks,
+  cacheRows, decodeMasks, decodeMasksOnehot, decodeSelectors, decodeSelectorsOnehot, flushSelectors, planPrefill, prefillMasks, prefillSelectors, ringOf, ropeTables, scatterDecodeMasks, scatterPrefillMasks, slotPositions,
   incachePrefillMasks, scatterNDDecodeIndices, scatterNDDecodeMasks, scatterNDPrefillIndices, scatterNDPrefillMasks, scatterPrefillRope, type LayoutSpec,
   chooseGrid, expandImageTokens, mropeAxes, mropePositions, patchify, ropeTablesMrope, type Grid,
 } from './protocol.js';
@@ -98,6 +98,34 @@ describe('protocol', () => {
   it('masks of a layer that reads the updated cache of another layer (KV sharing)', () => {
     const v = g.incache_prefill, masks = incachePrefillMasks(spec, P, C, v.start, v.valid);
     for (const type of Object.keys(v.masks)) expect(visibleColumns(masks[type], C)).toEqual(v.masks[type]);
+  });
+  it('sliding window caches (ring): slots, masks of prefill chunks / decode steps / shared layers, wrap-around selectors, like the reference', () => {
+    const r = g.ring;
+    for (const v of r.slots) expect(Array.from(slotPositions(v.rows, v.written))).toEqual(v.held);
+    expect([cacheRows('sliding_attention', r.P, r.ring), cacheRows('full_attention', r.P, r.ring), cacheRows('sliding_attention', r.P, 0), cacheRows('sliding_attention', 20, 24)]).toEqual([r.ring, r.P, r.P, 20]);
+    expect([ringOf({ profile: { sliding_cache: 'window', sliding_ring: 768 } }), ringOf({ profile: { sliding_cache: 'full', sliding_ring: 768 } }), ringOf({})]).toEqual([768, 0, 0]);
+    for (const v of r.prefill) {
+      const own = prefillMasks(spec, r.P, C, v.start, v.valid, r.ring), shared = incachePrefillMasks(spec, r.P, C, v.start, v.valid, r.ring);
+      for (const type of Object.keys(v.masks)) {
+        expect(own[type].length).toBe(C * (cacheRows(type, r.P, r.ring) + C));
+        expect(visibleColumns(own[type], C), `prefill ${type} ${v.start}`).toEqual(v.masks[type]);
+        expect(visibleColumns(shared[type], C), `incache ${type} ${v.start}`).toEqual(v.incache[type]);
+      }
+    }
+    for (const v of r.decode) {
+      const masks = decodeMasks(spec, r.P, r.R, v.pos, v.base, v.filled, r.ring);
+      for (const type of Object.keys(v.masks)) expect(visibleColumns(masks[type], 1), `decode ${type} ${v.pos}`).toEqual(v.masks[type]);
+    }
+    for (const v of r.prefill_selectors) {
+      const { rowsToKeep, rowSelector } = prefillSelectors(r.ring, C, v.start, v.valid, true);
+      expect(Array.from(rowsToKeep as ArrayLike<number>)).toEqual(v.rows_to_keep);
+      expect(onesOf(rowSelector, C)).toEqual(v.row_selector_ones);
+    }
+    for (const v of r.flush) {
+      const { rowsToKeep, rowSelector } = flushSelectors(r.ring, r.R, v.base, true);
+      expect(Array.from(rowsToKeep as ArrayLike<number>)).toEqual(v.rows_to_keep);
+      expect(onesOf(rowSelector, r.R)).toEqual(v.row_selector_ones);
+    }
   });
   it('prefill planning picks the same chunk sequences as the reference', () => {
     for (const v of g.plans) expect(planPrefill(v.sizes, v.tokens, v.fixed)).toEqual(v.plan);
