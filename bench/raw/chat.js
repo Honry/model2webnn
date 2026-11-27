@@ -31,9 +31,10 @@
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=9";
-import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=3";
+import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=5";
 import { chipGroup, formats } from "./chips.js?v=1";
 import { createLoadProgress } from "./progress-ui.js?v=2";
+import { createOverlays, placePopover, createTooltips } from "./overlay.js?v=1";
 import { renderPipeline, updatePipelineSession } from "./pipeline.js?v=1";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
@@ -935,6 +936,8 @@ ${userText}<|im_end|>
 // Page flow: nothing is loaded until the user picks a max length / chunk size and presses "Load model".
 // ---------------------------------------------------------------------------------------------------------------------
 async function run() {
+    const overlays = createOverlays();   // ONE transient overlay at a time: the Details popover, the picture lightbox, the drawer of the left column (overlay.js)
+    createTooltips();
     const maxLengthSelect = byId("maxLengthSelect"), chunkSizeSelect = byId("chunkSizeSelect");
     for (const length of [512, 1024, 2048, 4096, defaultMaxLength].sort((a, b) => a - b)) {
         if (![...maxLengthSelect.options].some((option) => +option.value === length)) maxLengthSelect.add(new Option("", length));
@@ -1008,7 +1011,7 @@ async function run() {
         if (peek.plan.vision && visionSetting() !== null) {   // Qwen3.5 with an image tower: Attach image in the composer
             for (const element of document.querySelectorAll(".vision-only")) element.hidden = false;
             const override = visionSetting(), detail = ["low", "auto", "high"].includes(query.get("detail")) ? query.get("detail") : "auto";
-            attachments = createAttachments({ byId, log, spec: peek.model.vision, presets: override === true ? peek.plan.vision.presets.map((p) => p.grid) : override, detail,
+            attachments = createAttachments({ byId, overlays, log, spec: peek.model.vision, presets: override === true ? peek.plan.vision.presets.map((p) => p.grid) : override, detail,
                 onChange: () => attachmentsChanged(), onDetail: () => syncUrl(), setText: (text) => { byId("prompt").value = text; byId("promptPreset").value = "custom"; attachmentsChanged(); } });
         }
         byId("pageTitle").textContent = packageEntry.label; byId("pageSubtitle").textContent = "WebNN";
@@ -1109,19 +1112,29 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         suggest("image", "Read the text in a picture", () => { promptBox.value = QUESTIONS.ocr; presetSelect.value = "custom"; scheduleContext(); byId("attachButton").click(); });
     }
     // sidebar drawer (narrow screens), the details of the last answer, a growing message box
-    byId("sidebarToggle").onclick = () => document.body.classList.toggle("sidebar-open");
-    document.body.addEventListener("click", (event) => { if (document.body.classList.contains("sidebar-open") && !event.target.closest(".sidebar, #sidebarToggle")) document.body.classList.remove("sidebar-open"); });
+    const closeDrawer = () => { document.body.classList.remove("sidebar-open"); overlays.release("drawer"); };
+    byId("sidebarToggle").onclick = () => {
+        if (document.body.classList.contains("sidebar-open")) { closeDrawer(); return; }
+        overlays.open("drawer", { close: closeDrawer, contains: (target) => !!target.closest?.(".sidebar, #sidebarToggle") });
+        document.body.classList.add("sidebar-open");
+    };
+    // the Details popover: next to its button, above the composer (Send / Stop stay free), inside the main column and the window
     const perfPanel = byId("perfPanel"), perfToggle = byId("perfToggle");
-    const showPerf = (open) => { perfPanel.hidden = !open; perfToggle.setAttribute("aria-expanded", String(open)); };
-    perfToggle.onclick = () => showPerf(perfPanel.hidden);
-    document.addEventListener("keydown", (event) => { if (event.key === "Escape") showPerf(false); });
-    document.addEventListener("click", (event) => { if (!perfPanel.hidden && !event.target.closest("#perfPanel, #perfToggle")) showPerf(false); });
+    const placePerf = () => placePopover(perfPanel, { anchor: perfToggle, avoid: byId("composer"), bounds: document.querySelector(".main"), top: document.querySelector(".topbar").getBoundingClientRect().bottom + 8, width: 880 });
+    const closePerf = () => { perfPanel.hidden = true; perfToggle.setAttribute("aria-expanded", "false"); overlays.release("details"); };
+    const openPerf = () => {
+        overlays.open("details", { close: closePerf, contains: (target) => !!target.closest?.("#perfPanel, #perfToggle") });
+        perfPanel.hidden = false; perfToggle.setAttribute("aria-expanded", "true"); placePerf();
+    };
+    perfToggle.onclick = () => (perfPanel.hidden ? openPerf() : closePerf());
+    window.addEventListener("resize", () => { if (!perfPanel.hidden) placePerf(); });
+    document.addEventListener("scroll", () => { if (!perfPanel.hidden) placePerf(); }, true);
     const autosize = () => { promptBox.style.height = "auto"; promptBox.style.height = Math.min(promptBox.scrollHeight, 220) + "px"; };
     promptBox.addEventListener("input", autosize);
 
     // ---- the conversation: the turns stay on the page; every send re-reads the whole history (no KV reuse across turns)
     let model = null;
-    const conversation = createConversation(byId("conversation"));
+    const conversation = createConversation(byId("conversation"), { onView: (image, from) => attachments?.view(image, from), jumpButton: byId("jumpLatest") });
     const turns = [];   // { text, images: [{ bitmap, name, detail, grid, tokens, ... }], assistant (the answer, also a stopped one), dropped, elements: [message elements] }
     const system = query.get("system") || undefined;   // system=<text>: a system prompt for the whole conversation (packages with a chat format)
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -1185,6 +1198,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     optionControls.forEach((control) => control.addEventListener("change", () => { updateOptionControls(); syncUrl(); }));
     updateOptionControls();
     const loadModel = async () => {
+        overlays.closeAll();   // nothing floats over the load state: no lightbox, popover or drawer stays open
         setBusy(true);
         try {
             const { maxLength, chunkSize, options } = selected();
@@ -1245,6 +1259,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         if (busy) return;
         const text = promptBox.value.trim();
         if (!text) { setHint("Write a message first.", true); return; }
+        overlays.closeAll();
         if (!model) { await loadModel(); if (!model) return; }
         setBusy(true); generating = true; renderRunButton();
         controller = new AbortController();

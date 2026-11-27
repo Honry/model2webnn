@@ -1,12 +1,13 @@
 // The conversation and the composer of chat.html: the message list (user / assistant bubbles, notices about dropped turns) and the pictures attached to the message that is being written.
 // No model code here: chat.js owns the turns and the generation; this file only draws and collects.
 //
-//   createConversation(list)                  -> { addUser, addAssistant, addNotice, markDropped, clear, scrollToEnd }
-//   createAttachments(host)                   -> { items, add, addFile, addUrl, remove, take, restore, clear, setDetail, refresh }
+//   createConversation(list, { onView })      -> { addUser, addAssistant, addNotice, markDropped, clear, scrollToEnd }     onView(image, element): a picture of a message was clicked
+//   createAttachments(host)                   -> { items, add, addFile, addUrl, remove, take, restore, clear, setDetail, view, refresh }
 //   renderImageRows(body, images, spec)       the image rows of the Summary table: one group per picture of the last prompt
-//        host = { byId, spec: model.json `vision`, presets: [[h, w], ...], detail, onChange(), setText(text), log }
+//        host = { byId, overlays (overlay.js), spec: model.json `vision`, presets: [[h, w], ...], detail, onChange(), setText(text), log }
 import { chooseGrid, describeGrid, imageTokenCount } from "../../lib/runtime/index.js";
 import { answerView } from "./answer-view.js?v=3";
+import { createAutoScroll } from "./autoscroll.js?v=1";
 
 const el = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = text; return node; };
 /** an inline SVG icon from the sprite of chat.html */
@@ -16,21 +17,21 @@ export function icon(name, className = "") {
     return svg;
 }
 
-/** a small canvas with the picture centre-cropped to a square */
+/** a small canvas with the picture centre-cropped to a square; its size comes from CSS (--thumb), the pixels from the device pixel ratio; it never takes the pointer (the chip / bubble around it does) */
 function thumbnail(bitmap, size) {
-    const canvas = el("canvas", "thumb"), side = Math.min(bitmap.width, bitmap.height);
-    canvas.width = canvas.height = size;
-    canvas.getContext("2d").drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, size, size);
+    const canvas = el("canvas", "thumb"), side = Math.min(bitmap.width, bitmap.height), pixels = Math.round(size * Math.min(window.devicePixelRatio || 1, 3));
+    canvas.width = canvas.height = pixels; canvas.style.setProperty("--thumb", `${size}px`);
+    canvas.getContext("2d").drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, pixels, pixels);
     return canvas;
 }
 export const imageSummary = (image) => `${image.tokens} image tokens (${image.grid.join("x")}, ${image.detail})`;
 
-export function createConversation(list) {
+export function createConversation(list, { onView = null, jumpButton = null } = {}) {
     const empty = list.querySelector(".chat-empty") ?? el("div", "chat-empty");   // the empty state of the page: a title, the model name, suggestions
     if (!empty.parentNode) list.append(empty);
-    const follow = () => list.scrollHeight - list.scrollTop - list.clientHeight < 60;
-    const scrollToEnd = (force = false) => { if (force || list.dataset.follow !== "off") list.scrollTop = list.scrollHeight; };
-    list.addEventListener("scroll", () => { list.dataset.follow = follow() ? "on" : "off"; });
+    // the list follows the bottom while it is pinned there (autoscroll.js watches the content: tokens, Markdown re-renders, bubbles, bars, chips); scrolling up unpins and shows the jump button
+    const autoScroll = createAutoScroll(list, { button: jumpButton });
+    const scrollToEnd = (force = false) => (force ? autoScroll.pin() : autoScroll.schedule());
     const views = [];
     const append = (node) => { empty.remove(); list.append(node); scrollToEnd(); return node; };
     return {
@@ -40,11 +41,12 @@ export function createConversation(list) {
             for (const image of turn.images ?? []) {
                 const item = el("div", "attached");
                 item.append(thumbnail(image.bitmap, 56), el("span", "attached-text", `${image.name || "picture"} · ${imageSummary(image)}`));
+                if (onView) { item.tabIndex = 0; item.setAttribute("role", "button"); item.title = "view the picture as the model sees it"; item.onclick = () => onView(image, item); item.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onView(image, item); } }; }
                 bubble.append(item);
             }
             bubble.append(el("div", "text", turn.text));
             message.append(bubble);
-            list.dataset.follow = "on";
+            autoScroll.pin();   // sending a message always pins to the bottom again
             return append(message);
         },
         /** an assistant message: { element, box, view, setMeta(text, state) } (an avatar, the answer, a toolbar with the stats of the turn and the Markdown | Raw / Copy bar) */
@@ -82,7 +84,7 @@ export function createConversation(list) {
         clear() {
             for (const view of views.splice(0)) view.dispose();
             list.replaceChildren(empty);
-            list.dataset.follow = "on";
+            autoScroll.pin();
         },
         scrollToEnd,
     };
@@ -90,57 +92,66 @@ export function createConversation(list) {
 
 export function createAttachments(host) {
     const { byId, spec } = host;
-    const state = { items: [], detail: host.detail ?? "auto", presets: host.presets, selected: -1 };
-    const chips = byId("composerImages"), preview = byId("imagePreview");
+    const state = { items: [], detail: host.detail ?? "auto", presets: host.presets };
+    const chips = byId("composerImages");
     byId("detailSelect").value = state.detail;
 
     const describe = (bitmap, name, detail) => {
         const grid = chooseGrid(state.presets, bitmap.width, bitmap.height, spec.patch_size, detail);
         return { bitmap, name, detail, grid, tokens: imageTokenCount(grid, spec.merge_size), width: bitmap.width, height: bitmap.height, pixels: `${grid[1] * spec.patch_size}x${grid[0] * spec.patch_size}` };
     };
-    /** the picture as the model sees it (resized to the pixels of its grid), with the image-token blocks */
-    function drawPreview() {
-        preview.replaceChildren();
-        const image = state.items[state.selected];
-        preview.hidden = !image;
-        if (!image) return;
-        const { grid } = image, pixelsW = grid[1] * spec.patch_size, pixelsH = grid[0] * spec.patch_size, view = el("canvas");
-        view.width = pixelsW; view.height = pixelsH; view.title = "what the model sees: the picture resized to the pixels of the chosen grid; every block is one image token";
-        const context = view.getContext("2d");
-        context.imageSmoothingQuality = "high";
-        context.drawImage(image.bitmap, 0, 0, pixelsW, pixelsH);
-        if (byId("showBlocks").checked) {   // one block = one image token (2 x 2 patches of 16 px)
-            const cell = spec.patch_size * spec.merge_size;
-            context.strokeStyle = "rgba(108, 182, 255, 0.55)"; context.lineWidth = 1; context.beginPath();
-            for (let x = cell; x < pixelsW; x += cell) { context.moveTo(x + 0.5, 0); context.lineTo(x + 0.5, pixelsH); }
-            for (let y = cell; y < pixelsH; y += cell) { context.moveTo(0, y + 0.5); context.lineTo(pixelsW, y + 0.5); }
+    // the picture viewer: a lightbox (modal, dimmed backdrop) with the picture as the model sees it (resized to the pixels of its grid) and the image-token blocks; it is open only on request
+    const viewer = byId("imagePreview"), canvas = viewer.querySelector("canvas"), title = viewer.querySelector(".lb-title"), caption = viewer.querySelector(".lb-caption"), closeButton = viewer.querySelector(".lb-close");
+    const blocksBox = viewer.querySelector(".lb-blocks input");
+    let viewing = null, opener = null;
+    function draw() {
+        if (!viewing) return;
+        const { grid } = viewing, w = grid[1] * spec.patch_size, h = grid[0] * spec.patch_size;
+        const maxW = Math.max(160, window.innerWidth * 0.9 - 48), maxH = Math.max(120, window.innerHeight * 0.9 - 190);
+        const scale = Math.min(maxW / w, maxH / h, 4), cssW = Math.round(w * scale), cssH = Math.round(h * scale), dpr = window.devicePixelRatio || 1;   // fits the window, never overflows
+        canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr); canvas.style.width = `${cssW}px`; canvas.style.height = `${cssH}px`;
+        const model = document.createElement("canvas"), modelContext = model.getContext("2d");   // the model's own pixels first, then scaled to the window
+        model.width = w; model.height = h; modelContext.imageSmoothingQuality = "high"; modelContext.drawImage(viewing.bitmap, 0, 0, w, h);
+        const context = canvas.getContext("2d");
+        context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high"; context.drawImage(model, 0, 0, canvas.width, canvas.height);
+        if (blocksBox.checked) {   // one block = one image token (merge x merge patches)
+            const cell = spec.patch_size * spec.merge_size * scale * dpr;
+            context.strokeStyle = "rgba(108, 182, 255, 0.7)"; context.lineWidth = Math.max(1, Math.round(dpr)); context.beginPath();
+            for (let x = cell; x < canvas.width - 1; x += cell) { context.moveTo(Math.round(x) + 0.5, 0); context.lineTo(Math.round(x) + 0.5, canvas.height); }
+            for (let y = cell; y < canvas.height - 1; y += cell) { context.moveTo(0, Math.round(y) + 0.5); context.lineTo(canvas.width, Math.round(y) + 0.5); }
             context.stroke();
         }
-        const squeezed = Math.abs(Math.log((pixelsW / pixelsH) / (image.width / image.height))), caption = el("div", "imagecaption");
-        caption.innerHTML = `<b></b>: ${describeGrid(grid, image.width, image.height, spec.patch_size, spec.merge_size, image.detail)}`
-            + (squeezed > 0.08 ? `<br>The picture is stretched ${Math.exp(squeezed).toFixed(2)}x to fit the preset's aspect ratio.` : "")
-            + (state.presets.length < 2 ? `<br>Only one preset is allowed (URL override): ${state.presets[0].join("x")}.` : "");
-        caption.querySelector("b").textContent = image.name || "picture";
-        const label = el("label", "blocks"), box = el("input"); box.type = "checkbox"; box.checked = byId("showBlocks").checked;
-        box.onchange = () => { byId("showBlocks").checked = box.checked; drawPreview(); };
-        label.append(box, " show the image-token blocks");
-        const side = el("div"); side.append(caption, label);
-        preview.append(view, side);
+        const squeezed = Math.abs(Math.log((w / h) / (viewing.width / viewing.height)));
+        title.textContent = viewing.name || "picture";
+        caption.textContent = describeGrid(grid, viewing.width, viewing.height, spec.patch_size, spec.merge_size, viewing.detail)
+            + (squeezed > 0.08 ? ` The picture is stretched ${Math.exp(squeezed).toFixed(2)}x to fit the preset's aspect ratio.` : "")
+            + (state.presets.length < 2 ? ` Only one preset is allowed (URL override): ${state.presets[0].join("x")}.` : "");
     }
+    function closeViewer() { viewer.hidden = true; viewing = null; host.overlays.release("lightbox"); opener?.focus?.(); opener = null; }
+    function openViewer(image, from = null) {
+        viewing = image; opener = from ?? document.activeElement;
+        blocksBox.checked = byId("showBlocks").checked;
+        host.overlays.open("lightbox", { close: closeViewer, contains: (target) => !!target.closest?.(".lb-card") });   // closes a popover / the drawer; Esc and a click on the backdrop close this
+        viewer.hidden = false; draw(); closeButton.focus();
+    }
+    closeButton.onclick = closeViewer;
+    viewer.querySelector(".lb-backdrop").onclick = closeViewer;
+    blocksBox.onchange = () => { byId("showBlocks").checked = blocksBox.checked; draw(); };
+    window.addEventListener("resize", draw);
     function render() {
         chips.replaceChildren();
         state.items.forEach((image, index) => {
-            const chip = el("div", "chip" + (index === state.selected ? " on" : "")), text = el("span", "chip-text"), remove = el("button", "chip-x", "×");
-            chip.title = "what the model sees (click)"; remove.type = "button"; remove.title = "remove this picture";
+            const chip = el("div", "chip"), text = el("span", "chip-text"), remove = el("button", "chip-x", "×");
+            chip.title = "what the model sees (click)"; chip.tabIndex = 0; chip.setAttribute("role", "button"); remove.type = "button"; remove.title = "remove this picture";
             text.append(el("b", "", image.name || "picture"), el("small", "", `${image.grid.join("x")} · ${image.tokens} tokens`));
             chip.append(thumbnail(image.bitmap, 40), text, remove);
-            chip.onclick = () => { state.selected = state.selected === index ? -1 : index; render(); };
+            chip.onclick = () => openViewer(image, chip);
+            chip.onkeydown = (event) => { if (event.target === chip && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openViewer(image, chip); } };
             remove.onclick = (event) => { event.stopPropagation(); api.remove(index); };
             chips.append(chip);
         });
         chips.hidden = !state.items.length;
         const quick = byId("quickQuestions"); if (quick) quick.hidden = !state.items.length;   // the quick questions of a picture appear with the first picture
-        drawPreview();
         host.onChange?.();
     }
     const MAX_IMAGES = 4;   // per message (the runtime takes any number; the cache is what runs out)
@@ -149,7 +160,6 @@ export function createAttachments(host) {
         add(bitmap, name) {
             if (state.items.length >= MAX_IMAGES) { bitmap.close?.(); host.log?.("warning", `at most ${MAX_IMAGES} pictures per message`); return; }
             state.items.push(describe(bitmap, name, state.detail));
-            state.selected = state.items.length - 1;
             render();
         },
         async addFile(file) { if (file && file.type.startsWith("image/")) api.add(await createImageBitmap(file), file.name); },
@@ -158,12 +168,14 @@ export function createAttachments(host) {
             if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
             api.add(await createImageBitmap(await response.blob()), name);
         },
-        remove(index) { const [gone] = state.items.splice(index, 1); gone?.bitmap.close?.(); state.selected = Math.min(state.selected, state.items.length - 1); render(); },
+        remove(index) { const [gone] = state.items.splice(index, 1); if (viewing === gone) closeViewer(); gone?.bitmap.close?.(); render(); },
         /** hand the pictures over to a sent message (the bitmaps now belong to it) */
-        take() { const taken = state.items.splice(0); state.selected = -1; render(); return taken; },
+        take() { const taken = state.items.splice(0); render(); return taken; },
         /** give pictures back to the composer (a send that was stopped before the first token) */
-        restore(images) { state.items.unshift(...images); state.selected = -1; render(); },
-        clear() { for (const image of state.items.splice(0)) image.bitmap.close?.(); state.selected = -1; render(); },
+        restore(images) { state.items.unshift(...images); render(); },
+        clear() { for (const image of state.items.splice(0)) image.bitmap.close?.(); render(); },
+        /** the lightbox for a picture (a pending one or the picture of a sent message) */
+        view: openViewer,
         get detail() { return state.detail; },
         setDetail(detail) { state.detail = detail; byId("detailSelect").value = detail; state.items = state.items.map((image) => describe(image.bitmap, image.name, detail)); render(); },
         refresh: render,
@@ -193,7 +205,6 @@ export function createAttachments(host) {
         host.setText(c.question);
     };
     byId("detailSelect").onchange = () => { api.setDetail(byId("detailSelect").value); host.onDetail?.(state.detail); };
-    byId("showBlocks").onchange = drawPreview;
     render();
     return api;
 }
