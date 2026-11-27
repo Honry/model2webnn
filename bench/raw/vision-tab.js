@@ -51,6 +51,7 @@ export function setupVisionTab(host) {
         state.bitmap?.close?.();
         state.bitmap = bitmap; state.name = name;
         byId("visionRun").disabled = !bitmap || host.isBusy();
+        byId("visionHint").textContent = bitmap ? "Loads the model first when it is not loaded yet." : "Add a picture first.";
         describePicture();
     }
     async function fromFile(file) {
@@ -91,6 +92,7 @@ export function setupVisionTab(host) {
     byId("showBlocks").onchange = describePicture;
     for (const button of document.querySelectorAll("[data-question]")) button.onclick = () => { byId("visionQuestion").value = QUESTIONS[button.dataset.question]; };
     byId("visionQuestion").value = QUESTIONS.describe;
+    byId("visionQuestion").addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !byId("visionRun").disabled) byId("visionRun").click(); });
 
     function showResult(result) {
         const full = result.promptTokens + result.generated >= result.maxLength - 1;

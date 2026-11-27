@@ -31,7 +31,7 @@ import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/tr
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=6";
 import { answerView } from "./answer-view.js?v=1";
-import { setupVisionTab } from "./vision-tab.js?v=3";
+import { setupVisionTab } from "./vision-tab.js?v=4";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -139,7 +139,13 @@ function log(eventName, message, fields = {}) {
     console.log(record);
     fetch("/log", { method: "POST", body: record }).catch(() => {});
 }
-const setStatus = (text) => (byId("status").textContent = text);
+// the status pill: idle (nothing loaded yet) | busy (a spinner while something runs) | ready | error
+const IDLE_STATUS = "Not loaded: choose the session options, then press Load model";
+const setStatus = (text) => {
+    const pill = byId("status");
+    pill.firstElementChild.textContent = text; pill.title = text;
+    pill.dataset.state = /^FAILED/.test(text) ? "error" : text === "ready" ? "ready" : text === IDLE_STATUS ? "idle" : "busy";
+};
 // summary cell: a short value, the long explanation as a hover tip; headline tile: big value + one line below it
 const setCell = (id, value, tip = "") => { const cell = byId(id); cell.textContent = value; if (tip) cell.dataset.tip = tip; else delete cell.dataset.tip; };
 const setMetric = (id, value, unit = "", sub = "") => { byId(id).innerHTML = unit ? `${value}<small>${unit}</small>` : value; byId(id + "-sub").textContent = sub; };
@@ -931,8 +937,14 @@ async function run() {
     // model: the built-in hand-written Qwen3-4B graphs (all options) or a package written by `m2w compile` (see chat-package.js); a different model reloads the page
     const modelSelect = byId("modelSelect");
     const packages = (await listPackages()).filter((entry) => !entry.dev || query.get("dev") === "1" || entry.id === modelId);
-    modelSelect.add(new Option("Qwen3-4B · built-in graphs (all options)", "js"));
-    for (const entry of packages) modelSelect.add(new Option(entry.label, entry.id));
+    modelSelect.add(new Option("Qwen3-4B · hand-written graphs (all options)", "js"));
+    const devEntries = packages.filter((entry) => entry.dev);   // experiments and test models (?dev=1, or the one the URL names): their own group at the end
+    for (const entry of packages) if (!entry.dev) modelSelect.add(new Option(entry.label, entry.id));
+    if (devEntries.length) {
+        const group = document.createElement("optgroup"); group.label = "Experiments and tests";
+        for (const entry of devEntries) group.append(new Option(entry.label, entry.id));
+        modelSelect.append(group);
+    }
     if (![...modelSelect.options].some((option) => option.value === modelId)) modelSelect.add(new Option(`${modelId} (not found in packages/models.json)`, modelId));
     modelSelect.value = modelId;
     modelSelect.addEventListener("change", () => {
@@ -955,7 +967,7 @@ async function run() {
     computeTypeSelect.value = computeType;
     kvStyleSelect.value = kvStyle; stagingRowsSelect.value = urlSessionOptions.stagingRows; blocksSelect.value = urlSessionOptions.blocksPerGraph;
     prefillBlocksSelect.value = urlSessionOptions.prefillBlocksPerGraph || 0; chunkSizesInput.value = urlSessionOptions.chunkSizes.join(",");
-    let packageControls = null, visionTab = null, busy = false;
+    let packageControls = null, visionTab = null, busy = false, packageInfo = "";
     // the image tower (a package that has one): loaded with the model, a picture gets the grid preset the runtime chooses from its size and the Detail level (Vision tab); graphs of a preset are built on first use.
     // URL: visionGrids=24x24,16x24 (advanced: only these presets may be chosen)   vision=0 | visionGrids=none (load no image tower)   detail=auto|low|high   tab=vision   image=<url> question=<text> (with autoRun)
     const visionSetting = () => {   // true: every preset of the package | [[h, w], ...] the override | null: no image tower
@@ -984,23 +996,38 @@ async function run() {
             if (query.get("maxNewTokens") ?? query.get("maxNew")) byId("visionMaxNew").value = query.get("maxNewTokens") ?? query.get("maxNew");
             if (query.get("question")) visionTab.setQuestion(query.get("question"));
         }
-        document.querySelector("header h1").childNodes[0].textContent = `${packageEntry.label} on WebNN `;
-        document.querySelector("header h1 small").textContent = `model package · compiled by m2w (${peek.index.compiler}) · target ${peek.index.target}`;
+        byId("pageTitle").textContent = packageEntry.label; byId("pageSubtitle").textContent = "on WebNN";
+        document.title = `${packageEntry.label} · WebNN chat`;
+        packageInfo = `compiled by m2w (${peek.index.compiler}), target ${peek.index.target}`;
     }
     const sessionSummary = () => {   // what the next generation uses: the loaded session, else the option selects (shared by both tabs)
         const loaded = model?.currentSession?.();
         if (loaded) return `session: ${loaded.label}`;
         const chunks = chunkSizesInput.value.trim() || chunkSizeSelect.value;
-        return `session (not loaded yet): max length ${maxLengthSelect.selectedOptions[0]?.text ?? maxLengthSelect.value}, prefill chunk ${chunks}, blocks/graph ${blocksSelect.value}, ${computeTypeSelect.value}`;
+        return `session (not loaded yet): max length ${maxLengthSelect.value}, prefill chunk ${chunks}, blocks/graph ${blocksSelect.value}, ${computeTypeSelect.value}`;
+    };
+    // the closed "Advanced" section says what is set in it (the values that differ from a plain default stay visible)
+    const updateAdvancedSummary = () => {
+        const parts = [];
+        if (chunkSizesInput.value.trim()) parts.push(`chunks ${chunkSizesInput.value.trim()}`);
+        if (+blocksSelect.value > 1) parts.push(`${blocksSelect.value} blocks/graph`);
+        if (+prefillBlocksSelect.value > 1) parts.push(`prefill ${prefillBlocksSelect.value} blocks/graph`);
+        if (kvStyleSelect.value && kvStyleSelect.value !== "staged") parts.push(`KV ${kvStyleSelect.value}`);
+        if (computeTypeSelect.value && computeTypeSelect.value !== "float32") parts.push(computeTypeSelect.value);
+        byId("advancedSummary").textContent = parts.length ? `· ${parts.join(" · ")}` : "";
     };
     const updateOptionControls = () => {
+        updateAdvancedSummary();
         visionTab?.setSession(sessionSummary());
         if (packageMode) { packageControls.lock(); return; }
         stagingRowsSelect.disabled = kvStyleSelect.value !== "staged";
     };
-    byId("fixedOptions").textContent = packageMode ? `Package: ${packageEntry.url}  (the options come from the package plan; the built-in JS graphs offer the full option set: choose "Qwen3-4B · built-in JS graphs")` : `Fixed at page load (URL): profile=${profileEnabled ? 1 : 0}  weightFormat=${weightFormat}  mergeProjections=${mergeProjections ? 1 : 0}  matmulStyle=${graphOptions.matmulStyle}  zeroPoint=${graphOptions.zeroPoint}  dequantStyle=${graphOptions.dequantStyle}  layers=${layerCount}`;
+    byId("fixedLabel").textContent = packageMode ? "Package" : "Fixed at page load";
+    byId("fixedOptions").textContent = packageMode ? `Package: ${packageEntry.url}  ${packageInfo}
+The options come from the package plan; the hand-written Qwen3-4B graphs offer the full option set.` : `Fixed at page load (URL): profile=${profileEnabled ? 1 : 0}  weightFormat=${weightFormat}  mergeProjections=${mergeProjections ? 1 : 0}  matmulStyle=${graphOptions.matmulStyle}  zeroPoint=${graphOptions.zeroPoint}  dequantStyle=${graphOptions.dequantStyle}  layers=${layerCount}`;
     byId("maxNewTokensInput").value = defaultMaxNewTokens;
-    setStatus("choose max length and prefill chunk size, then press \"Load model\"");
+    setStatus(IDLE_STATUS);
+    answerView(byId("answer"));   // the Markdown | Raw bar is there from the start
 
     // prompt presets of different length (the paragraph is repeated to reach roughly the stated number of prompt tokens)
     const paragraph = "The history of computing stretches from mechanical calculators to modern neural processors. Early machines filled whole rooms and executed a few " +
@@ -1023,7 +1050,7 @@ async function run() {
 Summarize the text above in two sentences.`; presetSelect.value = "custom";
     } else if (query.get("prompt")) { byId("prompt").value = query.get("prompt"); presetSelect.value = "custom"; }
     else { presetSelect.value = 0; byId("prompt").value = presets[0][1]; }
-    const updateTokenCount = () => { byId("promptTokenCount").textContent = model ? `${model.countPromptTokens(byId("prompt").value)} prompt tokens (with chat template)` : "(token count shown after the model is loaded)"; };
+    const updateTokenCount = () => { byId("promptTokenCount").textContent = model ? `${model.countPromptTokens(byId("prompt").value)} prompt tokens (with the chat template)` : "Token count appears after the model is loaded"; };
     byId("prompt").oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || preset[1] !== byId("prompt").value) presetSelect.value = "custom"; updateTokenCount(); };
 
     let model = null;
@@ -1072,9 +1099,10 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             visionTab?.setSession(sessionSummary());
             byId("loadedLabel").textContent = packageMode ? `loaded: ${session.label}` : `loaded: max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
             updateTokenCount();
+            byId("loadButton").textContent = "Apply options"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
             setStatus("ready");
         } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); }
-        finally { setBusy(false); byId("runButton").disabled = !model; }
+        finally { setBusy(false); byId("runButton").disabled = !model; byId("runHint").hidden = !!model; }
     };
     const generateOnce = async () => {
         const { maxLength, chunkSize, maxNewTokens, options } = selected();
@@ -1094,6 +1122,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         } finally { setBusy(false); }
     };
     byId("loadButton").onclick = loadModel;
+    byId("prompt").addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !byId("runButton").disabled) byId("runButton").click(); });
     byId("clearCacheButton").onclick = async () => { await (packageMode ? clearPackageCache(packageEntry.url) : clearWeightCache()); log("cache_cleared", "Weight cache (OPFS) cleared"); };
     byId("runButton").onclick = async () => {
         setBusy(true);
