@@ -124,10 +124,10 @@ export class Gemma4LLM {
     const role = (r: ManifestFile['role']) => pkg.manifest.files.filter((f) => f.role === r);
     // weight files in the order they are needed; the per-layer embedding table is NOT downloaded: its rows are read as byte ranges
     const ordered = [...role('embedding'), ...role('final_norm'), ...role('head_extra'), ...role('layer').sort((a, b) => (a.layer as number) - (b.layer as number))];
-    const total = ordered.reduce((s, f) => s + f.bytes, 0), loaded = new Map<string, number>();
-    const prefetch = new Prefetcher(ordered.map((f) => f.file), (file, i) => source.bytes(`weights/${file}`, (l) => {
-      loaded.set(file, l);
-      progress({ stage: 'download', loaded: [...loaded.values()].reduce((a, b) => a + b, 0), total, message: ordered[i].file });
+    const total = ordered.reduce((s, f) => s + f.bytes, 0), loaded = new Map<string, number>(), cachedBytes = new Map<string, number>(), sum = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
+    const prefetch = new Prefetcher(ordered.map((f) => f.file), (file, i) => source.bytes(`weights/${file}`, (l, _total, cached) => {
+      loaded.set(file, l); if (cached) cachedBytes.set(file, l);
+      progress({ stage: 'download', loaded: sum(loaded), total, fromCache: sum(cachedBytes), message: ordered[i].file });
     }, ordered[i].bytes), options.parallelDownloads ?? 4);
 
     const weightsStart = performance.now();
@@ -181,8 +181,9 @@ export class Gemma4LLM {
       const bytes = kind === 'weight' ? lmHead.weight : lmHead.scale, width = kind === 'weight' ? this.pkg.model.hidden : 2;
       return count === undefined ? (kind === 'weight' ? bytes : new Uint8Array(bytes)) : new Uint8Array(bytes.buffer, bytes.byteOffset + first * width, count * width);
     };
+    let expected = 0;   // how many graphs this session builds (for the progress: n of m), set below
     const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
-      progress({ stage: 'build', message: label });
+      progress({ stage: 'build', message: label, loaded: builds.length, total: expected });
       const doc: GraphDoc = JSON.parse(await source.text(path));
       const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
       const { inputs, outputs } = loadGraph(builder, doc, provider);
@@ -193,6 +194,8 @@ export class Gemma4LLM {
       return { name: doc.name, graph, inputs: Object.keys(inputs), outputs: Object.keys(outputs) };
     };
     const kindsNeeded = [...new Set(this.kinds.slice(1))];
+    expected = (this.groupSize > 1 ? new Set((decode.block_groups as Record<string, GemmaBlockGroup[]>)[String(this.groupSize)].map((e) => e.graph)).size : 0) + 1 + Object.keys(decode.flush).length + 2
+      + (this.groupSize > 1 ? 0 : kindsNeeded.length) + this.chunkSizes.length * (2 + kindsNeeded.length);
     const blocks = async (paths: Record<string, string>, label: string) => {
       const map = new Map<string, Built>();
       for (const kind of kindsNeeded) map.set(kind, await build(paths[kind], `${label} block ${kind}`));
@@ -402,7 +405,7 @@ export class Gemma4LLM {
 
   // ------------------------------------------------------------------------------------------------------------------------------- generation
   /** returns the logits of the last prompt token (null: `signal` was aborted between two chunks) */
-  private async prefill(tokens: number[], signal?: AbortSignal): Promise<Half | null> {
+  private async prefill(tokens: number[], signal?: AbortSignal, onProgress?: Progress): Promise<Half | null> {
     const s = this.pkg.model, { P } = this, n = tokens.length, pleSize = this.N * (s.ple_dim as number);
     if (n === 0) throw new Error('empty prompt');
     const plan = this.planFor(n);
@@ -426,6 +429,7 @@ export class Gemma4LLM {
         await this.ctx.readTensor(a.residuals[this.N - 1], newHalf(C * s.hidden));
         if (signal.aborted) return null;
       }
+      onProgress?.({ stage: 'prefill', loaded: index + 1, total: plan.length });
       start += valid;
     }
     this.base = n; this.filled = 0; this.position = n;
@@ -474,7 +478,7 @@ export class Gemma4LLM {
     try {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
-      let logits = await this.prefill(tokens, options.signal);
+      let logits = await this.prefill(tokens, options.signal, options.onProgress);
       if (!logits) return;   // aborted during the prefill: nothing was yielded
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };

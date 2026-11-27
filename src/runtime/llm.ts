@@ -52,6 +52,8 @@ export interface GenerateOptions {
   topP?: number;                   // nucleus: the smallest set of the top-k candidates whose probability adds up to topP
   presencePenalty?: number;        // subtracted from the logit of every token already generated
   signal?: AbortSignal;
+  /** prefill progress: { stage: 'prefill', loaded: chunks done, total: chunks } after every chunk (with a signal the device has finished the chunk) */
+  onProgress?: Progress;
 }
 export type { StepTiming, Stats } from './llm-common.js';
 export type { PreparedImage } from './vision.js';
@@ -183,10 +185,10 @@ export class LLM {
     // weight files: prefetched in the order they are needed, a few at a time (embedding, final norm, layer 0, 1, ...)
     const byRole = (role: string) => pkg.manifest.files.filter((f) => f.role === role);
     const ordered = [...byRole('embedding'), ...byRole('final_norm'), ...byRole('layer').sort((a, b) => (a.layer as number) - (b.layer as number))];
-    const total = ordered.reduce((s, f) => s + f.bytes, 0), loaded = new Map<string, number>();
-    const prefetch = new Prefetcher(ordered.map((f) => f.file), (file, i) => source.bytes(`weights/${file}`, (l) => {
-      loaded.set(file, l);
-      progress({ stage: 'download', loaded: [...loaded.values()].reduce((a, b) => a + b, 0), total, message: ordered[i].file });
+    const total = ordered.reduce((s, f) => s + f.bytes, 0), loaded = new Map<string, number>(), cachedBytes = new Map<string, number>(), sum = (m: Map<string, number>) => [...m.values()].reduce((a, b) => a + b, 0);
+    const prefetch = new Prefetcher(ordered.map((f) => f.file), (file, i) => source.bytes(`weights/${file}`, (l, _total, cached) => {
+      loaded.set(file, l); if (cached) cachedBytes.set(file, l);
+      progress({ stage: 'download', loaded: sum(loaded), total, fromCache: sum(cachedBytes), message: ordered[i].file });
     }, ordered[i].bytes), options.parallelDownloads ?? 4);
 
     const weightsStart = performance.now();
@@ -244,8 +246,11 @@ export class LLM {
       if (c.external === 'lm_head_zero_point' && bytes.zeroPoint) return bytes.zeroPoint;
       throw new Error(`the lm_head graph wants the external tensor '${c.external}' which this package does not have`);
     };
+    // how many graphs this session builds (for the progress: n of m)
+    const groupCount = (files: GraphTable, size: number) => (size > 1 ? Object.keys(files.block_groups ?? {}).length : 0);
+    const expected = 1 + 3 + (this.style === 'staged' ? 1 : 0) + groupCount(decode, this.groupSize) + this.chunkSizes.reduce((n, size) => n + 3 + groupCount(table.prefill[key][String(size)], this.prefillGroupSize), 0);
     const build = async (path: string, label: string, provider?: (c: any) => ArrayBufferView): Promise<Built> => {
-      progress({ stage: 'build', message: label });
+      progress({ stage: 'build', message: label, loaded: builds.length, total: expected });
       const doc: GraphDoc = JSON.parse(await source.text(path));
       const builder = new (globalThis as any).MLGraphBuilder(this.ctx);
       const { inputs, outputs } = loadGraph(builder, doc, provider);
@@ -448,7 +453,7 @@ export class LLM {
 
   // ------------------------------------------------------------------------------------------------------------------------------- generation
   /** Chunked prefill of the prompt; returns the logits of the last prompt token (null: `signal` was aborted between two chunks; the next prefill starts from scratch anyway). */
-  private async prefill(tokens: number[], signal?: AbortSignal): Promise<Half | null> {
+  private async prefill(tokens: number[], signal?: AbortSignal, onProgress?: Progress): Promise<Half | null> {
     const s = this.pkg.model, { P } = this, n = tokens.length, scatter = this.style === 'tensorScatter';
     if (n === 0) throw new Error('empty prompt');
     const plan = this.planFor(n), rows = plan.reduce((a, b) => a + b, 0);
@@ -489,6 +494,7 @@ export class LLM {
         await this.ctx.readTensor(a.residuals[this.N - 1], newHalf(C * s.hidden));
         if (signal.aborted) return null;
       }
+      onProgress?.({ stage: 'prefill', loaded: index + 1, total: plan.length });
     }
     this.base = n; this.filled = 0; this.pad = padTotal; this.position = n;
     return this.readLogits();
@@ -552,7 +558,7 @@ export class LLM {
     try {
       const stop = new Set(options.stopTokens ?? this.pkg.model.eos_token_ids), max = options.maxNewTokens ?? 128;
       let t = performance.now();
-      let logits = await this.prefill(tokens, options.signal);
+      let logits = await this.prefill(tokens, options.signal, options.onProgress);
       if (!logits) return;   // aborted during the prefill: nothing was yielded
       this.stats = { ...emptyStats(), loadMs: this.stats.loadMs, buildMs: this.stats.buildMs, weightsMs: this.stats.weightsMs, prefillMs: performance.now() - t,
         prefillChunks: this.stats.prefillPlan.length, prefillPlan: this.stats.prefillPlan, promptTokens: tokens.length, graphBuilds: this.stats.graphBuilds };

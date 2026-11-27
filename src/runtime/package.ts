@@ -63,14 +63,15 @@ export interface ChatFormat {
 }
 export interface PackageIndex { format: string; version: number; compiler: string; target: string; model: string; plan: string; chat_format: string | null; weights_manifest: string; tokenizer: string[]; files: { path: string; bytes: number; sha256: string }[] }
 
-export type Progress = (event: { stage: string; message?: string; loaded?: number; total?: number }) => void;
+/** stage: package | download | embedding | build | weights | vision | state | ready | prefill. `loaded` / `total`: bytes for download, graphs for build, layers for weights / vision, chunks for prefill. `fromCache`: bytes of the download that came from the local cache. */
+export type Progress = (event: { stage: string; message?: string; loaded?: number; total?: number; fromCache?: number }) => void;
 
 export interface PackageSource {
   /** identifies the package in the cache */
   readonly id: string;
   text(path: string): Promise<string>;
   /** `size`: the size of the file when the caller knows it (m2w.json lists it), which saves a round trip for the segmented download of a UrlSource */
-  bytes(path: string, progress?: (loaded: number, total: number) => void, size?: number): Promise<ArrayBuffer>;
+  bytes(path: string, progress?: (loaded: number, total: number, cached?: boolean) => void, size?: number): Promise<ArrayBuffer>;
   /** bytes [start, end) of a file, without reading the rest (the per-layer embedding table of Gemma 4 is read one row per token) */
   slice?(path: string, start: number, end: number): Promise<ArrayBuffer>;
 }
@@ -201,13 +202,13 @@ export class CachedSource implements PackageSource {
   }
   /** cache entry name: <encoded path>@<first 16 hex digits of the sha256> */
   static entryName(path: string, sha256: string) { return `${encodeURIComponent(path)}@${sha256.slice(0, 16)}`; }
-  async bytes(path: string, progress?: (loaded: number, total: number) => void) {
+  async bytes(path: string, progress?: (loaded: number, total: number, cached?: boolean) => void) {
     const info = this.files.get(path);
     if (!info) return this.inner.bytes(path, progress);   // unknown file: nothing to validate against, do not cache
     const name = CachedSource.entryName(path, info.sha256);
     try {
       const file = await (await (await this.directory(false)).getFileHandle(name)).getFile();
-      if (file.size === info.bytes) return file.arrayBuffer();
+      if (file.size === info.bytes) { progress?.(file.size, file.size, true); return file.arrayBuffer(); }   // a hit counts as loaded at once, flagged as cached
     } catch { /* not cached */ }
     const data = await this.inner.bytes(path, progress, info.bytes);
     try {

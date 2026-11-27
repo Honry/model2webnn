@@ -341,3 +341,26 @@ describe('LLM: abort between the prefill chunks', () => {
     expect(out.length).toBe(3);
   });
 });
+
+describe('LLM: progress events', () => {
+  beforeAll(() => { if (!(globalThis as any).Float16Array) throw new Error('needs Node 24+'); });
+
+  it('reports every graph build as n of m (m known up front, also for a reconfigure) and the prefill as chunk n of m', async () => {
+    const events: any[] = [];
+    const { llm, context } = await loaded({ onProgress: (e: any) => events.push(e) });
+    const builds = events.filter((e) => e.stage === 'build');
+    expect(builds.length).toBe(llm.stats.graphBuilds.length);
+    expect(builds.map((e) => e.loaded)).toEqual(builds.map((_, i) => i));
+    expect(new Set(builds.map((e) => e.total))).toEqual(new Set([builds.length]));
+    events.length = 0;
+    await llm.reconfigure({ chunkSizes: [16], onProgress: (e: any) => events.push(e) } as any);
+    const rebuilt = events.filter((e) => e.stage === 'build');
+    expect(rebuilt.length).toBe(llm.stats.graphBuilds.length);
+    expect(new Set(rebuilt.map((e) => e.total))).toEqual(new Set([rebuilt.length]));
+    const prefill: any[] = [];
+    context.onRead = (_t: any, destination: any) => { destination.fill(0); destination[7] = 5; };
+    for await (const _ of llm.generate(prompt, { maxNewTokens: 1, stopTokens: [], temperature: 0, onProgress: (e) => prefill.push(e) })) { /* drain */ }
+    const plan = llm.stats.prefillPlan;
+    expect(prefill).toEqual(plan.map((_: number, i: number) => ({ stage: 'prefill', loaded: i + 1, total: plan.length })));
+  });
+});

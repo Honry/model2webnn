@@ -136,8 +136,9 @@ export class VisionTower {
       if (!t) throw new Error(`the vision graph wants the external tensor '${c.external}' which the tables of ${key(grid)} do not have`);
       return new Uint8Array(tableBytes, t.offset, t.bytes);
     };
+    let built = 0;   // the three graphs of a grid: HEAD, BLOCK, MERGER
     const build = async (path: string, label: string): Promise<Built> => {
-      progress({ stage: 'build', message: `build ${label}` });
+      progress({ stage: 'build', message: `build ${label}`, loaded: built++, total: 3 });
       const doc: GraphDoc = JSON.parse(await this.pkg.source.text(path)), builder = new (globalThis as any).MLGraphBuilder(this.ctx);
       const { inputs, outputs } = loadGraph(builder, doc, external);
       const graph = await builder.build(outputs);

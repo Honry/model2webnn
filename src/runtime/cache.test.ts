@@ -35,6 +35,17 @@ describe('CachedSource', () => {
     expect(calls.length).toBe(1);
   });
 
+  it('reports a hit as loaded at once and flagged as cached (a miss reports what the source reports)', async () => {
+    setup();
+    const calls: string[] = [], content = { value: bytesOf(1, 2, 3, 4) }, events: [number, number, boolean | undefined][] = [];
+    const source = new CachedSource(inner(content, calls));
+    source.setFiles([{ path: 'weights/a.bin', bytes: 4, sha256: 'aaaa'.repeat(16) }]);
+    await source.bytes('weights/a.bin', (l, t, cached) => events.push([l, t, cached]));
+    expect(events).toEqual([]);   // the fake inner source reports nothing
+    await source.bytes('weights/a.bin', (l, t, cached) => events.push([l, t, cached]));
+    expect(events).toEqual([[4, 4, true]]);
+  });
+
   it('a recompiled file with the SAME size but another sha256 is fetched again, and the stale entry is deleted', async () => {
     const root = setup();
     const calls: string[] = [], content = { value: bytesOf(1, 2, 3, 4) };
