@@ -951,6 +951,7 @@ async function run() {
     const deviceSelect = byId("deviceSelect");
     for (const device of ["npu", "gpu", "cpu"]) deviceSelect.add(new Option(device.toUpperCase(), device));
     deviceSelect.value = deviceType;
+    if (deviceType !== "npu") { const tag = byId("deviceTag"); tag.textContent = deviceType.toUpperCase(); tag.hidden = false; }   // the device is chosen by the URL only; anything but the NPU is shown as a tag
     deviceSelect.addEventListener("change", () => { syncUrl(); location.reload(); });   // a different device needs a new WebNN context and new weight tensors: simplest and safest is a fresh page
     // model: the built-in hand-written Qwen3-4B graphs (all options) or a package written by `m2w compile` (see chat-package.js); a different model reloads the page
     const modelSelect = byId("modelSelect");
@@ -1094,7 +1095,6 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     };
     // ---- the controls of the page are chip groups over the (hidden) selects: the selects stay the source of truth for every script
     chipGroup(modelSelect, { variant: "rows", format: formats.model, label: "Model" });
-    chipGroup(deviceSelect, { variant: "segmented", format: (option) => ({ main: option.textContent }), label: "Device" });
     chipGroup(maxLengthSelect, { format: formats.maxLength, label: "Max length" });
     chipGroup(chunkSizeSelect, { label: "Prefill chunk" });
     for (const [select, label] of [[blocksSelect, "Decode blocks per graph"], [prefillBlocksSelect, "Prefill blocks per graph"], [computeTypeSelect, "Compute type"], [kvStyleSelect, "KV update"], [stagingRowsSelect, "Staging rows"]]) chipGroup(select, { label });
