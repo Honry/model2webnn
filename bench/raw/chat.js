@@ -21,7 +21,7 @@
 //                                  HEAD/BLOCK/TAIL (S = 1), both KV-update graphs, the KV cache tensors, the activation tensors
 //
 // URL parameters (long name | legacy alias; the session options kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, prefillChunkSizes, computeType can also be picked on the page):
-//   device=npu|gpu     maxLength = 1152 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = 64     layers|L = 36
+//   device=npu|gpu     maxLength = 1152 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = (default: the answer may use the rest of the cache)     layers|L = 36
 //   system=<text>   a system prompt for the whole conversation (packages with a chat format)   question=<text>   the message in the box   image=<url>   a picture attached to it (packages with an image tower)   detail=auto|low|high
 //   prompt=...  |  promptFile=long-prompt.txt&promptChars=N (the first N characters of a text file + an instruction)     autoRun|auto = 1 (load immediately, generate once, finish; otherwise the page waits for the "Load model" button)
 //   kvStyle=staged (default: decode updates a small staging buffer, flushed into the main cache every stagingRows=64 steps) | onehot (whole-cache update) | scatterND (in-graph KV update as scatterND, value cache in natural layout)   kvInPlace=1 (KV update writes into the tensor it reads, no second cache)   tag=<label for the result file>     parallelDownloads=6 (weight files downloaded at the same time into the OPFS cache)
@@ -30,9 +30,10 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=8";
-import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=2";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=9";
+import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=3";
 import { chipGroup, formats } from "./chips.js?v=1";
+import { createLoadProgress } from "./progress-ui.js?v=2";
 import { renderPipeline, updatePipelineSession } from "./pipeline.js?v=1";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
@@ -50,7 +51,7 @@ const modelId = param("model", null, "js");   // "js": the built-in hand-written
 // prompt costs somewhat more than with 64). NPUW does the same with one static prefill graph (its default is 1024, too slow for us).
 const defaultChunkSize = +param("prefillChunkSize", "chunk", 256);
 const defaultMaxLength = query.get("maxLength") ? +query.get("maxLength") : +param("pastLength", "P", 1151) + 1;   // KV cache capacity
-const defaultMaxNewTokens = +param("maxNewTokens", "maxNew", 64);
+
 const layerCount = +param("layers", "L", 36);
 const autoRun = param("autoRun", "auto", "0") === "1";
 const resultTag = param("tag", null, "");
@@ -142,10 +143,12 @@ function log(eventName, message, fields = {}) {
     fetch("/log", { method: "POST", body: record }).catch(() => {});
 }
 // the status pill: idle (nothing loaded yet) | busy (a spinner while something runs) | ready | error
+let progressUi = null;   // the load progress bars of the page (set in run())
 const IDLE_STATUS = "Not loaded";
 const setStatus = (text) => {
     const pill = byId("status");
     pill.firstElementChild.textContent = text; pill.title = text;
+    if (/^FAILED/.test(text)) progressUi?.fail(text.replace(/^FAILED:\s*/, ""));   // the progress bars turn red with the message
     pill.dataset.state = /^FAILED/.test(text) ? "error" : text === "ready" ? "ready" : text === IDLE_STATUS ? "idle" : "busy";
 };
 // summary cell: a short value, the long explanation as a hover tip; headline tile: big value + one line below it
@@ -258,6 +261,8 @@ async function loadSharedModel() {
     const embeddingFiles = ["embed.bin", "embed_zp.bin", "embed_s.bin", "final_norm.bin"];
     const downloadStart = performance.now(), downloads = startDownloads([...embeddingFiles, ...manifest.layers.slice(0, layerCount).map((layer) => layer.file)]);
     let cachedFileCount = 0, downloadedFileCount = 0, downloadedBytes = 0;
+    let filesDone = 0;
+    for (const promise of downloads.values()) promise.then(() => progressUi?.files(++filesDone, downloads.size)).catch(() => {});
     for (const promise of downloads.values()) promise.then((result) => { if (result.fromCache) cachedFileCount++; else { downloadedFileCount++; downloadedBytes += result.bytes; } }).catch(() => {});
     Promise.all(downloads.values()).then(() => log("downloads_finished",
         `All ${downloads.size} weight files are in the OPFS cache after ${seconds(performance.now() - downloadStart)} (${cachedFileCount} from cache, ${downloadedFileCount} downloaded, ${Math.round(downloadedBytes / 2 ** 20)} MB; ${PARALLEL_DOWNLOADS} parallel)`,
@@ -277,7 +282,7 @@ async function loadSharedModel() {
 
     // build one graph, log it, add it to the per-graph table; returns { graph, buildMs }
     const buildGraph = async (label, createGraph, timeLabelId) => {
-        setStatus(`building graph: ${label}`);
+        setStatus(`building graph: ${label}`); progressUi?.event({ stage: "build", message: label });
         const builder = new MLGraphBuilder(mlContext), description = createGraph(builder), start = performance.now();
         const graph = await builder.build(description.outputs), elapsed = performance.now() - start;
         graphSink?.push(graph);
@@ -334,7 +339,7 @@ async function loadSharedModel() {
     }
     stepStart = performance.now();
     for (let layer = 0; layer < layerCount; layer++) {
-        setStatus(`loading weights: layer ${layer + 1}/${layerCount}`);
+        setStatus(`loading weights: layer ${layer + 1}/${layerCount}`); progressUi?.event({ stage: "weights", loaded: layer, total: layerCount });
         await downloads.get(manifest.layers[layer].file);                              // wait for exactly this layer (later layers keep downloading)
         const bytes = await readCachedFile(manifest.layers[layer].file), tensors = {}, quantized = {}, partsToMerge = {}, uploads = [];   // uploads: { name, dataType, shape, data } of this layer, created concurrently below
         for (const entry of manifest.layers[layer].tensors) {
@@ -832,7 +837,7 @@ async function loadSharedModel() {
     }
     // options: { onText(text) (the answer so far), signal (AbortSignal: stop) }; this graph set answers every message on its own (no conversation history)
     async function generate(session, userText, maxNewTokens, options = {}) {
-        const showText = options.onText ?? (() => {});
+        const limitText = options.autoMax ? "" : `/${maxNewTokens}`, showText = options.onText ?? (() => {});
         const prompt = `<|im_start|>user\n${userText}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`;   // Qwen3, thinking disabled
         highlight("stage-tokenizer");
         const tokenIds = Array.from(tokenizer.encode(prompt));
@@ -851,6 +856,7 @@ async function loadSharedModel() {
         const chunkEnqueueMs = [];
         let chunkStart = 0;
         for (let chunk = 0; chunk < chunkCount; chunk++) {
+            options.onPrefill?.(chunk, chunkCount);
             if (options.signal?.aborted) { highlight(); setStatus("ready"); return { text: "", stopped: true, promptTokens: tokenIds.length, imageTokens: 0, generated: 0, prefillMs: 0, visionMs: 0, buildMs: 0, preprocessMs: 0, tpotMs: 0, tps: 0, inferenceMs: 0, grid: null, pixels: "", detail: "", images: [], capacity: session.pastLength }; }
             setStatus(`prefill chunk ${chunk + 1}/${chunkCount}`);
             const lastChunk = chunk === chunkCount - 1, startPosition = chunkStart;
@@ -869,7 +875,7 @@ async function loadSharedModel() {
         for (let step = 0; step < maxNewTokens && !END_OF_TEXT_TOKENS.has(token) && session.promptPad + position < session.pastLength && !options.signal?.aborted; step++) {
             generated.push(token);
             showText(tokenizer.decode(generated, { skip_special_tokens: true }));   // rendered as Markdown, at most every 100 ms
-            setStatus(`decode step ${step + 1}/${maxNewTokens}`);
+            setStatus(`decode step ${step + 1}${limitText}`);
             const stepStart = performance.now();
             if (stagedKv && session.staging.filled === stagingRows) flushStaging(session);   // counted in this step's time
             const result = await runPhase(session, "decode", () => writeDecodeInputs(session, token, position));
@@ -1037,7 +1043,7 @@ async function run() {
     byId("fixedOptions").textContent = packageMode ? `Package: ${packageEntry.url}  ${packageInfo}
 The options come from the package plan; the hand-written Qwen3-4B graphs offer the full option set.` : `Fixed at page load (URL): profile=${profileEnabled ? 1 : 0}  weightFormat=${weightFormat}  mergeProjections=${mergeProjections ? 1 : 0}  matmulStyle=${graphOptions.matmulStyle}  zeroPoint=${graphOptions.zeroPoint}  dequantStyle=${graphOptions.dequantStyle}  layers=${layerCount}`;
     const givenMaxNewTokens = query.get("maxNewTokens") ?? query.get("maxNew");
-    byId("maxNewTokensInput").value = givenMaxNewTokens ?? (query.get("image") && attachments ? 128 : defaultMaxNewTokens);   // a picture question wants a longer answer than the short text default
+    byId("maxNewTokensInput").value = givenMaxNewTokens ?? "";   // empty: the answer may use all the rows of the cache that are left (maxNewTokens=<n> in the URL fixes it)
     byId("visionGreedy").checked = query.get("temperature") === "0";
     setStatus(IDLE_STATUS);
     if (!packageMode) byId("pipelineSummary").textContent = `Qwen3-4B (hand-written graphs): ${layerCount} layers, all full attention · hidden ${hiddenSize} · ${numAttentionHeads} heads (${numKeyValueHeads} KV, head dim ${headDim}) · FFN ${CFG.FF} · vocab ${vocabularySize} · int4 weights, group 128`;
@@ -1073,6 +1079,16 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     else if (query.get("image") && attachments && !query.get("prompt") && !query.get("promptFile")) { promptBox.value = QUESTIONS.describe; presetSelect.value = "custom"; }
     for (const button of document.querySelectorAll("[data-question]")) button.onclick = () => { promptBox.value = QUESTIONS[button.dataset.question]; presetSelect.value = "custom"; scheduleContext(); promptBox.focus(); };
 
+    // ---- load progress bars (the stepper in the session card and the empty chat, a line along the top bar) and the bars inside the assistant message while the prompt is read
+    progressUi = createLoadProgress({ roots: [byId("loadProgress"), byId("emptyProgress")], topBar: byId("topProgress") });
+    let activeBubble = null;
+    const onProgress = (p) => {   // the runtime's events: while a message is answered the prefill and the first use of a picture grid go to its bubble, everything else to the load bars
+        if (p.stage === "begin") { progressUi.begin(p.fresh); return; }
+        const visionBuild = p.stage === "build" && /^build vision/.test(p.message ?? "");
+        if (activeBubble && p.stage === "prefill") { activeBubble.setProgress(p.total > 1 ? { label: `Reading the prompt · chunk ${p.loaded} / ${p.total}`, fraction: p.loaded / p.total } : { label: "Reading the prompt…", fraction: null }); return; }
+        if (activeBubble && visionBuild) { activeBubble.setProgress({ label: `Preparing the picture · building graph ${Math.min(p.loaded + 1, p.total)} / ${p.total}`, fraction: p.loaded / p.total }); return; }
+        if (!activeBubble) progressUi.event(p);
+    };
     // ---- the controls of the page are chip groups over the (hidden) selects: the selects stay the source of truth for every script
     chipGroup(modelSelect, { variant: "rows", format: formats.model, label: "Model" });
     chipGroup(deviceSelect, { variant: "segmented", format: (option) => ({ main: option.textContent }), label: "Device" });
@@ -1123,6 +1139,8 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     const imageExtra = (list) => list.reduce((n, turn) => n + turn.images.reduce((m, image) => m + image.tokens - 1, 0), 0);   // the pad token of a picture becomes `tokens` tokens
     const countConversation = (history, message) => model.countTurns([...history.map((turn) => runtimeTurn(turn, true)), runtimeTurn(message, false)], system) + imageExtra([...history, message]);
     const capacityOf = (session) => session.pastLength ?? session.maxLength - 1;   // KV rows: the prompt and the answer must fit
+    // room for the answer: an explicit maxNewTokens (URL) is reserved as it is; otherwise the answer may use every row that is left, and the history is trimmed so that at least min(512, a quarter of the cache) rows stay free
+    const reserveOf = (session, explicit) => (explicit > 0 ? explicit : Math.min(512, Math.floor(capacityOf(session) / 4)));
 
     // the line under the composer: how full the context is (needs the tokenizer, so after the first load)
     let contextTimer = null;
@@ -1131,19 +1149,18 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         const out = byId("promptTokenCount"), session = model?.currentSession?.();
         out.classList.remove("over");
         if (!model || !session) { out.textContent = ""; return; }
-        const reserve = +byId("maxNewTokensInput").value || 0, capacity = capacityOf(session), message = { text: promptBox.value, images: attachments?.items ?? [] };
+        const explicit = +byId("maxNewTokensInput").value || 0, reserve = reserveOf(session, explicit), capacity = capacityOf(session), message = { text: promptBox.value, images: attachments?.items ?? [] };
         const used = countConversation(liveTurns(), message), own = countConversation([], message);
-        out.textContent = `Context ${used} / ${Math.max(0, capacity - reserve)}`;
-        out.title = `Prompt ${used} tokens (history ${used - own} + this message ${own}); ${reserve} are reserved for the answer; the cache of this session holds ${capacity} rows`;
+        out.textContent = `Context ${used} / ${capacity}`;
+        out.title = `Prompt ${used} tokens (history ${used - own} + this message ${own}) of the ${capacity} rows of the cache; the answer may use the rest. Older turns are dropped when less than ${reserve} rows would be left.`;
         out.classList.toggle("over", used + reserve > capacity);
     };
     attachmentsChanged = scheduleContext;
     promptBox.oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || preset[1] !== promptBox.value) presetSelect.value = "custom"; scheduleContext(); };
-    byId("maxNewTokensInput").addEventListener("input", scheduleContext);
     updateContext();
 
     const sessionOptionsOnPage = () => ({ kvStyle: kvStyleSelect.value, stagingRows: +stagingRowsSelect.value, blocksPerGraph: +blocksSelect.value, prefillBlocksPerGraph: +prefillBlocksSelect.value, chunkSizes: parseChunkSizes(chunkSizesInput.value), computeType: computeTypeSelect.value });
-    const selected = () => ({ maxLength: +maxLengthSelect.value, chunkSize: +chunkSizeSelect.value, maxNewTokens: +byId("maxNewTokensInput").value, options: sessionOptionsOnPage() });
+    const selected = () => ({ maxLength: +maxLengthSelect.value, chunkSize: +chunkSizeSelect.value, maxNewTokens: +byId("maxNewTokensInput").value || 0, options: sessionOptionsOnPage() });   // 0: automatic
     const optionControls = [maxLengthSelect, chunkSizeSelect, computeTypeSelect, kvStyleSelect, stagingRowsSelect, blocksSelect, prefillBlocksSelect, chunkSizesInput];
     let generating = false, stopping = false, controller = null;
     const renderRunButton = () => {   // one button: Generate, then Stop while a generation runs
@@ -1173,7 +1190,8 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             const { maxLength, chunkSize, options } = selected();
             if (!packageMode) applySessionOptions(options);   // before the first load: lm_head is built with the compute type picked on the page
             const loadStart = performance.now(), firstLoad = !model, previousSession = model?.currentSession?.();   // startup time = this load only, not the time since the page was opened
-            if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded }, { url: packageEntry.url, deviceType, vision: attachments ? visionSetting() : null })
+            if (!packageMode) progressUi.begin(!model);   // the hand-written path reports its steps itself (files, graphs, layers)
+            if (!model) model = packageMode ? await loadPackageModel({ byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded, progress: onProgress }, { url: packageEntry.url, deviceType, vision: attachments ? visionSetting() : null })
                 : await loadSharedModel();             // first time: tokenizer, weights, lm_head graph
             const session = await model.getSession(maxLength, chunkSize, options);   // builds the max-length / chunk-size / session-option specific graphs + KV cache
             if (packageMode) updatePipelineSession(byId("pipelineBody"), packagePeek, { blocksPerGraph: session.blocksPerGraph, prefillBlocksPerGraph: session.prefillBlocksPerGraph, kvStyle: session.variant?.kv_style, stagingRows: session.variant?.staging_rows });
@@ -1185,7 +1203,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             byId("loadedLabel").textContent = "Loaded";   // the full session is the tooltip and the session line of the details
             byId("loadedLabel").title = packageMode ? session.label : `max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
             byId("loadButton").querySelector(".lbl").textContent = "Apply"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
-            setStatus("ready");
+            setStatus("ready"); progressUi.done();
         } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); }
         finally { setBusy(false); showSession(sessionSummary()); updateContext(); }
     };
@@ -1214,13 +1232,13 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
 
     /** which turns the next prompt contains: the live history + the new message must fit the cache with the answer reserved; the OLDEST whole turns go first (the system prompt and the newest message never).
      *  The newest message alone: it is sent when at least a short answer fits (`room`: the tokens left, the answer may be cut), else it is not sent. */
-    const planHistory = (session, message, reserve) => {
-        const capacity = capacityOf(session), kept = liveTurns(), dropped = [];
+    const planHistory = (session, message, explicit) => {
+        const capacity = capacityOf(session), reserve = reserveOf(session, explicit), kept = liveTurns(), dropped = [];
         const fits = () => countConversation(kept, message) + reserve <= capacity;
         while (!fits() && kept.length) dropped.push(kept.shift());
         const own = countConversation(kept, message);
-        if (own + reserve <= capacity) return { ok: true, kept, dropped };
-        if (own + Math.min(reserve, 16) <= capacity) return { ok: true, kept, dropped, room: capacity - own };
+        if (own + reserve <= capacity) return { ok: true, kept, dropped, used: own };
+        if (own + Math.min(reserve, 16) <= capacity) return { ok: true, kept, dropped, room: capacity - own, used: own };
         return { ok: false, message: `Not sent: this message needs ${own} prompt tokens, but max length ${session.maxLength} holds ${capacity} cache rows, which leaves no room for an answer. Choose a larger Max length (it is chosen at Load) or a lower picture Detail.` };
     };
     const send = async () => {
@@ -1240,11 +1258,11 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             promptBox.value = text; attachments?.restore(turn.images);
         };
         try {
-            const { maxLength, chunkSize, maxNewTokens, options } = selected();
+            const { maxLength, chunkSize, maxNewTokens: explicit, options } = selected();
             const session = await model.getSession(maxLength, chunkSize, options);   // (rebuilds the graphs when the options changed since the last turn)
             showSession(`session: ${session.label}`);
             const message = { text, images: attachments ? attachments.items.slice() : [] };
-            plan = planHistory(session, message, maxNewTokens);
+            plan = planHistory(session, message, explicit);
             if (!plan.ok) { conversation.addNotice(plan.message, { warn: true }); setHint(plan.message, true); plan = null; return; }
             setHint(baseHint());
             if (plan.dropped.length) {   // the oldest turns leave the prompt for good (they stay on the screen, dimmed)
@@ -1258,10 +1276,13 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             if (plan.room) turn.elements.push(conversation.addNotice(`Only ${plan.room} tokens are left for the answer at max length ${session.maxLength}: it may be cut. A larger Max length is chosen at Load.`, { after: turn.elements[0] }));
             promptBox.value = ""; scheduleContext();
             bubble = conversation.addAssistant(); turn.elements.push(bubble.element);
+            bubble.setProgress({ label: "Preparing the prompt…", fraction: null }); activeBubble = bubble;
             turns.push(turn);
+            const maxNewTokens = explicit > 0 ? explicit : Math.max(1, capacityOf(session) - plan.used);   // automatic: every row that is left (the end-of-turn token still ends the answer)
             const sources = [...plan.kept, turn].flatMap((item) => item.images).map((image) => ({ source: image.bitmap, name: image.name, detail: image.detail }));   // the pictures of the history are encoded again with the prompt
             const result = await model.generate(session, text, maxNewTokens, { turns: [...plan.kept.map((item) => runtimeTurn(item, true)), runtimeTurn(turn, false)], images: sources, system,
-                sampling: greedyBox.checked ? { temperature: 0 } : undefined, onText: (answer) => bubble.view.set(answer), signal: controller.signal });
+                sampling: greedyBox.checked ? { temperature: 0 } : undefined, autoMax: explicit <= 0,
+                onText: (answer) => { if (answer) bubble.setProgress(null); bubble.view.set(answer); }, onPrefill: (n, m) => onProgress({ stage: "prefill", loaded: n, total: m }), signal: controller.signal });
             bubble.view.flush();
             if (result.stopped && !result.generated) { undo(); setHint("Stopped before the first token: the message is back in the box.", true); return; }
             turn.assistant = result.text;
@@ -1271,7 +1292,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             log("fatal", "Generation failed: " + error); setStatus("FAILED: " + error);
             const failed = turn !== null; undo();
             conversation.addNotice(`Generation failed: ${error}${failed ? " (the message is back in the box)" : ""}`, { warn: true });
-        } finally { setBusy(false); controller = null; updateContext(); conversation.scrollToEnd(); }
+        } finally { activeBubble = null; bubble?.setProgress(null); setBusy(false); controller = null; updateContext(); conversation.scrollToEnd(); }
     };
     runButton.onclick = () => { if (generating) { stopping = true; controller?.abort(); renderRunButton(); setStatus("stopping…"); } else send(); };
     promptBox.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (!generating && !busy) send(); } });

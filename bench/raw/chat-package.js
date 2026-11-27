@@ -91,7 +91,7 @@ export function setupPackageControls(pkg, c, initial = {}) {
 
 /** the model of the page: tokenizer + (lazily, per max length / chunk / blocks-per-graph) a loaded LLM */
 export async function loadPackageModel(ui, { url, deviceType, vision = null }) {   // vision: null (no image tower), true (the tower; a picture gets any preset of the package) or [[h, w], ...] (only these presets); the graphs of a preset are built on its first use
-    const { byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded } = ui;
+    const { byId, log, setStatus, setCell, setMetric, fillTimingTable, seconds, rounded } = ui, report = (p) => ui.progress?.(p);   // report: the runtime's progress events (counts, bytes) for the page's progress bars
     setStatus("opening the package");
     const pkg = await openPackage(url, true);
     setStatus("loading the tokenizer");
@@ -135,16 +135,18 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         const key = [maxLength, chunkSizes.join("+"), blocksPerGraph, prefillBlocksPerGraph, kvStyle, stagingRows, computeType, kvInPlace].join("|");
         if (current && current.key === key) return current;
         const session = { maxLength, chunkSizes, blocksPerGraph, prefillBlocksPerGraph, kvStyle, computeType, kvInPlace, ...(stagingRows ? { stagingRows } : {}), onProgress: (p) => {
+            report(p);
             setStatus(p.stage === "download" ? `downloading weights ${Math.round(p.loaded / 2 ** 20)} / ${Math.round(p.total / 2 ** 20)} MB` : `${p.stage}${p.message ? ": " + p.message : ""}`);
         } };
         const reused = !!llm;
+        report({ stage: "begin", fresh: !llm });   // a load (download + upload) or a reconfigure (graphs only)
         if (llm) await llm.reconfigure(session);
         else {
             const query = new URLSearchParams(location.search);   // ?parallelDownloads=4&downloadSegments=4: see download.html for good values
             llm = await loadModel(url, { device: deviceType, parallelDownloads: +query.get("parallelDownloads") || undefined, downloadSegments: +query.get("downloadSegments") || undefined,
                 ...(vision && pkg.plan.vision ? { vision: vision === true ? true : { grids: vision } } : {}), ...session });
             if (llm.vision) {
-                llm.vision.progress = (p) => setStatus(p.message ?? p.stage);   // "build vision 24x16 head": the graphs of a preset are built on its first use
+                llm.vision.progress = (p) => { report({ ...p, vision: true }); setStatus(p.message ?? p.stage); };   // "build vision 24x16 head": the graphs of a preset are built on its first use
                 log("vision_ready", `Image tower ready: weights ${pkg.plan.vision.weights} loaded in ${seconds(llm.vision.weightsMs)}; presets a picture may get: ${llm.vision.grids.map((g) => g.join("x")).join(", ")} (graphs are built on first use)`, { grids: llm.vision.grids, weights: pkg.plan.vision.weights, weights_ms: Math.round(llm.vision.weightsMs) });
             }
         }
@@ -195,11 +197,11 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         log("generation_started", `Generation started: max length ${session.maxLength}, ${total} prompt tokens in ${chunks} chunk(s) (${plan.join("+")}), up to ${maxNewTokens} new tokens`, { max_length: session.maxLength, prompt_tokens: total, prefill_chunks: chunks, prefill_plan: plan, variant: session.variant.id, image_tokens: total - ids.length + images.length, turns: turns.length, images: images.length });
         setStatus("prefill");
         const start = performance.now(), generated = [];
-        for await (const token of llm.generate(ids, { maxNewTokens, images, signal: options.signal, ...samplingFromUrl(), ...(options.sampling ?? {}) })) {
+        for await (const token of llm.generate(ids, { maxNewTokens, images, signal: options.signal, onProgress: report, ...samplingFromUrl(), ...(options.sampling ?? {}) })) {
             if (stop.has(token)) break;
             generated.push(token);
             showText(tokenizer.decode(generated));
-            setStatus(`decode step ${generated.length}/${maxNewTokens}`);
+            setStatus(`decode step ${generated.length}${options.autoMax ? "" : `/${maxNewTokens}`}`);
         }
         const stopped = !!options.signal?.aborted, answer = tokenizer.decode(generated);
         const summary = { text: answer, promptTokens: total, imageTokens: llm.stats.imageTokens ?? 0, generated: generated.length, stopped, capacity: session.maxLength - 1, images: imageInfos };

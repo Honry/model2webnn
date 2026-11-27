@@ -51,11 +51,20 @@ export function createConversation(list) {
         addAssistant() {
             const message = el("div", "msg assistant"), avatar = el("div", "avatar"), body = el("div", "body"), box = el("div", "answer-box"), toolbar = el("div", "toolbar"), meta = el("span", "meta");
             box.dataset.placeholder = "…";
-            avatar.append(icon("zap")); toolbar.append(meta, el("span", "spacer")); body.append(box, toolbar); message.append(avatar, body);
+            const gp = el("div", "gp"), gpBar = el("div", "gp-bar"), gpFill = el("i"), gpText = el("span", "gp-text");   // progress while the prompt is read (before the first token)
+            gp.hidden = true; gpBar.append(gpFill); gp.append(gpBar, gpText);
+            avatar.append(icon("zap")); toolbar.append(meta, el("span", "spacer")); body.append(gp, box, toolbar); message.append(avatar, body);
             append(message);
             const view = answerView(box, { barParent: toolbar });
             views.push(view);
             return { element: message, box, view,
+                /** { label, fraction (0..1, null = indeterminate) } or null to hide the bar */
+                setProgress(info) {
+                    gp.hidden = !info;
+                    if (!info) return;
+                    gpText.textContent = info.label; gpFill.classList.toggle("pulse", info.fraction == null);
+                    gpFill.style.width = info.fraction == null ? "100%" : `${Math.round(info.fraction * 100)}%`; scrollToEnd();
+                },
                 /** text: "stopped · TTFT 1.6 s · TPOT 58 ms/token · 27 + 64 tokens": one small chip per part */
                 setMeta(text, state = "") {
                     meta.replaceChildren();
