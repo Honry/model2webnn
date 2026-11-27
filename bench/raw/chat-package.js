@@ -224,7 +224,9 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         if (!options.onText) chatAnswer.flush();
         setStatus("ready");
         return { text: answer, promptTokens: total, imageTokens: llm.stats.imageTokens ?? 0, generated: generated.length, prefillMs, visionMs: llm.stats.visionMs ?? 0, buildMs: imageInfo?.buildMs ?? 0, preprocessMs: imageInfo?.preprocessMs ?? 0,
-            tpotMs: tpot, tps, inferenceMs, grid: imageInfo?.grid ?? null, pixels: imageInfo?.pixels ?? "", detail: imageInfo?.detail ?? "" };
+            tpotMs: tpot, tps, inferenceMs, grid: imageInfo?.grid ?? null, pixels: imageInfo?.pixels ?? "", detail: imageInfo?.detail ?? "",
+            // one entry per picture of the prompt (the runtime takes one today); the vision encode time is of the whole prompt's pictures
+            images: imageInfo ? [{ name: imageInfo.name, detail: imageInfo.detail, grid: imageInfo.grid, pixels: imageInfo.pixels, tokens: images[0].tokens, preprocessMs: imageInfo.preprocessMs, buildMs: imageInfo.buildMs, visionMs: llm.stats.visionMs ?? 0 }] : [] };
     }
 
     return {

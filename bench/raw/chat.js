@@ -29,9 +29,9 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=6";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache } from "./chat-package.js?v=7";
 import { answerView } from "./answer-view.js?v=1";
-import { setupVisionTab } from "./vision-tab.js?v=4";
+import { setupVisionTab } from "./vision-tab.js?v=5";
 import {
     attentionWeightSpecs, feedForwardWeightSpecs,
     buildHeadGraph, buildBlockGraph, buildTailGraph, buildLmHeadGraph, buildKvUpdateGraph, buildDequantizeWeightGraph, setWeightLayout, setMergedProjections, buildBlockGroupGraph,
@@ -900,6 +900,7 @@ async function loadSharedModel() {
               generated_token_ids: generated, text: answer, ...(stagedKv ? { kv_flushes: session.flushCount, staging_rows: stagingRows } : {}) });
         if (profileEnabled && session.promptPad + position < session.pastLength) await profileDecode(session, token, position);
         setStatus("ready");
+        return { text: answer, promptTokens: tokenIds.length, imageTokens: 0, generated: generated.length, prefillMs, visionMs: 0, buildMs: 0, preprocessMs: 0, tpotMs: timePerOutputTokenMs, tps: tokensPerSecond, inferenceMs, grid: null, pixels: "", detail: "", images: [] };
     }
 
     byId("sum-load").textContent = seconds(weightLoadMs);
@@ -1007,6 +1008,7 @@ async function run() {
         return `session (not loaded yet): max length ${maxLengthSelect.value}, prefill chunk ${chunks}, blocks/graph ${blocksSelect.value}, ${computeTypeSelect.value}`;
     };
     // the closed "Advanced" section says what is set in it (the values that differ from a plain default stay visible)
+    const showSession = (text) => { byId("sessionLine").textContent = text; };   // the session line under the answer: the same for both tabs
     const updateAdvancedSummary = () => {
         const parts = [];
         if (chunkSizesInput.value.trim()) parts.push(`chunks ${chunkSizesInput.value.trim()}`);
@@ -1018,7 +1020,7 @@ async function run() {
     };
     const updateOptionControls = () => {
         updateAdvancedSummary();
-        visionTab?.setSession(sessionSummary());
+        showSession(sessionSummary());
         if (packageMode) { packageControls.lock(); return; }
         stagingRowsSelect.disabled = kvStyleSelect.value !== "staged";
     };
@@ -1096,7 +1098,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             setCell("sum-build", seconds(model.sharedBuildMs + session.buildMs), `shared ${seconds(model.sharedBuildMs)} + max-length / chunk / option specific ${seconds(session.buildMs)}`);
             setCell("sum-startup", seconds(startupMs), firstLoad ? "tokenizer + load weights + build graphs" : reused ? "same settings: the session was already loaded" : "reload: weights were already loaded, only the session graphs were rebuilt");
             setMetric("metric-startup", (startupMs / 1000).toFixed(1), "s", firstLoad ? `incl. weights; graphs built in ${seconds(model.sharedBuildMs + session.buildMs)}` : reused ? "already loaded" : `reload, weights kept; graphs ${seconds(session.buildMs)}`);
-            visionTab?.setSession(sessionSummary());
+            showSession(sessionSummary());
             byId("loadedLabel").textContent = packageMode ? `loaded: ${session.label}` : `loaded: max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
             updateTokenCount();
             byId("loadButton").textContent = "Apply options"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
@@ -1104,9 +1106,19 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); }
         finally { setBusy(false); byId("runButton").disabled = !model; byId("runHint").hidden = !!model; }
     };
+    // what both tabs show after a generation besides the metrics: token counts, KV cache rows used (a full cache cut the answer), and the image rows of the Summary (none for a text prompt)
+    const showRunResult = (result, session) => {
+        if (!result) return;
+        const capacity = session.pastLength ?? session.maxLength - 1, used = result.promptTokens + result.generated, full = used >= capacity;
+        setCell("sum-tokens", `${result.promptTokens}${result.imageTokens ? ` (${result.imageTokens} image)` : ""} + ${result.generated}`);
+        setCell("sum-cache", `${used} of ${capacity} rows${full ? " (FULL: the answer was cut)" : ""}`);
+        if (full) { const view = answerView(byId("answer")); view.set(view.text + `\n\n[stopped: the KV cache of this session holds ${capacity} tokens (${result.promptTokens} prompt + ${result.generated} generated). Choose a longer max length.]`); view.flush(); }
+        visionTab?.showImages(result.images ?? []);
+    };
     const generateOnce = async () => {
         const { maxLength, chunkSize, maxNewTokens, options } = selected();
-        await model.generate(await model.getSession(maxLength, chunkSize, options), byId("prompt").value, maxNewTokens);
+        const session = await model.getSession(maxLength, chunkSize, options);
+        showRunResult(await model.generate(session, byId("prompt").value, maxNewTokens), session);
     };
     // the Vision tab: the same model and session as the Chat tab (loaded first when needed)
     const visionGenerate = async (question, maxNewTokens, generateOptions) => {
@@ -1116,8 +1128,9 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         try {
             const { maxLength, chunkSize, options } = selected();
             const session = await model.getSession(maxLength, chunkSize, options);   // the SAME selects as the Chat tab: max length, chunk sizes, blocks / graph, compute type
-            visionTab.setSession(`session: ${session.label}`);
+            showSession(`session: ${session.label}`);
             const result = await model.generate(session, question, maxNewTokens, generateOptions);
+            showRunResult(result, session);
             return { ...result, maxLength: session.maxLength, sessionLabel: session.label };
         } finally { setBusy(false); }
     };

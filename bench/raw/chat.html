@@ -92,6 +92,7 @@
 
   /* tables: vivid numbers, tips instead of text */
   #summaryTable td:nth-child(2) { font-weight: 700; font-size: 16px; }
+  #sum-tokens, #sum-cache { font-size: 14px; color: var(--text); }
   #sum-load, #sum-prefill { color: #4fd1ff; }
   #sum-build, #sum-startup { color: #c792ea; }
   #sum-decode { color: #ffb454; }
@@ -119,7 +120,7 @@
 
   /* results */
   .answer-card { padding-bottom: 12px; }
-  #answer, #visionAnswer { white-space: pre-wrap; background: #13161a; border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; min-height: 96px; max-height: 75vh; overflow: auto; font-size: 16px; }
+  #answer { white-space: pre-wrap; background: #13161a; border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; min-height: 96px; max-height: 75vh; overflow: auto; font-size: 16px; }
   .answer-box:empty::before { content: attr(data-placeholder); color: var(--dim); font-size: 14.5px; }
   .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 12px; }
   .cols > .card { margin: 0; }
@@ -159,13 +160,18 @@
   /* Vision tab */
   #dropZone { flex: 1 1 280px; border: 2px dashed var(--line2); border-radius: var(--radius); padding: 16px 20px; color: var(--dim); cursor: pointer; min-width: 220px; text-align: center; }
   #dropZone.over, #dropZone:hover, #dropZone:focus { border-color: var(--accent); color: var(--text); outline: 0; }
-  .visionview { display: grid; grid-template-columns: minmax(260px, 420px) 1fr; gap: 16px; margin-top: 12px; align-items: start; }
-  @media (max-width: 700px) { .visionview { grid-template-columns: minmax(0, 1fr); } }
-  #modelView { max-width: 100%; max-height: 420px; min-width: 128px; image-rendering: auto; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
-  #visionCaption { color: #c3c9cf; font-size: 14.5px; line-height: 1.6; }
-  #visionSession { margin-top: 8px; color: var(--dim); font-size: 13.5px; }
-  #visionTiming td:nth-child(2) { font-weight: 700; }
-  .v-host td:nth-child(2) { color: #ffb454; } .v-device td:nth-child(2) { color: #5af78e; } .v-total td:nth-child(2) { color: #fff; } .v-total td { border-top: 1px solid var(--line2); font-weight: 700; } .v-dim td { color: var(--dim); }
+  .imageitem { display: grid; grid-template-columns: minmax(260px, 420px) 1fr; gap: 16px; margin-top: 12px; align-items: start; }
+  @media (max-width: 700px) { .imageitem { grid-template-columns: minmax(0, 1fr); } }
+  .imageitem canvas { max-width: 100%; max-height: 420px; min-width: 128px; image-rendering: auto; background: #fff; border-radius: 6px; border: 1px solid var(--line); object-fit: contain; }
+  .imagecaption, .imageempty { color: #c3c9cf; font-size: 14.5px; line-height: 1.6; }
+  #sessionLine { margin-top: 4px; color: var(--dim); font-size: 13.5px; }
+  #sessionLine:empty { display: none; }
+  /* image rows of the Summary: one group per picture */
+  #sumImages td { font-size: 14px; }
+  #sumImages tr.img-head td { text-align: left; color: var(--label); font-weight: 700; border-bottom: 0; padding-top: 8px; }
+  #sumImages tr.img-row td:first-child { padding-left: 22px; font-weight: 400; color: var(--label); }
+  #sumImages tr.img-row td:nth-child(2) { font-weight: 600; font-size: 14px; color: var(--text); }
+  #sumImages tr.img-row.host td:nth-child(2) { color: #ffb454; } #sumImages tr.img-row.device td:nth-child(2) { color: #5af78e; }
   .quick { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
   .quick button { padding: 3px 12px; font-weight: 500; }
 
@@ -260,12 +266,45 @@
     <span id="runHint" class="hint">Load the model first (Session above).</span>
   </div>
 </section>
+</div><!-- /panel-chat -->
 
+<!-- ============ Vision tab: a picture + a question (packages with an image tower) ============ -->
+<div id="panel-vision" style="display:none">
+<section class="card">
+  <div class="title">Picture</div>
+  <div class="fields">
+    <div id="dropZone" tabindex="0" role="button">Drop a picture here, paste one (Ctrl+V) or click to choose a file<input type="file" id="imageInput" accept="image/*" hidden></div>
+    <label class="field"><span>Sample<i class="tip" data-tip="The pictures of the image test suite (bench/raw/vision-suite): choosing one also fills in its question.">i</i></span><select id="sampleSelect" style="min-width:170px"></select></label>
+    <label class="field"><span>Detail<i class="tip" data-tip="How many image tokens the picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.\nAuto: up to 24x24 patches = 144 image tokens.\nLow (fast): up to 16x16 = 64 tokens.\nHigh: up to 32x32 = 256 tokens (small text, fine details; slower, and no gain for a picture smaller than that).\nPictures are never blown up far beyond their own size.">i</i></span>
+      <select id="detailSelect"><option value="auto">Auto</option><option value="low">Low (fast)</option><option value="high">High (text, small details)</option></select></label>
+    <label class="actions" style="margin:0;padding-bottom:6px"><input type="checkbox" id="showBlocks" checked> show the image-token blocks</label>
+  </div>
+  <!-- one block per picture (a list, so that several pictures can be added later; the runtime takes one per prompt today) -->
+  <div id="imageItems"></div>
+</section>
+<section class="card">
+  <div class="title">Question</div>
+  <div class="quick">
+    <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read all text (OCR)</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
+  </div>
+  <textarea id="visionQuestion" aria-label="Question"></textarea>
+  <div class="actions">
+    <label>Max new tokens <input id="visionMaxNew" type="number" value="128" min="1"></label>
+    <label title="temperature 0: the same answer every time (the package recommends sampling parameters otherwise)"><input type="checkbox" id="visionGreedy"> Deterministic (greedy)</label>
+    <button id="visionRun" class="primary" disabled title="Ctrl+Enter in the question also generates">Generate</button>
+    <span id="visionHint" class="hint">Add a picture first.</span>
+  </div>
+</section>
+</div><!-- /panel-vision -->
+
+<!-- ============ results: the same for the Chat and the Vision tab (a picture only adds rows to the Summary) ============ -->
+<div id="results">
 <!-- ============ answer + headline numbers ============ -->
 <section class="card answer-card">
   <div class="title">Answer</div>
   <div id="answer" data-placeholder="The answer appears here."></div>
   <div id="summaryLine"></div>
+  <div id="sessionLine" title="the session of the Session card above: the Chat and the Vision tab use the same one"></div>
 </section>
 
 <div class="metrics">
@@ -280,13 +319,20 @@
   <section class="card">
     <div class="title">Summary</div>
     <table id="summaryTable">
+      <tbody>
       <tr><th>phase</th><th>time</th></tr>
       <tr><td data-tip="fetch the embedding table + all layers of weights and upload them to device MLTensors (network / disk bound)"><span class="dotted">Load weights</span></td><td id="sum-load">–</td></tr>
       <tr><td data-tip="builder.build of every subgraph (decode + prefill head / block / tail, flush, lm_head)"><span class="dotted">Build (compile) graphs</span></td><td id="sum-build">–</td></tr>
       <tr><td data-tip="tokenizer + load weights + build, until the page is ready"><span class="dotted">Startup total</span></td><td id="sum-startup">–</td></tr>
-      <tr><td data-tip="prompt → first token: host prep + all prefill dispatches + logits readback"><span class="dotted">Prefill (TTFT)</span></td><td id="sum-prefill">–</td></tr>
+      <tr><td data-tip="prompt → first token: host prep + all prefill dispatches + logits readback (with a picture: including the vision encode)"><span class="dotted">Prefill (TTFT)</span></td><td id="sum-prefill">–</td></tr>
+      </tbody>
+      <tbody id="sumImages"></tbody>
+      <tbody>
       <tr><td data-tip="average per generated token (and tokens/s)"><span class="dotted">Decode</span></td><td id="sum-decode">–</td></tr>
       <tr><td data-tip="prefill + all decode steps of the last generation"><span class="dotted">Inference total</span></td><td id="sum-inference">–</td></tr>
+      <tr><td data-tip="prompt tokens (of them image tokens) + generated tokens of the last generation"><span class="dotted">Tokens (prompt + new)</span></td><td id="sum-tokens">–</td></tr>
+      <tr><td data-tip="rows of the KV cache the last generation used, of what this session holds (max length - 1)"><span class="dotted">Cache rows</span></td><td id="sum-cache">–</td></tr>
+      </tbody>
     </table>
   </section>
   <section class="card">
@@ -348,52 +394,12 @@
   <div class="title">Decode segment profile <i class="tip" data-tip="profile=1: after a generation the next decode step is re-run segment by segment (each followed by a sync) and as one chain; 20 runs, ms per step.\nHover a row name for what it measures.">i</i></div>
   <div class="tablewrap"><table id="profileTable"><tr><th>segment</th><th>JS enqueue</th><th>device wait</th><th>total ms</th></tr></table></div>
 </section>
-
-</div><!-- /panel-chat -->
-
-<!-- ============ Vision tab: a picture + a question (packages with an image tower) ============ -->
-<div id="panel-vision" style="display:none">
-<section class="card">
-  <div class="title">Picture</div>
-  <div class="fields">
-    <div id="dropZone" tabindex="0" role="button">Drop a picture here, paste one (Ctrl+V) or click to choose a file<input type="file" id="imageInput" accept="image/*" hidden></div>
-    <label class="field"><span>Sample<i class="tip" data-tip="The pictures of the image test suite (bench/raw/vision-suite): choosing one also fills in its question.">i</i></span><select id="sampleSelect" style="min-width:170px"></select></label>
-    <label class="field"><span>Detail<i class="tip" data-tip="How many image tokens the picture may become: the runtime picks the grid preset from the size and the aspect ratio of the picture.\nAuto: up to 24x24 patches = 144 image tokens.\nLow (fast): up to 16x16 = 64 tokens.\nHigh: up to 32x32 = 256 tokens (small text, fine details; slower, and no gain for a picture smaller than that).\nPictures are never blown up far beyond their own size.">i</i></span>
-      <select id="detailSelect"><option value="auto">Auto</option><option value="low">Low (fast)</option><option value="high">High (text, small details)</option></select></label>
-    <label class="actions" style="margin:0;padding-bottom:6px"><input type="checkbox" id="showBlocks" checked> show the image-token blocks</label>
-  </div>
-  <div class="visionview">
-    <canvas id="modelView" style="display:none" title="what the model sees: the picture resized to the pixels of the chosen grid; every block is one image token"></canvas>
-    <div><div id="visionCaption">No picture yet.</div><div id="visionSession" title="the session of the Session card above: the Chat and the Vision tab use the same one"></div></div>
-  </div>
-</section>
-<section class="card">
-  <div class="title">Question</div>
-  <div class="quick">
-    <button type="button" data-question="describe">Describe</button><button type="button" data-question="ocr">Read all text (OCR)</button><button type="button" data-question="count">Count objects</button><button type="button" data-question="colors">Colors</button>
-  </div>
-  <textarea id="visionQuestion" aria-label="Question"></textarea>
-  <div class="actions">
-    <label>Max new tokens <input id="visionMaxNew" type="number" value="128" min="1"></label>
-    <label title="temperature 0: the same answer every time (the package recommends sampling parameters otherwise)"><input type="checkbox" id="visionGreedy"> Deterministic (greedy)</label>
-    <button id="visionRun" class="primary" disabled title="Ctrl+Enter in the question also generates">Generate</button>
-    <span id="visionHint" class="hint">Add a picture first.</span>
-  </div>
-</section>
-<section class="card answer-card">
-  <div class="title">Answer</div>
-  <div id="visionAnswer" data-placeholder="The answer appears here."></div>
-</section>
-<section class="card">
-  <div class="title">Timing</div>
-  <div class="tablewrap"><table id="visionTiming"><tr><th>step</th><th>time</th></tr><tr class="v-dim"><td colspan="2" style="text-align:left">Generate an answer to see the split.</td></tr></table></div>
-</section>
-</div><!-- /panel-vision -->
+</div><!-- /results -->
 
 <details class="card">
   <summary>Log</summary>
   <div id="log"></div>
 </details>
-<script type="module" src="chat.js?v=20261127a"></script>
+<script type="module" src="chat.js?v=20261127b"></script>
 </body>
 </html>
