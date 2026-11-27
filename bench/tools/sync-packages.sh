@@ -12,10 +12,12 @@ if [ "${1:-}" = "--ir" ]; then
   mkdir -p "$bench/ir" && cp "$here"/python/_out/qwen3-4b/*.json "$bench/ir/" && echo "bench/ir: $(ls "$bench/ir" | wc -l) graphs"
 fi
 mkdir -p "$bench/packages"
-for name in tiny-pkg tiny-qwen35-pkg aion-2.3b-i8 qwen3-4b-pkg-i8 gemma4-e4b-pkg qwen35-4b-pkg qwen35-4b-pkg-gqa qwen35-4b-pkg-gqa16 qwen35-4b-pkg-split qwen35-4b-vl-pkg qwen35-4b-vl-int8g128-pkg qwen35-4b-vl-float16-pkg qwen35-4b-vl-int4-pkg; do
+for name in tiny-pkg tiny-qwen35-pkg tiny-window-pkg tiny-gemma4-window-pkg aion-2.3b-i8 aion-2.3b-i8-window qwen3-4b-pkg-i8 gemma4-e4b-pkg gemma4-e4b-pkg-window qwen35-4b-pkg qwen35-4b-pkg-gqa qwen35-4b-pkg-gqa16 qwen35-4b-pkg-split qwen35-4b-vl-pkg qwen35-4b-vl-int8g128-pkg qwen35-4b-vl-float16-pkg qwen35-4b-vl-int4-pkg; do
   src="$here/python/_out/$name"
   [ "$name" = tiny-pkg ] && src="$here/tests/golden/tiny-package"
   [ "$name" = tiny-qwen35-pkg ] && src="$here/tests/golden/tiny-qwen35-package"
+  [ "$name" = tiny-window-pkg ] && src="$here/tests/golden/tiny-window-package"
+  [ "$name" = tiny-gemma4-window-pkg ] && src="$here/tests/golden/tiny-gemma4-window-package"
   if [ -d "$src" ] && [ ! -e "$bench/packages/$name" ]; then
     cmd //c mklink //J "$(cygpath -w "$bench/packages/$name")" "$(cygpath -w "$src")" >/dev/null && echo "linked packages/$name"
   fi
@@ -27,8 +29,8 @@ const fs = require("fs"), path = require("path"), dir = process.argv[1];
 const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory() || d.isSymbolicLink()).map((d) => d.name).filter((n) => fs.existsSync(path.join(dir, n, "m2w.json"))).map((id) => {
   const index = JSON.parse(fs.readFileSync(path.join(dir, id, "m2w.json"), "utf8")), plan = JSON.parse(fs.readFileSync(path.join(dir, id, "plan.json"), "utf8"));
   // listed by default: one entry per model (text, or text + image); the test models and the experiment siblings (attention variants, other vision weight formats, the same package under a second name, the text-only Qwen3.5: the image package runs text alone too) only with ?dev=1
-  const experiment = /^qwen35-4b-pkg(-gqa|-gqa16|-split)?$|^qwen35-4b-vl-(int8g128|float16|int4)-pkg$/.test(id), dev = id.startsWith("tiny-") || experiment;
-  const name = id === "tiny-pkg" ? "tiny hybrid test model" : id === "tiny-qwen35-pkg" ? "tiny Qwen3.5 test model" : String(index.source || id).split("/").pop().replace(/-Instruct$|-it$/, "");
+  const experiment = /^qwen35-4b-pkg(-gqa|-gqa16|-split)?$|^qwen35-4b-vl-(int8g128|float16|int4)-pkg$|-window$/.test(id), dev = id.startsWith("tiny-") || experiment;
+  const name = id === "tiny-pkg" ? "tiny hybrid test model" : id === "tiny-qwen35-pkg" ? "tiny Qwen3.5 test model" : id === "tiny-window-pkg" ? "tiny hybrid test model, sliding window caches" : id === "tiny-gemma4-window-pkg" ? "tiny Gemma 4 test model, sliding window caches" : String(index.source || id).split("/").pop().replace(/-Instruct$|-it$/, "");
   const kind = plan.vision ? "text + image" : "text";
   return { id, label: dev ? `${name} · ${kind}${experiment ? ` · ${id}` : ""}` : `${name} · ${kind}`, url: `${id}/`, dev };
 }).sort((x, y) => x.dev - y.dev || x.label.localeCompare(y.label));

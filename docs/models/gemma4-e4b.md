@@ -69,3 +69,17 @@ The estimate of `bench/raw/m2wgraphs.html` (single graphs, the same weights disp
   (`b<j>_x` -> layer first + j (feed-forward half) / first + j + 1 (attention half), producer from `kv_producer`), so nothing else model specific is in the plan. A package built without K has no such table
   and a runtime asked for K reports which K it has.
 * **Not checked here:** the NPU compiler on these graphs (compile time, whether the output `updated_key` that also feeds a later block's concat is accepted, speed). Re-time with `bench/raw/m2wgraphs.html`.
+
+## Sliding window KV caches (`--sliding-cache window`)
+
+By default every layer holds a K / V cache of `max_length - 1` rows, although the 35 sliding layers (window 512) only ever attend the last 512 positions. With `m2w compile ... --sliding-cache window`
+(or `rebuild-graphs --sliding-cache window`) the layers of type `sliding_attention` that own a cache keep a **ring** of `plan.profile.sliding_ring` rows instead (768 here: `roundup64(511 + the largest chunk)`;
+`full` stays the default until a package is validated on the device). Design and the ring size: [docs/superpowers/specs/2026-11-27-sliding-window-kv-design.md](../superpowers/specs/2026-11-27-sliding-window-kv-design.md).
+
+* **Slots.** Position `p` lives in slot `p mod ring` (RoPE is applied before caching and softmax does not care about the order of the keys, so only the mask knows which slot holds what): a prefill chunk writes its rows
+  with the one-hot selectors at slots `(start + i) mod ring`, the flush of the staging buffer at `(base + i) mod ring`; a flush that wraps is nothing special.
+* **Masks.** Columns of a sliding layer are `[ring slots | chunk rows]` (prefill), `[ring slots | staging rows]` (decode) and `[ring slots]` for a layer that shares K / V in a prefill chunk (it reads the producer's ring after
+  the update of the chunk, which is why the ring has `W - 1 + chunk` rows). The host derives which position every slot holds (`protocol.slot_positions`); full-attention layers are unchanged.
+* **Graphs.** Only the cache length of the sliding kinds changes (`sliding_attention_own` / `_shared` BLOCK graphs, the sliding flush graph, the group graphs that contain them); there are as many graphs as without the option.
+  A max length whose cache is not longer than the ring (`max_length - 1 <= sliding_ring`) is the same as `full`. The staged protocol is the only one of Gemma 4 anyway.
+* **Runtime / estimate.** `Gemma4LLM` allocates `cacheRows(type, P, ring)` rows per layer, one selector pair per distinct cache size; `memory.ts kvRowsFor` gives the same number to the memory hint.
