@@ -86,7 +86,7 @@
   .panel > summary::after { content: ""; margin-left: auto; width: 8px; height: 8px; border-right: 2px solid var(--dim); border-bottom: 2px solid var(--dim); transform: rotate(45deg); transition: transform .15s; }
   details.panel[open] > summary::after { transform: rotate(-135deg); }
   .pi { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 8px; color: var(--pc, var(--accent)); background: color-mix(in srgb, var(--pc, var(--accent)) 17%, transparent); }
-  .p-model { --pc: var(--violet); } .p-session { --pc: var(--blue); } .p-adv { --pc: var(--amber); }
+  .p-model { --pc: var(--violet); } .p-device { --pc: var(--teal); } .p-session { --pc: var(--blue); } .p-adv { --pc: var(--amber); }
   .fl { display: flex; align-items: center; gap: 6px; margin: 12px 0 6px; font-size: 12.5px; font-weight: 600; color: var(--dim); }
   .fl:first-of-type { margin-top: 0; }
   .advbody .fl:first-child { margin-top: 0; }
@@ -424,7 +424,12 @@
   <section class="panel p-model">
     <h2><span class="pi"><svg class="ic"><use href="#i-box"/></svg></span>Model<i class="tip" data-tip="Qwen3-4B with the hand-written graphs offers every option.&#10;The other entries are packages built by m2w: they offer the options they were compiled with.&#10;Changing the model reloads the page.">i</i></h2>
     <select id="modelSelect" hidden aria-label="Model"></select>
-    <select id="deviceSelect" hidden aria-label="Device"></select>   <!-- not shown: the device comes from the URL (device=npu|gpu|cpu) -->
+  </section>
+
+  <!-- Device card: HIDDEN for now (the GPU path is not optimized; the device comes from the URL, device=npu|gpu|cpu). To show it again: delete the `hidden` attribute of this <section>. -->
+  <section class="panel p-device" hidden>
+    <h2><span class="pi"><svg class="ic"><use href="#i-cpu"/></svg></span>Device<i class="tip" data-tip="WebNN device type. Changing it reloads the page (new context, weights are re-read from the cache).">i</i></h2>
+    <select id="deviceSelect" hidden aria-label="Device"></select>
   </section>
 
   <section class="panel p-session">
@@ -630,6 +635,6 @@
     </div>
   </div>
 </div>
-<script type="module" src="chat.js?v=20261127i"></script>
+<script type="module" src="chat.js?v=20261127j"></script>
 </body>
 </html>

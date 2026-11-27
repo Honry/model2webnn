@@ -1095,6 +1095,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     };
     // ---- the controls of the page are chip groups over the (hidden) selects: the selects stay the source of truth for every script
     chipGroup(modelSelect, { variant: "rows", format: formats.model, label: "Model" });
+    chipGroup(deviceSelect, { variant: "segmented", format: (option) => ({ main: option.textContent }), label: "Device" });
     chipGroup(maxLengthSelect, { format: formats.maxLength, label: "Max length" });
     chipGroup(chunkSizeSelect, { label: "Prefill chunk" });
     for (const [select, label] of [[blocksSelect, "Decode blocks per graph"], [prefillBlocksSelect, "Prefill blocks per graph"], [computeTypeSelect, "Compute type"], [kvStyleSelect, "KV update"], [stagingRowsSelect, "Staging rows"]]) chipGroup(select, { label });
