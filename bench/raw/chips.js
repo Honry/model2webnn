@@ -55,7 +55,7 @@ export function chipGroup(select, { variant = "chips", format = defaultFormat, l
 
 // formats of the selects of the page
 export const formats = {
-    /** "1152 tokens  (KV cache 72 MB)" -> 1152 and the memory this length is expected to need (data-memory, else the KV size) */
+    /** "1024 tokens  (KV cache 64 MB)" -> 1024 and the memory this length is expected to need (data-memory, else the KV size) */
     maxLength: (option) => { const m = /^(\d+)\s*tokens\s*\(KV cache (\d+) MB\)/.exec(option.textContent.trim()); return m ? { main: m[1], sub: option.dataset.memory || `${m[2]} MB`, title: option.title || option.textContent.trim() } : defaultFormat(option); },
     /** "qwen: Qwen3.5-4B · text + image" -> a name and its tags */
     model: (option) => {

@@ -21,7 +21,7 @@
 //                                  HEAD/BLOCK/TAIL (S = 1), both KV-update graphs, the KV cache tensors, the activation tensors
 //
 // URL parameters (long name | legacy alias; the session options kvStyle, stagingRows, blocksPerGraph, prefillBlocksPerGraph, prefillChunkSizes, computeType can also be picked on the page):
-//   device=npu|gpu     maxLength = 1152 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = (default: the answer may use the rest of the cache)     layers|L = 36
+//   device=npu|gpu     maxLength = 1024 (= pastLength|P + 1)     prefillChunkSize|chunk = 256     maxNewTokens|maxNew = (default: the answer may use the rest of the cache)     layers|L = 36
 //   system=<text>   a system prompt for the whole conversation (packages with a chat format)   question=<text>   the message in the box   image=<url>   a picture attached to it (packages with an image tower)   detail=auto|low|high
 //   prompt=...  |  promptFile=long-prompt.txt&promptChars=N (the first N characters of a text file + an instruction)     autoRun|auto = 1 (load immediately, generate once, finish; otherwise the page waits for the "Load model" button)
 //   kvStyle=staged (default: decode updates a small staging buffer, flushed into the main cache every stagingRows=64 steps) | onehot (whole-cache update) | scatterND (in-graph KV update as scatterND, value cache in natural layout)   kvInPlace=1 (KV update writes into the tensor it reads, no second cache)   tag=<label for the result file>     parallelDownloads=6 (weight files downloaded at the same time into the OPFS cache)
@@ -32,6 +32,7 @@ import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/tr
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache, annotateMaxLengths } from "./chat-package.js?v=10";
 import { looksLikeMemoryError, nextSmallerLength } from "../../lib/runtime/index.js";
+import { buildPromptOfTokens, answerReserve, minLengthForPrompt } from "./prompt-text.js?v=1";
 import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=5";
 import { chipGroup, formats } from "./chips.js?v=2";
 import { createLoadProgress } from "./progress-ui.js?v=2";
@@ -52,7 +53,7 @@ const modelId = param("model", null, "js");   // "js": the built-in hand-written
 // default prefill chunk 256 (was 64): every prefill dispatch dequantizes the int4 weights again whatever the chunk size, so a bigger chunk is much cheaper per token (05 notes 27.20-27.22; a short
 // prompt costs somewhat more than with 64). NPUW does the same with one static prefill graph (its default is 1024, too slow for us).
 const defaultChunkSize = +param("prefillChunkSize", "chunk", 256);
-const defaultMaxLength = query.get("maxLength") ? +query.get("maxLength") : +param("pastLength", "P", 1151) + 1;   // KV cache capacity
+const defaultMaxLength = query.get("maxLength") ? +query.get("maxLength") : +param("pastLength", "P", 1023) + 1;   // KV cache capacity
 
 const layerCount = +param("layers", "L", 36);
 const autoRun = param("autoRun", "auto", "0") === "1";
@@ -117,7 +118,7 @@ applySessionOptions(urlSessionOptions);
 // and bind the f16 weights to the block graphs (no dequantization inside the graphs). dequantizeAt=device|host chooses where that happens.
 const weightFormat = param("weightFormat", "wf", "int4"), dequantizeAt = param("dequantizeAt", null, "device");
 // kvInPlace=1: the KV-update graph reads and writes the SAME MLTensor (past_key == updated_key, past_value == updated_value) instead of ping-ponging
-// between two buffers; saves the spare cache (about 0.3 GB at max length 1152). Whether the runtime accepts an input tensor as an output is what this tests.
+// between two buffers; saves the spare cache (about 0.3 GB at max length 1024). Whether the runtime accepts an input tensor as an output is what this tests.
 const keyValueInPlace = param("kvInPlace", null, "0") === "1";
 if (weightFormat === "float16") setWeightLayout("float16");
 const { E: hiddenSize, NH: numAttentionHeads, KVH: numKeyValueHeads, D: headDim, VOCAB: vocabularySize } = CFG;
@@ -1063,16 +1064,26 @@ The options come from the package plan; the hand-written Qwen3-4B graphs offer t
     setStatus(IDLE_STATUS);
     if (!packageMode) byId("pipelineSummary").textContent = `Qwen3-4B (hand-written graphs): ${layerCount} layers, all full attention · hidden ${hiddenSize} · ${numAttentionHeads} heads (${numKeyValueHeads} KV, head dim ${headDim}) · FFN ${CFG.FF} · vocab ${vocabularySize} · int4 weights, group 128`;
 
-    // prompt presets of different length (the paragraph is repeated to reach roughly the stated number of prompt tokens)
-    const paragraph = "The history of computing stretches from mechanical calculators to modern neural processors. Early machines filled whole rooms and executed a few " +
-        "operations per second, while today a thin laptop carries a dedicated accelerator that performs trillions of low-precision operations every second. " +
-        "Engineers keep moving work from general purpose processors to specialised units because moving data costs far more energy than computing on it. ";
-    const repeated = (count) => "Summarize the following text in two sentences.\n\n" + Array(count).fill(paragraph).join("\n");
+    // prompt presets: two short ones and 1k / 2k / 4k-token prompts (built for the tokenizer in use, see prompt-text.js); a long one is enabled only while the selected max length holds it and the room for the answer
     const presets = [
-        ["Poem", "Write a short poem about the sea."],
-        ["Capital", "What is the capital of France?"],
-        ["~250 tok", repeated(3)], ["~500 tok", repeated(6)], ["~900 tok", repeated(11)],
+        { name: "Poem", text: "Write a short poem about the sea." },
+        { name: "Capital", text: "What is the capital of France?" },
+        { name: "1k", tokens: 1024 }, { name: "2k", tokens: 2048 }, { name: "4k", tokens: 4096 }, { name: "8k", tokens: 8192 },
     ];
+    const presetCache = new Map();   // preset index -> { text, exact } (exact: counted with the loaded tokenizer; before the first load the length is estimated from the characters)
+    let pendingPreset = null;
+    const presetText = (index) => {
+        const preset = presets[index];
+        if (!preset.tokens) return preset.text;
+        const cached = presetCache.get(index);
+        if (cached && (cached.exact || !model)) return cached.text;
+        const count = model ? (text) => model.countTurns([{ user: text, images: 0 }], system) : (text) => Math.round(text.length / 4.1) + 40;
+        const built = buildPromptOfTokens(preset.tokens, count);
+        presetCache.set(index, { text: built.text, exact: !!model });
+        return built.text;
+    };
+    const presetNeeds = (index) => minLengthForPrompt(presets[index].tokens, [...maxLengthSelect.options].map((option) => +option.value));
+    const presetFits = (index) => { const capacity = +maxLengthSelect.value - 1; return presets[index].tokens + answerReserve(capacity) <= capacity; };
     const QUESTIONS = {   // the quick questions of a picture
         describe: "Describe this image in detail.",
         ocr: "Read all the text in this image. Reply with the text only.",
@@ -1080,16 +1091,33 @@ The options come from the package plan; the hand-written Qwen3-4B graphs offer t
         colors: "What are the main colors in this image, and where do they appear?",
     };
     const promptBox = byId("prompt"), presetSelect = byId("promptPreset"), runButton = byId("runButton"), greedyBox = byId("visionGreedy");
-    presets.forEach(([name], index) => presetSelect.add(new Option(name, index)));
+    presets.forEach((preset, index) => presetSelect.add(new Option(preset.name, index)));
     presetSelect.add(new Option("Custom", "custom"));
-    presetSelect.onchange = () => { if (presetSelect.value !== "custom") promptBox.value = presets[+presetSelect.value][1]; scheduleContext(); promptBox.focus(); };
+    presetSelect.onchange = () => {
+        if (presetSelect.value === "custom") return;
+        const index = +presetSelect.value;
+        promptBox.value = presetText(index); pendingPreset = presets[index].tokens && !model ? index : null;
+        scheduleContext(); promptBox.focus();
+    };
+    // the long presets follow the selected max length (and the suggestions of the empty state do too)
+    const suggestionButtons = [];
+    const refreshPresets = () => {
+        presets.forEach((preset, index) => {
+            if (!preset.tokens) { presetSelect.options[index].title = preset.text; return; }
+            const fits = presetFits(index), option = presetSelect.options[index];
+            option.disabled = !fits;
+            option.title = fits ? `a prompt of ${preset.tokens} tokens: numbered sections of text and a short question (3 bullets)` : `needs max length >= ${presetNeeds(index)} (the prompt plus room for the answer must fit the cache)`;
+        });
+        for (const { button, index } of suggestionButtons) { const fits = presetFits(index); button.classList.toggle("dim", !fits); button.title = fits ? "" : `needs max length >= ${presetNeeds(index)}`; }
+    };
+    maxLengthSelect.addEventListener("change", refreshPresets);
     if (query.get("promptFile")) {   // a long prompt: the first promptChars characters of a text file (long-prompt.txt: ~3.5 characters per token) + an instruction
         const text = await (await fetch(query.get("promptFile"))).text();
         promptBox.value = `${text.slice(0, +query.get("promptChars") || text.length)}
 
 Summarize the text above in two sentences.`; presetSelect.value = "custom";
     } else if (query.get("prompt")) { promptBox.value = query.get("prompt"); presetSelect.value = "custom"; }
-    else { presetSelect.value = 0; promptBox.value = presets[0][1]; }
+    else { presetSelect.value = 0; promptBox.value = presets[0].text; }
     if (query.get("question")) { promptBox.value = query.get("question"); presetSelect.value = "custom"; }   // question=<text> (the picture question of the old Vision tab) is the message
     else if (query.get("image") && attachments && !query.get("prompt") && !query.get("promptFile")) { promptBox.value = QUESTIONS.describe; presetSelect.value = "custom"; }
     for (const button of document.querySelectorAll("[data-question]")) button.onclick = () => { promptBox.value = QUESTIONS[button.dataset.question]; presetSelect.value = "custom"; scheduleContext(); promptBox.focus(); };
@@ -1110,15 +1138,21 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     chipGroup(maxLengthSelect, { format: formats.maxLength, label: "Max length" });
     chipGroup(chunkSizeSelect, { label: "Prefill chunk" });
     for (const [select, label] of [[blocksSelect, "Decode blocks per graph"], [prefillBlocksSelect, "Prefill blocks per graph"], [computeTypeSelect, "Compute type"], [kvStyleSelect, "KV update"], [stagingRowsSelect, "Staging rows"]]) chipGroup(select, { label });
-    chipGroup(presetSelect, { label: "Prompt preset", format: (option) => ({ main: option.textContent, title: presets[+option.value]?.[1]?.slice(0, 120) ?? "" }) });
+    chipGroup(presetSelect, { label: "Prompt preset", format: (option) => ({ main: option.textContent, title: option.title || presets[+option.value]?.text?.slice(0, 120) || "" }) });
     if (attachments) { chipGroup(byId("sampleSelect"), { label: "Sample picture", format: (option) => (option.value ? { main: option.value } : null) }); chipGroup(byId("detailSelect"), { variant: "segmented", label: "Picture detail", format: (option) => ({ main: option.textContent }) }); }
     // the empty state: a few things to try
     const suggestions = byId("suggestions");
-    const suggest = (iconName, text, action) => { const button = document.createElement("button"); button.type = "button"; button.className = "sg"; button.append(icon(iconName), text); button.onclick = action; suggestions.append(button); };
+    const suggest = (iconName, text, action, index = null) => {
+        const button = document.createElement("button"); button.type = "button"; button.className = "sg"; button.append(icon(iconName), text);
+        button.onclick = () => { if (!button.classList.contains("dim")) action(); };
+        suggestions.append(button); if (index !== null) suggestionButtons.push({ button, index });
+    };
     const usePreset = (index) => { presetSelect.value = index; presetSelect.dispatchEvent(new Event("change")); };
     suggest("text", "Write a short poem about the sea", () => usePreset(0));
     suggest("text", "What is the capital of France?", () => usePreset(1));
-    suggest("text", "Summarize a ~250-token text", () => usePreset(2));
+    suggest("text", "Summarize a 1k-token text", () => usePreset(2), 2);
+    suggest("text", "Summarize a 4k-token text", () => usePreset(4), 4);
+    refreshPresets();
     if (attachments) {
         suggest("image", "Describe a picture", () => { promptBox.value = QUESTIONS.describe; presetSelect.value = "custom"; scheduleContext(); byId("attachButton").click(); });
         suggest("image", "Read the text in a picture", () => { promptBox.value = QUESTIONS.ocr; presetSelect.value = "custom"; scheduleContext(); byId("attachButton").click(); });
@@ -1181,7 +1215,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         out.classList.toggle("over", used + reserve > capacity);
     };
     attachmentsChanged = scheduleContext;
-    promptBox.oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || preset[1] !== promptBox.value) presetSelect.value = "custom"; scheduleContext(); };
+    promptBox.oninput = () => { const preset = presets[+presetSelect.value]; if (!preset || (preset.tokens ? presetCache.get(+presetSelect.value)?.text : preset.text) !== promptBox.value) { presetSelect.value = "custom"; pendingPreset = null; } scheduleContext(); };
     updateContext();
 
     const sessionOptionsOnPage = () => ({ kvStyle: kvStyleSelect.value, stagingRows: +stagingRowsSelect.value, blocksPerGraph: +blocksSelect.value, prefillBlocksPerGraph: +prefillBlocksSelect.value, chunkSizes: parseChunkSizes(chunkSizesInput.value), computeType: computeTypeSelect.value });
@@ -1230,6 +1264,8 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             byId("loadedLabel").title = packageMode ? session.label : `max length ${maxLength}, chunk ${session.chunkSizes.join("+")}, kv ${kvStyle}${stagedKv ? ` (${stagingRows} rows)` : ""}, ${computeType}, blocks/graph ${blocksPerGraph}${prefillBlocksPerGraph !== blocksPerGraph ? ` (prefill ${prefillBlocksPerGraph})` : ""}`;
             byId("loadButton").querySelector(".lbl").textContent = "Apply"; byId("loadButton").title = "rebuild the graphs with the options above (the weights stay loaded)";
             setStatus("ready"); progressUi.done();
+            if (pendingPreset !== null && presetCache.get(pendingPreset)?.text === promptBox.value) { promptBox.value = presetText(pendingPreset); pendingPreset = null; scheduleContext(); }   // a long preset chosen before the load: counted again with the real tokenizer
+            refreshPresets();
         } catch (error) { log("fatal", "Load failed: " + String(error && error.stack ? error.stack : error).slice(0, 1500)); setStatus("FAILED: " + error); offerSmaller(error, +maxLengthSelect.value); }
         finally { setBusy(false); showSession(sessionSummary()); updateContext(); }
     };
