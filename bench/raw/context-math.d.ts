@@ -1,0 +1,14 @@
+export declare const cacheCapacity: (maxLength: number, attendInCache?: boolean) => number;
+export declare const answerReserve: (capacity: number) => number;
+export declare const reserveRows: (capacity: number, explicit?: number) => number;
+export declare const autoMaxNewTokens: (capacity: number, promptTokens: number) => number;
+export declare const rowsUsed: (promptTokens: number, generated: number, capacity: number) => { used: number; full: boolean };
+export declare const contextText: (used: number | null | undefined, capacity: number) => string;
+export declare const cacheText: (used: number, capacity: number, full?: boolean) => string;
+export declare const CONTEXT_WARN_SHARE: number;
+export declare const CONTEXT_FULL_SHARE: number;
+export declare function contextLevel(used: number | null | undefined, capacity: number): 'ok' | 'warn' | 'full';
+export declare const CONTEXT_FULL_HINT: string;
+export declare const CACHE_ALMOST_FULL_NOTE: string;
+export declare const CACHE_CUT_NOTE: string;
+export declare function liveSpeed(generated: number, elapsedMs: number): { tpotMs: number; tps: number } | null;

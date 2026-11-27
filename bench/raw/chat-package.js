@@ -201,7 +201,7 @@ export async function loadPackageModel(ui, { url, deviceType, vision = null }) {
         for await (const token of llm.generate(ids, { maxNewTokens, images, signal: options.signal, onProgress: report, ...samplingFromUrl(), ...(options.sampling ?? {}) })) {
             if (stop.has(token)) break;
             generated.push(token);
-            showText(tokenizer.decode(generated));
+            showText(tokenizer.decode(generated), generated.length);   // the count feeds the live numbers of the page
             setStatus(`decode step ${generated.length}${options.autoMax ? "" : `/${maxNewTokens}`}`);
         }
         const stopped = !!options.signal?.aborted, answer = tokenizer.decode(generated);

@@ -55,11 +55,14 @@ export function createConversation(list, { onView = null, jumpButton = null } = 
             box.dataset.placeholder = "…";
             const gp = el("div", "gp"), gpBar = el("div", "gp-bar"), gpFill = el("i"), gpText = el("span", "gp-text");   // progress while the prompt is read (before the first token)
             gp.hidden = true; gpBar.append(gpFill); gp.append(gpBar, gpText);
-            avatar.append(icon("zap")); toolbar.append(meta, el("span", "spacer")); body.append(gp, box, toolbar); message.append(avatar, body);
+            const note = el("div", "gnote"); note.hidden = true;   // a line under the answer: dimmed while the cache is almost full, red when the answer was cut
+            avatar.append(icon("zap")); toolbar.append(meta, el("span", "spacer")); body.append(gp, box, note, toolbar); message.append(avatar, body);
             append(message);
             const view = answerView(box, { barParent: toolbar });
             views.push(view);
             return { element: message, box, view,
+                /** a line under the answer: kind "warn" (dimmed) or "cut" (red); null removes it */
+                setNote(text, kind = "warn") { note.hidden = !text; note.textContent = text ?? ""; note.dataset.kind = kind; if (text) scrollToEnd(); },
                 /** { label, fraction (0..1, null = indeterminate) } or null to hide the bar */
                 setProgress(info) {
                     gp.hidden = !info;

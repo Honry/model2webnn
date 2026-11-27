@@ -4,6 +4,8 @@
 //   sourceText(minChars, seed)                    the deterministic source text
 //   buildPromptOfTokens(target, count, options)   -> { text, tokens }      count(text) = the number of prompt tokens of that message
 //   minLengthForPrompt(tokens, lengths)           the smallest max length (of `lengths`, else the exact bound) whose cache holds this prompt and the room kept free for the answer
+import { answerReserve } from "./context-math.js?v=2";
+export { answerReserve };
 export const INSTRUCTION = "\n\nSummarize the text above in 3 short bullet points.";
 
 const SUBJECTS = ["The early engineers", "A small research laboratory", "The regional archive", "Several independent teams", "The museum curator", "A group of students", "The harbour authority", "The old observatory",
@@ -54,8 +56,6 @@ export function buildPromptOfTokens(target, count, { instruction = INSTRUCTION, 
     return best;
 }
 
-/** The room kept free for the answer when the history is trimmed (the same rule as the page's trimming): min(512, a quarter of the cache). */
-export const answerReserve = (capacity) => Math.min(512, Math.floor(capacity / 4));
 /** The smallest max length of `lengths` whose cache (max length - 1 rows) holds `tokens` plus the reserve; when none does, the exact bound. */
 export function minLengthForPrompt(tokens, lengths = []) {
     const fits = (length) => tokens + answerReserve(length - 1) <= length - 1;
