@@ -30,7 +30,7 @@
 //   weightFormat|wf = int4 (default) | float16 (build-time dequantization, see above)    dequantizeAt = device|host
 import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
-import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache, annotateMaxLengths } from "./chat-package.js?v=10";
+import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache, annotateMaxLengths } from "./chat-package.js?v=11";
 import { looksLikeMemoryError, nextSmallerLength } from "../../lib/runtime/index.js";
 import { buildPromptOfTokens, answerReserve, minLengthForPrompt } from "./prompt-text.js?v=1";
 import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=5";

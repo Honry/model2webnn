@@ -3,7 +3,7 @@
 import type { ModelSpecJson, Plan, WeightsManifest } from './package.js';
 import { cacheRows, ringOf } from './protocol.js';
 
-/** A fixed overhead added to weights + KV cache: the browser, the graph compiler and the activations. Calibrated on ONE NPU measurement (a 4B text model at the largest max length); refit when more points exist. */
+/** A fixed overhead added to weights + KV cache: the browser, the graph compiler and the activations. Calibrated on NPU measurements of a 4B text model at two max lengths (the growth with the length matched the double-buffered KV size, the rest is this constant); refit when other models are measured. */
 export const FIXED_OVERHEAD_BYTES = 2 * 2 ** 30;
 
 /** The files that are read on the host and never become device tensors (Gemma 4's per-layer embedding table is read one row per token). */

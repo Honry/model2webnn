@@ -28,7 +28,7 @@ export function annotateMaxLengths(select, pkg, vision) {
         option.dataset.memory = `~${formatBytes(need.totalBytes)}`;
         option.title = `max length ${need.maxLength}: about ${formatBytes(need.totalBytes)} of memory in total\n`
             + `device weights ${formatBytes(need.weightBytes)} + KV cache ${formatBytes(need.kvBytes)} + fixed overhead ${formatBytes(need.overheadBytes)} (browser, graph compiler, activations)\n`
-            + "An estimate calibrated on one measurement, not a measurement of your machine: the browser hides the real RAM, so pick what your machine can hold.";
+            + "An estimate calibrated on measurements of one model, not a measurement of your machine: the browser hides the real RAM, so pick what your machine can hold.";
     }
 }
 
