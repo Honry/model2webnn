@@ -4,7 +4,7 @@
 //   sourceText(minChars, seed)                    the deterministic source text
 //   buildPromptOfTokens(target, count, options)   -> { text, tokens }      count(text) = the number of prompt tokens of that message
 //   minLengthForPrompt(tokens, lengths)           the smallest max length (of `lengths`, else the exact bound) whose cache holds this prompt and the room kept free for the answer
-import { answerReserve } from "./context-math.js?v=2";
+import { answerReserve } from "./context-math.js?v=4";
 export { answerReserve };
 export const INSTRUCTION = "\n\nSummarize the text above in 3 short bullet points.";
 

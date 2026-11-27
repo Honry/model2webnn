@@ -11,8 +11,13 @@ export const reserveRows = (capacity, explicit = 0) => (explicit > 0 ? explicit 
 export const autoMaxNewTokens = (capacity, promptTokens) => Math.max(1, capacity - promptTokens);
 /** The rows a turn uses (prompt + generated so far), clamped to the capacity, and whether the cache is full. */
 export const rowsUsed = (promptTokens, generated, capacity) => { const total = promptTokens + generated; return { used: Math.min(total, capacity), full: total >= capacity }; };
-export const contextText = (used, capacity) => `Context ${used == null ? "–" : Math.min(used, capacity)} / ${capacity}`;   // never more than the capacity
-export const cacheText = (used, capacity, full) => `${Math.min(used, capacity)} / ${capacity}${full ? " · FULL" : ""}`;
+/** The numbers the page SHOWS for a number of cache rows: the denominator is the max length itself (`limit`), the numerator the rows used, never more than the real capacity (so a full cache reads
+ *  max length - 1 / max length). Every displayed "n / m" goes through here; the rules (trimming, reserve, levels, FULL) keep working on the real rows. */
+export const shownRows = (used, capacity, limit = capacity) => ({ used: used == null ? null : Math.min(used, capacity), limit });
+export const contextText = (used, capacity, limit = capacity) => { const shown = shownRows(used, capacity, limit); return `Context ${shown.used ?? "–"} / ${shown.limit}`; };
+export const cacheText = (used, capacity, full, limit = capacity) => { const shown = shownRows(used, capacity, limit); return `${shown.used} / ${shown.limit}${full ? " · FULL" : ""}`; };
+/** Why a full cache reads max length - 1 / max length (the tooltip); empty when the protocol uses the whole max length as rows. */
+export const lastPositionHint = (capacity, limit) => (limit > capacity ? "The last position lives in the staging buffer: the cache holds max length - 1 rows plus the token being computed." : "");
 /** How full the cache is, as a share of its capacity: from CONTEXT_WARN_SHARE the level is "warn" (amber), from CONTEXT_FULL_SHARE "full" (red). The thresholds live here, in one place. */
 export const CONTEXT_WARN_SHARE = 0.8;
 export const CONTEXT_FULL_SHARE = 0.95;

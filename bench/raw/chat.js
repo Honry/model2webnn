@@ -32,8 +32,8 @@ import { AutoTokenizer, env } from "https://cdn.jsdelivr.net/npm/@huggingface/tr
 import { CFG, ropeRows } from "./layer.js?v=20261119x";
 import { listPackages, peekPackage, loadPackageModel, setupPackageControls, clearPackageCache, annotateMaxLengths } from "./chat-package.js?v=12";
 import { looksLikeMemoryError, nextSmallerLength } from "../../lib/runtime/index.js";
-import { buildPromptOfTokens, minLengthForPrompt } from "./prompt-text.js?v=3";
-import { cacheCapacity, answerReserve, reserveRows, autoMaxNewTokens, rowsUsed, contextText, cacheText, liveSpeed, contextLevel, contextPreview, contextNote, CONTEXT_FULL_HINT, CACHE_ALMOST_FULL_NOTE, CACHE_CUT_NOTE } from "./context-math.js?v=3";
+import { buildPromptOfTokens, minLengthForPrompt } from "./prompt-text.js?v=4";
+import { cacheCapacity, answerReserve, reserveRows, autoMaxNewTokens, rowsUsed, contextText, cacheText, liveSpeed, contextLevel, contextPreview, contextNote, CONTEXT_FULL_HINT, CACHE_ALMOST_FULL_NOTE, CACHE_CUT_NOTE, lastPositionHint } from "./context-math.js?v=4";
 import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=7";
 import { chipGroup, formats } from "./chips.js?v=2";
 import { createLoadProgress } from "./progress-ui.js?v=4";
@@ -1201,6 +1201,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     // KV rows: the prompt and the answer must fit. The capacity of a SESSION (the loaded one, or the one a send builds) and the capacity of the max length that is SELECTED now (what the next session will have) come from one rule (context-math.js)
     const capacityOf = (session) => session.pastLength ?? cacheCapacity(session.maxLength);
     const selectedCapacity = () => cacheCapacity(+maxLengthSelect.value, !packageMode && attendInCache);
+    const selectedLimit = () => +maxLengthSelect.value;   // what the page shows as the denominator: the max length itself (the rules use the real rows, capacity)
     // room for the answer: an explicit maxNewTokens (URL) is reserved as it is; otherwise the answer may use every row that is left, and the history is trimmed so that at least min(512, a quarter of the cache) rows stay free
     const reserveOf = (capacity, explicit) => reserveRows(capacity, explicit);
 
@@ -1208,20 +1209,22 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     let contextTimer = null;
     const scheduleContext = () => { autosize(); clearTimeout(contextTimer); contextTimer = setTimeout(() => updateContext(), 150); };
     // the numbers of the turn that is being answered, updated at most once per frame while tokens stream in (the final values come from the runtime's result)
-    const live = { active: false, prompt: 0, capacity: 0, generated: 0, firstAt: 0, frame: 0 };
-    let lastTurn = null;   // { used, full, capacity } of the last (or the running) turn: shown in the Cache chip only while its capacity is the one of the selected max length
+    const live = { active: false, prompt: 0, capacity: 0, limit: 0, generated: 0, firstAt: 0, frame: 0 };
+    let lastTurn = null;   // { used, full, capacity, limit } of the last (or the running) turn: shown in the Cache chip only while its capacity is the one of the selected max length
     const showCache = () => {
-        const capacity = selectedCapacity(), match = lastTurn && lastTurn.capacity === capacity;
-        setCell("sum-cache", match ? cacheText(lastTurn.used, capacity, lastTurn.full) : "–", match ? (lastTurn.full ? "the KV cache is full: the answer was cut" : "rows of the KV cache this turn used, of what the session holds") : "the last turn ran with another max length");
+        const capacity = selectedCapacity(), limit = selectedLimit(), match = lastTurn && lastTurn.capacity === capacity;
+        const positionHint = lastPositionHint(capacity, limit);
+        setCell("sum-cache", match ? cacheText(lastTurn.used, capacity, lastTurn.full, limit) : "–", match ? `${lastTurn.full ? "the KV cache is full: the answer was cut" : `rows of the KV cache this turn used, of the max length ${limit}`}${positionHint ? `. ${positionHint}` : ""}` : "the last turn ran with another max length");
         byId("chip-cache").classList.toggle("full", !!match && lastTurn.full);
         byId("chip-cache").dataset.level = match ? (lastTurn.full ? "full" : contextLevel(lastTurn.used, capacity)) : "ok";   // neutral / amber from 80% / red from 95%
     };
+    const positionTip = (capacity, limit) => { const hint = lastPositionHint(capacity, limit); return hint ? ` ${hint}` : ""; };
     const levelHint = (level) => (level === "ok" ? "" : ` ${level === "full" ? "The cache is (almost) full." : "The cache is getting full."} ${CONTEXT_FULL_HINT}`);
     const renderLive = () => {
         live.frame = 0;
         if (!live.active) return;
         const { used, full } = rowsUsed(live.prompt, live.generated, live.capacity);
-        lastTurn = { used, full, capacity: live.capacity };
+        lastTurn = { used, full, capacity: live.capacity, limit: live.limit };
         setCell("sum-tokens", `${live.prompt} + ${live.generated}`);
         showCache(); updateContext();
         if (activeBubble) activeBubble.setNote(contextLevel(used, live.capacity) === "full" ? CACHE_ALMOST_FULL_NOTE : null, "warn");   // dimmed, removed when the turn ends normally
@@ -1229,29 +1232,29 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         if (speed) { setMetric("metric-tpot", rounded(speed.tpotMs), "ms/token", ""); setMetric("metric-tps", rounded(speed.tps), "tokens/s", ""); }
     };
     const noteTokens = (count) => { if (!live.active || !count) return; live.generated = count; if (!live.firstAt) live.firstAt = performance.now(); if (!live.frame) live.frame = requestAnimationFrame(renderLive); };
-    const startLive = (prompt, capacity) => { Object.assign(live, { active: true, prompt, capacity, generated: 0, firstAt: 0 }); };
+    const startLive = (prompt, capacity, limit) => { Object.assign(live, { active: true, prompt, capacity, limit, generated: 0, firstAt: 0 }); };
     const stopLive = () => { live.active = false; cancelAnimationFrame(live.frame); live.frame = 0; };
-    // the context meter: prompt tokens / capacity. Before the first load only the capacity is known; while an answer streams it shows the running turn; otherwise the history + the draft in the box (+ attached pictures)
+    // the context meter: tokens used / max length (the real rows are one fewer: lastPositionHint). Before the first load only the capacity is known; while an answer streams it shows the running turn; otherwise the history + the draft in the box (+ attached pictures)
     const updateContext = () => {
         const out = byId("promptTokenCount");
         const note = byId("ctxHint"), setNote = (value) => { note.hidden = !value; note.textContent = value?.text ?? ""; note.dataset.level = value?.level ?? ""; };
-        if (live.active) { setNote(null); const level = contextLevel(live.prompt + live.generated, live.capacity); out.dataset.level = level; out.textContent = contextText(live.prompt + live.generated, live.capacity); out.title = `The running answer: ${live.prompt} prompt tokens + ${live.generated} generated of the ${live.capacity} rows of the cache.${levelHint(level)}`; return; }
-        const capacity = selectedCapacity();
-        if (!model) { setNote(null); out.dataset.level = "ok"; out.textContent = contextText(null, capacity); out.title = `The cache of a session with this max length holds ${capacity} rows. Token counts appear after the model is loaded.`; return; }
+        if (live.active) { setNote(null); const level = contextLevel(live.prompt + live.generated, live.capacity); out.dataset.level = level; out.textContent = contextText(live.prompt + live.generated, live.capacity, live.limit); out.title = `The running answer: ${live.prompt} prompt tokens + ${live.generated} generated, of the max length ${live.limit}.${positionTip(live.capacity, live.limit)}${levelHint(level)}`; return; }
+        const capacity = selectedCapacity(), limit = selectedLimit();
+        if (!model) { setNote(null); out.dataset.level = "ok"; out.textContent = contextText(null, capacity, limit); out.title = `A session with this max length holds ${limit} tokens (prompt + answer). Token counts appear after the model is loaded.`; return; }
         const explicit = +byId("maxNewTokensInput").value || 0, reserve = reserveOf(capacity, explicit), message = { text: promptBox.value, images: attachments?.items ?? [] };
         const idle = !message.text.trim() && !message.images.length && lastTurn && lastTurn.capacity === capacity;   // nothing being composed: the rows the last turn used
         if (idle) {
             const level = contextLevel(lastTurn.used, capacity);
-            setNote(null); out.dataset.level = level; out.textContent = contextText(lastTurn.used, capacity);
-            out.title = `The last turn used ${lastTurn.used} of the ${capacity} rows of the cache (prompt + answer).${levelHint(level)}`;
+            setNote(null); out.dataset.level = level; out.textContent = contextText(lastTurn.used, capacity, limit);
+            out.title = `The last turn used ${lastTurn.used} of the max length ${limit} (prompt + answer).${positionTip(capacity, limit)}${levelHint(level)}`;
             return;
         }
         // composing: what the next prompt will hold = the history that is kept after the oldest turns that do not fit are dropped + the draft (+ picture tokens), clamped to the capacity
         const fit = fitHistory(capacity, message, explicit), total = countConversation(liveTurns(), message), alone = countConversation([], message);
         const preview = contextPreview({ total, kept: fit.own, own: alone, capacity, reserve });
         const level = preview.level, shown = contextNote(preview);
-        setNote(shown); out.dataset.level = level; out.textContent = contextText(preview.used, capacity);
-        out.title = `The next prompt holds ${preview.used} tokens (history ${preview.used - alone} + this message ${alone}) of the ${capacity} rows of the cache; the answer may use the rest. ${shown ? (shown.level === "full" ? "This message alone does not leave room for an answer: choose a larger Max length (applied at Load) or shorten it." : `Older turns are dropped when less than ${reserve} rows would be left: ${preview.overflow} tokens of history go.`) : `Older turns are dropped when less than ${reserve} rows would be left.`}${levelHint(level)}`;
+        setNote(shown); out.dataset.level = level; out.textContent = contextText(preview.used, capacity, limit);
+        out.title = preview.tooLong ? `This message alone needs ${alone} tokens: it leaves no room for an answer within the max length ${limit}.${positionTip(capacity, limit)}${levelHint(level)}` : `The next prompt holds ${preview.used} tokens (history ${preview.used - alone} + this message ${alone}) of the max length ${limit}; the answer may use the rest. ${shown ? (shown.level === "full" ? "This message alone does not leave room for an answer: choose a larger Max length (applied at Load) or shorten it." : `Older turns are dropped when less than ${reserve} rows would be left: ${preview.overflow} tokens of history go.`) : `Older turns are dropped when less than ${reserve} rows would be left.`}${levelHint(level)}`;
     };
     // another max length chip: the capacity everywhere follows at once (meter, Cache chip, the long presets)
     maxLengthSelect.addEventListener("change", () => { updateContext(); showCache(); });
@@ -1316,7 +1319,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
     const showRunResult = (result, session) => {
         const capacity = capacityOf(session), { used, full } = rowsUsed(result.promptTokens, result.generated, capacity);
         setCell("sum-tokens", `${result.promptTokens}${result.imageTokens ? ` (${result.imageTokens} image)` : ""} + ${result.generated}`);
-        lastTurn = { used, full, capacity }; showCache();
+        lastTurn = { used, full, capacity, limit: session.maxLength }; showCache();
         byId("chip-images").hidden = !(result.images ?? []).length; byId("chip-images-v").textContent = `${result.imageTokens ?? 0} tok`;
         renderImageRows(byId("sumImages"), result.images ?? [], packagePeek?.model.vision, result.visionMs);
         return full;
@@ -1346,7 +1349,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
         const capacity = capacityOf(session), { reserve, kept, dropped, own } = fitHistory(capacity, message, explicit);
         if (own + reserve <= capacity) return { ok: true, kept, dropped, used: own };
         if (own + Math.min(reserve, 16) <= capacity) return { ok: true, kept, dropped, room: capacity - own, used: own };
-        return { ok: false, message: `Not sent: this message needs ${own} prompt tokens, but max length ${session.maxLength} holds ${capacity} cache rows, which leaves no room for an answer. Choose a larger Max length (it is chosen at Load) or a lower picture Detail.` };
+        return { ok: false, message: `Not sent: this message needs ${own} prompt tokens, but max length ${session.maxLength} leaves no room for an answer. Choose a larger Max length (it is chosen at Load) or a lower picture Detail.` };
     };
     const send = async () => {
         if (busy) return;
@@ -1389,7 +1392,7 @@ Summarize the text above in two sentences.`; presetSelect.value = "custom";
             bubble.setProgress({ label: "Preparing the prompt…", fraction: null }); activeBubble = bubble;
             turns.push(turn);
             const maxNewTokens = explicit > 0 ? explicit : autoMaxNewTokens(capacityOf(session), plan.used);   // automatic: every row that is left (the end-of-turn token still ends the answer)
-            startLive(plan.used, capacityOf(session));
+            startLive(plan.used, capacityOf(session), session.maxLength);
             const sources = [...plan.kept, turn].flatMap((item) => item.images).map((image) => ({ source: image.bitmap, name: image.name, detail: image.detail }));   // the pictures of the history are encoded again with the prompt
             const result = await model.generate(session, text, maxNewTokens, { turns: [...plan.kept.map((item) => runtimeTurn(item, true)), runtimeTurn(turn, false)], images: sources, system,
                 sampling: greedyBox.checked ? { temperature: 0 } : undefined, autoMax: explicit <= 0,

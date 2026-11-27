@@ -1,6 +1,6 @@
 // bench/raw/context-math.js: the capacity / context arithmetic of the chat page.
 import { describe, expect, it } from 'vitest';
-import { answerReserve, autoMaxNewTokens, cacheCapacity, cacheText, CONTEXT_FULL_SHARE, CONTEXT_WARN_SHARE, contextLevel, contextNote, contextPreview, contextText, liveSpeed, reserveRows, rowsUsed } from '../../bench/raw/context-math.js';
+import { answerReserve, autoMaxNewTokens, cacheCapacity, cacheText, CONTEXT_FULL_SHARE, CONTEXT_WARN_SHARE, contextLevel, contextNote, contextPreview, contextText, lastPositionHint, liveSpeed, shownRows, reserveRows, rowsUsed } from '../../bench/raw/context-math.js';
 
 describe('capacity', () => {
   it('is max length - 1 rows (the whole max length when the protocol attends over the updated cache), and follows the chosen length', () => {
@@ -33,6 +33,18 @@ describe('rows used', () => {
     expect(contextText(188, 127)).toBe('Context 127 / 127');   // never more than the capacity
     expect(cacheText(63, 1023, false)).toBe('63 / 1023');
     expect(cacheText(1200, 1023, true)).toBe('1023 / 1023 · FULL');
+  });
+  it('the denominator shown is the max length, the numerator the real rows (a full cache reads max length - 1 / max length)', () => {
+    expect(shownRows(53, 1023, 1024)).toEqual({ used: 53, limit: 1024 });
+    expect(shownRows(5000, 1023, 1024)).toEqual({ used: 1023, limit: 1024 });
+    expect(shownRows(null, 1023, 1024)).toEqual({ used: null, limit: 1024 });
+    expect(contextText(53, 1023, 1024)).toBe('Context 53 / 1024');
+    expect(contextText(null, 1023, 1024)).toBe('Context – / 1024');
+    expect(contextText(2154, 1023, 1024)).toBe('Context 1023 / 1024');
+    expect(cacheText(28, 1023, false, 1024)).toBe('28 / 1024');
+    expect(cacheText(1500, 1023, true, 1024)).toBe('1023 / 1024 · FULL');
+    expect(lastPositionHint(1023, 1024)).toContain('max length - 1 rows plus the token being computed');
+    expect(lastPositionHint(1024, 1024)).toBe('');   // the protocol that attends over the updated cache uses the whole max length
   });
 });
 
