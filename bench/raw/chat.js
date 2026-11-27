@@ -35,7 +35,7 @@ import { looksLikeMemoryError, nextSmallerLength } from "../../lib/runtime/index
 import { buildPromptOfTokens, answerReserve, minLengthForPrompt } from "./prompt-text.js?v=1";
 import { createConversation, createAttachments, renderImageRows, icon } from "./chat-ui.js?v=5";
 import { chipGroup, formats } from "./chips.js?v=2";
-import { createLoadProgress } from "./progress-ui.js?v=2";
+import { createLoadProgress } from "./progress-ui.js?v=3";
 import { createOverlays, placePopover, createTooltips } from "./overlay.js?v=1";
 import { renderPipeline, updatePipelineSession } from "./pipeline.js?v=1";
 import {

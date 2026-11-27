@@ -252,6 +252,16 @@ describe('Qwen3.5: abort between the prefill chunks', () => {
 describe('Qwen3.5: progress events', () => {
   beforeAll(() => { if (!(globalThis as any).Float16Array) throw new Error('needs Node 24+'); });
 
+  it('the announced total of graph builds is exact for block groups and several prefill chunk sizes', async () => {
+    for (const options of [{ blocksPerGraph: 2 }, { blocksPerGraph: 3 }, { blocksPerGraph: 5 }, { blocksPerGraph: 1, chunkSizes: [16, 32] }, { blocksPerGraph: 2, chunkSizes: [16, 32] }, { blocksPerGraph: 3, prefillBlocksPerGraph: 1, chunkSizes: [32, 16] }]) {
+      const events: any[] = [];
+      const { llm } = await loaded({ ...options, onProgress: (e: any) => events.push(e) } as any);
+      const builds = events.filter((e) => e.stage === 'build');
+      expect(builds.length, JSON.stringify(options)).toBe(llm.stats.graphBuilds.length);
+      expect(new Set(builds.map((e) => e.total)), JSON.stringify(options)).toEqual(new Set([builds.length]));
+    }
+  });
+
   it('reports every graph build as n of m (m known up front, also for a reconfigure) and the prefill as chunk n of m', async () => {
     const events: any[] = [];
     const { llm, context } = await loaded({ onProgress: (e: any) => events.push(e) });

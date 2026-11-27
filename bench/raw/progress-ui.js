@@ -72,11 +72,10 @@ export function createLoadProgress({ roots, topBar }) {
                 case "embedding": actText = "Reading the embedding table…"; break;
                 case "build":
                     if (/^build vision/.test(p.message ?? "")) break;   // the first use of a picture grid is shown with the message, not here
-                    if (p.total) { build.frac = p.loaded / p.total; build.indeterminate = false; actText = `Building graph ${Math.min(p.loaded + 1, p.total)} / ${p.total} · ${p.message ?? ""}`; }
+                    if (p.total) { build.frac = Math.min((p.loaded + 0.5) / p.total, 0.98); build.indeterminate = false;   // p.loaded = graphs finished: the one in progress counts half; the step is full only at "state" / "ready" actText = `Building graph ${Math.min(p.loaded + 1, p.total)} / ${p.total} · ${p.message ?? ""}`; }
                     else { build.indeterminate = true; actText = `Building graph · ${p.message ?? ""}`; }
                     break;
                 case "weights":
-                    if (build.frac < 1) { build.frac = 1; build.indeterminate = false; }
                     upload.frac = p.total ? (p.loaded + 1) / p.total : 0; actText = `Uploading weights to the device · layer ${p.loaded + 1} / ${p.total}`;
                     break;
                 case "vision": {
