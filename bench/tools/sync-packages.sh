@@ -26,8 +26,8 @@ node -e '
 const fs = require("fs"), path = require("path"), dir = process.argv[1];
 const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory() || d.isSymbolicLink()).map((d) => d.name).filter((n) => fs.existsSync(path.join(dir, n, "m2w.json"))).map((id) => {
   const index = JSON.parse(fs.readFileSync(path.join(dir, id, "m2w.json"), "utf8")), plan = JSON.parse(fs.readFileSync(path.join(dir, id, "plan.json"), "utf8"));
-  // listed by default: one entry per model (text, or text + image); the test models and the experiment siblings (attention variants, other vision weight formats, the same package under a second name) only with ?dev=1
-  const experiment = /-(gqa|gqa16|split)$|^qwen35-4b-vl-(int8g128|float16|int4)-pkg$/.test(id), dev = id.startsWith("tiny-") || experiment;
+  // listed by default: one entry per model (text, or text + image); the test models and the experiment siblings (attention variants, other vision weight formats, the same package under a second name, the text-only Qwen3.5: the image package runs text alone too) only with ?dev=1
+  const experiment = /^qwen35-4b-pkg(-gqa|-gqa16|-split)?$|^qwen35-4b-vl-(int8g128|float16|int4)-pkg$/.test(id), dev = id.startsWith("tiny-") || experiment;
   const name = id === "tiny-pkg" ? "tiny hybrid test model" : id === "tiny-qwen35-pkg" ? "tiny Qwen3.5 test model" : String(index.source || id).split("/").pop().replace(/-Instruct$|-it$/, "");
   const kind = plan.vision ? "text + image" : "text";
   return { id, label: dev ? `${name} · ${kind}${experiment ? ` · ${id}` : ""}` : `${name} · ${kind}`, url: `${id}/`, dev };
