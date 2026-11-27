@@ -2,8 +2,8 @@
 // shows this number as a hint on every max length and leaves the choice to the user. It is an ESTIMATE, not a measurement.
 import type { ModelSpecJson, Plan, WeightsManifest } from './package.js';
 
-/** Assumption, not a measurement: while a model is loaded its weights exist on the device and again as staging copies / compiled graphs, so the weight bytes count this many times (the KV cache counts once). */
-export const WEIGHT_OVERHEAD = 1.3;
+/** A fixed overhead added to weights + KV cache: the browser, the graph compiler and the activations. Calibrated on ONE NPU measurement (a 4B text model at the largest max length); refit when more points exist. */
+export const FIXED_OVERHEAD_BYTES = 2 * 2 ** 30;
 
 /** The files that are read on the host and never become device tensors (Gemma 4's per-layer embedding table is read one row per token). */
 const HOST_ROLES = new Set(['ple_table']);
@@ -40,12 +40,11 @@ export function kvBytes(model: ModelSpecJson, plan: Plan | undefined, maxLength:
   return bytes;
 }
 
-export interface MemoryNeed { maxLength: number; weightBytes: number; kvBytes: number; overheadBytes: number; /** weights * WEIGHT_OVERHEAD + KV cache */ totalBytes: number }
-/** What a max length is expected to need: the device weights times the overhead factor, plus the KV cache of that length. `vision`: the image tower is loaded. */
+export interface MemoryNeed { maxLength: number; weightBytes: number; kvBytes: number; overheadBytes: number; /** weights + KV cache + FIXED_OVERHEAD_BYTES */ totalBytes: number }
+/** What a max length is expected to need: the device weights + the KV cache of that length + a fixed overhead. `vision`: the image tower is loaded. */
 export function expectedMemory(input: { model: ModelSpecJson; plan: Plan; manifest: WeightsManifest; maxLength: number; vision?: boolean }): MemoryNeed {
   const weightBytes = deviceWeightBytes(input.manifest, { vision: input.vision }), kv = kvBytes(input.model, input.plan, input.maxLength);
-  const overheadBytes = weightBytes * (WEIGHT_OVERHEAD - 1);
-  return { maxLength: input.maxLength, weightBytes, kvBytes: kv, overheadBytes, totalBytes: weightBytes + overheadBytes + kv };
+  return { maxLength: input.maxLength, weightBytes, kvBytes: kv, overheadBytes: FIXED_OVERHEAD_BYTES, totalBytes: weightBytes + kv + FIXED_OVERHEAD_BYTES };
 }
 
 /** "5.1 GB" below 10 GB, "12 GB" above; "640 MB" below 1 GB. */

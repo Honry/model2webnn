@@ -3,7 +3,7 @@
 // (generate takes the whole conversation: options.turns, the pictures of all its turns in options.images, a signal to stop).
 // What a package offers is fixed when it is compiled (max lengths, prefill chunks, graph variants = KV protocol x compute type x staging rows, blocks per graph): the page offers exactly that,
 // and a change of any session option rebuilds the graphs of the loaded model (LLM.reconfigure) while the weights stay on the device.
-import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs, kvBytes, expectedMemory, formatBytes, WEIGHT_OVERHEAD } from "../../lib/runtime/index.js";
+import { loadModel, CachedSource, UrlSource, openPackage, buildPrompt, tokenizerFromTransformersJs, kvBytes, expectedMemory, formatBytes } from "../../lib/runtime/index.js";
 
 const TRANSFORMERS_URL = "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/transformers.min.js";
 const packagesUrl = new URL("../packages/", import.meta.url);
@@ -27,8 +27,8 @@ export function annotateMaxLengths(select, pkg, vision) {
         const need = expectedMemory({ model: pkg.model, plan: pkg.plan, manifest: pkg.manifest, maxLength: +option.value, vision: !!vision && !!pkg.plan.vision });
         option.dataset.memory = `~${formatBytes(need.totalBytes)}`;
         option.title = `max length ${need.maxLength}: about ${formatBytes(need.totalBytes)} of memory in total\n`
-            + `device weights ${formatBytes(need.weightBytes)} + overhead x${WEIGHT_OVERHEAD} (an assumption: staging copies, compiled graphs) ${formatBytes(need.overheadBytes)} + KV cache ${formatBytes(need.kvBytes)}\n`
-            + "An estimate, not a measurement: the browser hides the real RAM, so pick what your machine can hold.";
+            + `device weights ${formatBytes(need.weightBytes)} + KV cache ${formatBytes(need.kvBytes)} + fixed overhead ${formatBytes(need.overheadBytes)} (browser, graph compiler, activations)\n`
+            + "An estimate calibrated on one measurement, not a measurement of your machine: the browser hides the real RAM, so pick what your machine can hold.";
     }
 }
 

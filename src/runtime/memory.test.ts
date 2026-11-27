@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { deviceWeightBytes, expectedMemory, formatBytes, kvBytes, kvRowsFor, looksLikeMemoryError, nextSmallerLength, WEIGHT_OVERHEAD } from './memory.js';
+import { deviceWeightBytes, expectedMemory, FIXED_OVERHEAD_BYTES, formatBytes, kvBytes, kvRowsFor, looksLikeMemoryError, nextSmallerLength } from './memory.js';
 import type { ModelSpecJson, Plan, WeightsManifest } from './package.js';
 
 const MB = 2 ** 20, GB = 2 ** 30;
@@ -32,12 +32,12 @@ describe('device weight bytes', () => {
 describe('expectedMemory', () => {
   const big = model({ num_layers: 36, layer_types: Array(36).fill('full_attention'), num_kv_heads: 8 });   // 1152 -> 324 MB, 16384 -> 4.5 GB
   const weights = manifest(['layer', 2 * GB]);
-  it('weights x the overhead factor + the KV cache of the length', () => {
+  it('weights + the KV cache of the length + a fixed overhead', () => {
     const e = expectedMemory({ model: big, plan: plan(), manifest: weights, maxLength: 1152 });
     expect(Math.round(e.kvBytes / MB)).toBe(324);
     expect(e.weightBytes).toBe(2 * GB);
-    expect(e.overheadBytes).toBeCloseTo(2 * GB * (WEIGHT_OVERHEAD - 1), 0);
-    expect(e.totalBytes).toBeCloseTo(2 * GB * WEIGHT_OVERHEAD + e.kvBytes, 0);
+    expect(e.overheadBytes).toBe(FIXED_OVERHEAD_BYTES);
+    expect(e.totalBytes).toBe(2 * GB + e.kvBytes + FIXED_OVERHEAD_BYTES);
   });
   it('grows with the max length and counts the image tower only when it is loaded', () => {
     const totals = [1152, 4096, 16384].map((maxLength) => expectedMemory({ model: big, plan: plan(), manifest: weights, maxLength }).totalBytes);

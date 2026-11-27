@@ -437,7 +437,7 @@
 
   <section class="panel p-session">
     <h2><span class="pi"><svg class="ic"><use href="#i-sliders"/></svg></span>Session</h2>
-    <div class="fl">Max length<i class="tip" data-tip="KV cache capacity = the whole conversation so far + the new tokens.&#10;Chosen at Load (changing it rebuilds the graphs; the weights stay loaded). A longer max length makes every decode step slower, because the static graphs attend the whole cache, and costs more memory: the small number on a chip is the memory that length is expected to need (an estimate: browsers hide the real RAM).">i</i><span class="sub">tokens · expected memory</span></div>
+    <div class="fl">Max length<i class="tip" data-tip="KV cache capacity = the whole conversation so far + the new tokens.&#10;Chosen at Load (changing it rebuilds the graphs; the weights stay loaded). A longer max length makes every decode step slower, because the static graphs attend the whole cache, and costs more memory: the small number on a chip is the memory that length is expected to need (an estimate calibrated on one measurement: browsers hide the real RAM).">i</i><span class="sub">tokens · expected memory</span></div>
     <select id="maxLengthSelect" hidden aria-label="Max length"></select>
     <div class="fl">Prefill chunk<i class="tip" data-tip="Prompt tokens processed per prefill dispatch (one static graph).&#10;Every dispatch pays the int4 dequantization again, so bigger chunks are cheaper per token but waste work on short prompts.">i</i><span class="sub">tokens</span></div>
     <select id="chunkSizeSelect" hidden aria-label="Prefill chunk"></select>
