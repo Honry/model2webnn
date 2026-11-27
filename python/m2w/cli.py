@@ -135,7 +135,7 @@ def main(argv=None) -> int:
         sp.add_argument("--prefill-blocks-per-graph", type=int, nargs="+", default=[1], help="the same for the prefill graphs (not for Gemma 4)")
 
     def vision_args(sp):
-        sp.add_argument("--vision-weights", choices=["int8", "int8g128", "int4", "float16"], default="int8g128", help="Qwen3.5 image tower: linear weights int8 with a scale per 128 input channels (int8g128, default: the best size / quality trade-off), int8 per row symmetric (least accurate of the int8 variants), int4 group 128 or float16")
+        sp.add_argument("--vision-weights", choices=["int8", "int8g128", "int4", "float16"], default="int8g128", help="Qwen3.5 image tower: linear weights int8 with a scale per 128 input channels (int8g128, default: the best size / quality trade-off), int8 per row symmetric (least accurate of the int8 variants), int4 group 128 (smallest, but its image tokens are clearly off the original tower: check your pictures first) or float16")
         sp.add_argument("--vision-grids", nargs="+", metavar="HxW", help="image grid presets in patches of 16 (multiples of 2), e.g. 16x16 24x24 32x24; default 16x16 24x24 32x32 16x24 24x16 24x32 32x24")
         sp.add_argument("--vision-compute-type", choices=["float32", "float16"], default="float32", help="type of the computation inside the image tower graphs (the boundaries stay f16)")
 

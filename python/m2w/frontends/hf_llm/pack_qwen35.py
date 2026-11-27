@@ -113,6 +113,9 @@ def _vision_linear(name: str, matrix: np.ndarray, weights: str, grid, errors: di
         errors[name] = float(np.square(dequantize_int4(q, scale) - matrix).sum() / max(np.square(matrix).sum(), 1e-30))   # dequantize_int4 = q * scale per block, any integer q
         return {f"{name}_weight": q, f"{name}_scale": scale}
     if weights == "int4":
+        # CAUTION, not the default (int8g128 is): the image tokens of an int4 tower are clearly off the original tower's (cosine about 0.9 per token, worst tokens far lower), while int8g128 stays
+        # close (about 0.999). The answers to the simple test pictures and to a fine-print screenshot were still as good, so the damage is not visible there, but nothing verifies busy pictures
+        # (diagrams, dense UI) where outlier tokens matter. It saves only ~160 MB of the ~2.5 GB package. Check the pictures you care about before shipping int4.
         q, scale = quantize_int4_symmetric(matrix, 128, grid)
         errors[name] = float(np.square(dequantize_int4(q, scale) - matrix).sum() / max(np.square(matrix).sum(), 1e-30))
         return {f"{name}_weight": pack_int4(q), f"{name}_scale": scale}
